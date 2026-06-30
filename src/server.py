@@ -26,7 +26,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import auth, models
 from .chunking import STRATEGIES, chunk_text
-from .config import HAIKU_CONTEXT_TOKENS, cost_usd, load_config
+from .config import HAIKU_CONTEXT_TOKENS, cost_usd, estimate_tokens, load_config
 from .context_store import ContextStore
 from .engine import ReplSession, run_query
 from .output import bound_output
@@ -246,11 +246,16 @@ def rlm_sub_query(ctx_id: str, prompt: str, chunk_index: int = -1) -> str:
 
 
 @mcp.tool()
-def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0) -> str:
-    """Map a prompt over all chunks of a context via Haiku 4.5 (concurrent), then
-    return a bounded aggregation of per-chunk findings + total tokens/cost. This
-    is map-reduce that YOU orchestrate (vs rlm_query, where the engine does).
-    Auto-chunks with config defaults if the context wasn't chunked yet."""
+def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = True) -> str:
+    """Map a prompt over the chunks of a context via Haiku 4.5 (concurrent), then by
+    default REDUCE the per-chunk findings into one synthesized answer. Map-reduce that
+    YOU orchestrate (vs rlm_query, where the engine does it). Auto-chunks with config
+    defaults if the context wasn't chunked yet.
+
+    reduce=True  (default): one coherent, de-duplicated synthesis across all chunks —
+                 best for "summarize / aggregate / what's the overall picture".
+    reduce=False: the raw per-chunk findings concatenated — when you want every piece.
+    """
     try:
         meta = STORE.get(ctx_id)
         if not meta.chunks:
@@ -266,16 +271,55 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0) -> str:
         results = sub_query_batch(prompts, sub_model, concurrency=CFG.subquery_concurrency)
         itok = sum(r.input_tokens for r in results)
         otok = sum(r.output_tokens for r in results)
-        cost = cost_usd(sub_model, itok, otok)
-        findings = "\n".join(
+        errs = [r for r in results if r.error]
+
+        note = ""
+        if max_chunks > 0 and max_chunks < n:
+            note += f"\n_NOTE: limited to first {max_chunks} of {n} chunks._"
+        if errs:
+            note += f"\n_NOTE: {len(errs)} of {len(prompts)} chunk(s) errored and were skipped._"
+        per_chunk = "\n".join(
             f"### chunk {r.index}\n" + (f"[ERROR: {r.error}]" if r.error else r.answer.strip())
             for r in results
         )
-        header = (f"## Batch sub-query over {len(prompts)} chunks ({sub_model})\n"
-                  f"tokens: {itok:,} in / {otok:,} out  |  cost: ${cost:.4f}\n\n")
-        if max_chunks > 0 and max_chunks < n:
-            header += f"_NOTE: limited to first {max_chunks} of {n} chunks._\n\n"
-        return _answer(header + findings)
+
+        def _raw(extra: str = "") -> str:
+            c = cost_usd(sub_model, itok, otok)
+            head = (f"## Batch sub-query — map over {len(prompts)} chunks ({sub_model})\n"
+                    f"tokens: {itok:,} in / {otok:,} out  |  cost: ${c:.4f}{note}{extra}\n\n")
+            return _answer(head + per_chunk)
+
+        # findings = just the successful answers, for the reduce pass
+        findings = "\n".join(f"[chunk {r.index}] {r.answer.strip()}"
+                             for r in results if not r.error and r.answer.strip())
+        if not reduce:
+            return _raw()
+        if not findings:
+            return _raw("\n_(no findings to reduce)_")
+        if estimate_tokens(findings) > 0.9 * HAIKU_CONTEXT_TOKENS:
+            return _raw("\n_(findings too large to reduce in one pass — showing raw; use "
+                        "fewer/larger chunks, or rlm_query for engine-side reduction)_")
+
+        # REDUCE: fold the per-chunk findings into one synthesis (one more sub-model call).
+        reduce_prompt = (
+            "Reduce these independent per-chunk findings from one large document into a "
+            "single answer.\n"
+            f"Original request: {prompt}\n\n"
+            f"Per-chunk findings:\n{findings}\n\n"
+            "Synthesize ONE coherent, de-duplicated answer to the original request across "
+            "all chunks. Use only what the findings contain; do not invent anything."
+        )
+        red = sub_query(reduce_prompt, sub_model, max_tokens=4096)
+        if red.error:
+            return _raw(f"\n_(reduce pass failed: {red.error}; showing raw findings)_")
+        itok += red.input_tokens
+        otok += red.output_tokens
+        cost = cost_usd(sub_model, itok, otok)
+        return _answer(
+            f"## Batch sub-query — map+reduce over {len(prompts)} chunks ({sub_model})\n"
+            f"tokens: {itok:,} in / {otok:,} out  |  cost: ${cost:.4f}{note}\n\n"
+            f"{red.answer.strip()}"
+        )
     except Exception as exc:
         return _bound(f"ERROR in rlm_sub_query_batch: {exc}")
 

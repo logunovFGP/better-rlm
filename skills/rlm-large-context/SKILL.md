@@ -37,7 +37,8 @@ Do **NOT** use them for:
 3. **Or go targeted / faster:**
    - `rlm_inspect_context(ctx_id)` — metadata + a small head preview (sanity-check what loaded).
    - `rlm_chunk_context(ctx_id)` then `rlm_sub_query_batch(ctx_id, prompt)` — map a prompt
-     over every chunk (map-reduce) for per-section findings.
+     over every chunk and synthesize ONE answer (map-reduce, default). Pass `reduce=False`
+     for the raw per-chunk findings instead.
    - `rlm_sub_query(ctx_id, prompt)` — one cheap sub-model pass (seconds) for a single question.
    - `rlm_exec(code, ctx_id)` — run your own Python over the content in the sandbox; the
      content is the `context` variable. Best for exact counts / greps / aggregations.
