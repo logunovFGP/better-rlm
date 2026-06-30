@@ -32,14 +32,14 @@ message. `rlm_status` shows the configured `mode` and the resolved `transport`.
 ## What changed vs the upstream wrapper
 - Auth: OpenRouter/`OPENROUTER_API_KEY` → **reuse your Claude Code login via the `claude` CLI** (no key, no `setup-token`); `mode: api` + `ANTHROPIC_API_KEY` optional.
 - Backend `litellm` → **`anthropic`** (litellm was removed from the engine; the old wrapper errors against `rlms 0.1.3`).
-- Models grok/gpt-4o-mini → **Sonnet 4.6 root** (Opus 4.8 override) + **Haiku 4.5 sub**.
+- Models grok/gpt-4o-mini → **Sonnet 5 root** (Opus 4.8 override) + **Haiku 4.5 sub**.
 - `environment="local"` (host exec) → **Docker sandbox by default**.
 - Inline-string context → **external on-disk store** + bounded ~4 KB tool output.
 - Pinned `rlms==0.1.3`, `mcp==1.28.1`.
 
 ## Model selection (strategy)
 Role→model mapping lives in one place — `src/models.py` (a strategy pattern), not hardcoded across the code.
-- **API key:** each role uses its configured model verbatim (root `claude-sonnet-4-6`, override `claude-opus-4-8`, sub `claude-haiku-4-5`).
+- **API key:** each role uses its configured model verbatim (root `claude-sonnet-5`, override `claude-opus-4-8`, sub `claude-haiku-4-5`).
 - **Claude Code OAuth:** each role maps to the closest **subscription-supported sibling**. Verified by a live probe: current 4.x IDs work as-is; `claude-fable-5` is mapped to `claude-opus-4-8` (the API's own guidance), and deprecated dated IDs map to their current equivalents.
 `rlm_status` prints both the configured and the resolved models for the active auth mode.
 
@@ -94,7 +94,7 @@ only findings come back.
 - `config.yaml` — `mode`, models, `max_depth`/`max_iterations`, `sandbox` (`docker`|`local`),
   `sandbox_image`, `sandbox_timeout_s`, concurrency, `output_cap_bytes`, `cli_*` knobs, chunk defaults, dirs.
 
-Model routing & cost (verified rates per MTok): Sonnet 4.6 $3/$15, Opus 4.8 $5/$25, Haiku 4.5 $1/$5.
+Model routing & cost (per MTok): Sonnet 5 $3/$15 (default root; rate cloned from 4.6 pending published pricing), Sonnet 4.6 $3/$15, Opus 4.8 $5/$25, Haiku 4.5 $1/$5.
 `rlm_query`/`rlm_sub_query*` return a per-model usage table so you can see exactly what ran on Haiku vs Sonnet.
 
 ## Rate-limit handling (throttle + auth-aware retry)

@@ -2,7 +2,7 @@
 """RLM MCP Server — Recursive Language Models over oversized contexts.
 
 Fork of eesb99/rlm-mcp, modernized for the current rlms engine:
-  * Anthropic models — Sonnet 4.6 root (Opus 4.8 override), Haiku 4.5 sub-LLM,
+  * Anthropic models — Sonnet 5 root (Opus 4.8 override), Haiku 4.5 sub-LLM,
     selected via a strategy (src/models.py): under Claude Code OAuth each role
     maps to the closest subscription-supported sibling.
   * Auth reuses Claude Code's OAuth (run `claude setup-token`) — NO API key needed;
@@ -176,7 +176,7 @@ def rlm_chunk_context(ctx_id: str, strategy: str = "", size: int = 0, overlap: i
 @mcp.tool()
 def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
     """Answer a question over a loaded context using the FULL recursive RLM loop:
-    the root model (Sonnet 4.6 by default) writes Python in a Docker sandbox to
+    the root model (Sonnet 5 by default) writes Python in a Docker sandbox to
     explore the context and delegates chunk-level work to Haiku 4.5, then returns
     a synthesized answer. This is the headline tool for giant inputs — the
     content stays in the sandbox; only the answer comes back.

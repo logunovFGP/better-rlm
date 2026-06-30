@@ -44,7 +44,7 @@ cross-file imports: [('models', 'make_user')]
 
 ## Model routing (auth-gated — ready, requires Claude Code OAuth token)
 ```
-rlm_query(ctx, "Summarize the dominant error pattern and its peak hour")   # Sonnet 4.6 root + Haiku 4.5 sub (Docker)
+rlm_query(ctx, "Summarize the dominant error pattern and its peak hour")   # Sonnet 5 root + Haiku 4.5 sub (Docker)
 rlm_query(ctx, "…", model_override="opus")                                  # Opus 4.8 root for the hardest tasks
 rlm_sub_query_batch(ctx, "List error signatures in this chunk")             # Haiku 4.5 map-reduce, concurrency 6
 ```

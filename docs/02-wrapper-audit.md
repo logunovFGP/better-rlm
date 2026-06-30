@@ -7,7 +7,7 @@ One file, `src/server.py` (341 lines), `FastMCP` + 5 task tools.
 |---|---|---|
 | Engine call | `RLM(...).completion(prompt)` — **already the current class API** | kept |
 | Backend | `backend="litellm"`, `other_backends=["litellm"]` | **BROKEN vs rlms 0.1.3** (`litellm` removed from `get_client`) → `anthropic` |
-| Models | OpenRouter `x-ai/grok-code-fast-1` / `openai/gpt-4o-mini` | → Sonnet 4.6 root (Opus 4.8 override) / Haiku 4.5 sub |
+| Models | OpenRouter `x-ai/grok-code-fast-1` / `openai/gpt-4o-mini` | → Sonnet 5 root (Opus 4.8 override) / Haiku 4.5 sub |
 | API key | `OPENROUTER_API_KEY` | → `ANTHROPIC_API_KEY` |
 | Sandbox | `environment="local"` (host exec; README admits "no additional sandboxing") | → `environment="docker"` (custom `rlm-sandbox` image) |
 | MCP SDK | `mcp>=1.0.0` (unpinned) | → pinned `mcp==1.28.1` |

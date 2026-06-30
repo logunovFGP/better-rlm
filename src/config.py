@@ -20,11 +20,15 @@ PKG_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PKG_ROOT / ".env")  # no-op if the file is absent
 
 # --- Verified Anthropic model IDs (claude-api reference) ---
-MODEL_SONNET = "claude-sonnet-4-6"  # 1M ctx — default root/orchestrator
+MODEL_SONNET_5 = "claude-sonnet-5"  # 1M ctx — current default root/orchestrator
+MODEL_SONNET = "claude-sonnet-4-6"  # 1M ctx — prior root (still selectable)
 MODEL_OPUS = "claude-opus-4-8"      # 1M ctx — root override for the hardest tasks
 MODEL_HAIKU = "claude-haiku-4-5"    # 200K ctx — cheap sub-LLM for chunk work
 
 COST_PER_MTOK: dict[str, tuple[float, float]] = {
+    # Cost is informational only on the OAuth/CLI path (it draws on the subscription).
+    # Sonnet 5 rates cloned from Sonnet 4.6 pending published pricing.
+    MODEL_SONNET_5: (3.0, 15.0),
     MODEL_SONNET: (3.0, 15.0),
     MODEL_OPUS: (5.0, 25.0),
     MODEL_HAIKU: (1.0, 5.0),
@@ -33,7 +37,7 @@ COST_PER_MTOK: dict[str, tuple[float, float]] = {
 HAIKU_CONTEXT_TOKENS = 200_000
 
 _DEFAULTS: dict[str, Any] = {
-    "root_model": MODEL_SONNET,
+    "root_model": MODEL_SONNET_5,
     "root_model_override": MODEL_OPUS,
     "sub_model": MODEL_HAIKU,
     "max_depth": 2,

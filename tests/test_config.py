@@ -1,9 +1,16 @@
-from src.config import MODEL_HAIKU, MODEL_SONNET, cost_usd, estimate_tokens, load_config
+from src.config import (
+    MODEL_HAIKU,
+    MODEL_SONNET,
+    MODEL_SONNET_5,
+    cost_usd,
+    estimate_tokens,
+    load_config,
+)
 
 
 def test_defaults():
     c = load_config()
-    assert c.root_model == MODEL_SONNET
+    assert c.root_model == MODEL_SONNET_5
     assert c.sub_model == MODEL_HAIKU
     assert c.use_docker is True
     assert c.output_cap_bytes == 4096
