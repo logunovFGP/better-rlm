@@ -9,7 +9,8 @@ Fork of eesb99/rlm-mcp, modernized for the current rlms engine:
     ANTHROPIC_API_KEY is an opt-in fallback only.
   * Docker REPL sandbox by default (host exec only as a documented fallback).
   * External on-disk context store so giant logs/dumps never enter the root context.
-  * Bounded tool output (~4 KB) — only metadata/findings flow back to the model.
+  * Bounded tool output — raw-content tools capped tight (~4 KB) so file content never
+    floods the root context; synthesis answers (rlm_query/sub_query) bound generously.
 
 Run:  python -m src.server   (stdio transport)
 """
@@ -50,7 +51,16 @@ def _get_repl() -> ReplSession:
 
 
 def _bound(text: str) -> str:
+    # Raw-content tools (load/inspect/chunk/exec/vars/status): keep the tiny cap so
+    # raw file content never floods the root context.
     return bound_output(text, CFG.output_cap_bytes)
+
+
+def _answer(text: str) -> str:
+    # Synthesis tools (rlm_query / rlm_sub_query[_batch]): the answer IS the
+    # deliverable (already bounded by the model's max_output_tokens), so bound it
+    # generously, not at the raw-content cap.
+    return bound_output(text, CFG.answer_cap_bytes)
 
 
 def _meta_block(meta) -> str:
@@ -197,7 +207,7 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
             f"{r['input_tokens']:,} in / {r['output_tokens']:,} out, ${r['cost_usd']:.4f}"
             for r in res["usage"]
         )
-        return _bound(
+        return _answer(
             f"## RLM answer (root: {res['root_model']}, sub: {res['sub_model']})\n\n{res['answer']}\n\n"
             f"---\n**Model routing / usage:**\n{rows}\n"
             f"**Total cost:** ${res['cost_usd']:.4f}  |  **Time:** {res['execution_time']}s"
@@ -227,7 +237,7 @@ def rlm_sub_query(ctx_id: str, prompt: str, chunk_index: int = -1) -> str:
         res = sub_query(f"{prompt}\n\n--- CONTEXT ---\n{body}", sub_model)
         if res.error:
             return _bound(f"ERROR ({sub_model}): {res.error}")
-        return _bound(
+        return _answer(
             f"## Sub-query answer ({sub_model})\n\n{res.answer}\n\n---\n"
             f"tokens: {res.input_tokens:,} in / {res.output_tokens:,} out"
         )
@@ -265,7 +275,7 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0) -> str:
                   f"tokens: {itok:,} in / {otok:,} out  |  cost: ${cost:.4f}\n\n")
         if max_chunks > 0 and max_chunks < n:
             header += f"_NOTE: limited to first {max_chunks} of {n} chunks._\n\n"
-        return _bound(header + findings)
+        return _answer(header + findings)
     except Exception as exc:
         return _bound(f"ERROR in rlm_sub_query_batch: {exc}")
 
@@ -356,7 +366,8 @@ def rlm_status() -> str:
         f"- configured models → root: {CFG.root_model} | override: {CFG.root_model_override} | sub: {CFG.sub_model}\n"
         f"- sandbox: {CFG.sandbox} (image: {CFG.sandbox_image})\n"
         f"- max_depth: {CFG.max_depth}, max_iterations: {CFG.max_iterations}\n"
-        f"- output cap: {CFG.output_cap_bytes} bytes, sub-query concurrency: {CFG.subquery_concurrency}\n"
+        f"- output cap: {CFG.output_cap_bytes} B (raw content) / {CFG.answer_cap_bytes:,} B (answers), "
+        f"sub-query concurrency: {CFG.subquery_concurrency}\n"
         f"- docker CLI available: {docker_ok}\n"
         f"- loaded contexts ({len(ids)}): {', '.join(ids[:20]) or 'none'}\n"
         f"- store dir: {CFG.store_dir}"

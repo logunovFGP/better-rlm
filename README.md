@@ -34,7 +34,7 @@ message. `rlm_status` shows the configured `mode` and the resolved `transport`.
 - Backend `litellm` → **`anthropic`** (litellm was removed from the engine; the old wrapper errors against `rlms 0.1.3`).
 - Models grok/gpt-4o-mini → **Sonnet 5 root** (Opus 4.8 override) + **Haiku 4.5 sub**.
 - `environment="local"` (host exec) → **Docker sandbox by default**.
-- Inline-string context → **external on-disk store** + bounded ~4 KB tool output.
+- Inline-string context → **external on-disk store** + bounded tool output (raw content ~4 KB; synthesis answers bound generously).
 - Pinned `rlms==0.1.3`, `mcp==1.28.1`.
 
 ## Model selection (strategy)
@@ -98,7 +98,7 @@ only findings come back.
 - `.env` — usually **empty**. Optional `CLAUDE_CODE_OAUTH_TOKEN` (headless box, no keychain) or
   `ANTHROPIC_API_KEY` (for `mode: api`). Credentials stay host-side; they never enter the container.
 - `config.yaml` — `mode`, models, `max_depth`/`max_iterations`, `sandbox` (`docker`|`local`),
-  `sandbox_image`, `sandbox_timeout_s`, concurrency, `output_cap_bytes`, `cli_*` knobs, chunk defaults, dirs.
+  `sandbox_image`, `sandbox_timeout_s`, concurrency, `output_cap_bytes` (raw) / `answer_cap_bytes` (synthesis), `cli_*` knobs, chunk defaults, dirs.
 
 Model routing & cost (per MTok): Sonnet 5 $3/$15 (default root; rate cloned from 4.6 pending published pricing), Sonnet 4.6 $3/$15, Opus 4.8 $5/$25, Haiku 4.5 $1/$5.
 `rlm_query`/`rlm_sub_query*` return a per-model usage table so you can see exactly what ran on Haiku vs Sonnet.

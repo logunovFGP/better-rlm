@@ -14,6 +14,8 @@ def test_defaults():
     assert c.sub_model == MODEL_HAIKU
     assert c.use_docker is True
     assert c.output_cap_bytes == 4096
+    # synthesis answers are bound far more generously than raw-content tool output
+    assert c.answer_cap_bytes > c.output_cap_bytes
 
 
 def test_cost_usd_sonnet():
