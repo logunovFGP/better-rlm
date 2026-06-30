@@ -6,11 +6,13 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
 echo "==> Python env (.venv, 3.12) + dependencies"
+# Idempotent: create the venv only if missing (uv errors on an existing venv unless
+# --clear is passed), but always (re)install deps. For a clean rebuild: rm -rf .venv first.
 if command -v uv >/dev/null 2>&1; then
-  uv venv --python 3.12 .venv
+  [ -d .venv ] || uv venv --python 3.12 .venv
   uv pip install --python .venv/bin/python -e ".[dev,pdf]"
 else
-  python3 -m venv .venv
+  [ -d .venv ] || python3 -m venv .venv
   .venv/bin/pip install -U pip
   .venv/bin/pip install -e ".[dev,pdf]"
 fi
