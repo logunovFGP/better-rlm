@@ -1,4 +1,8 @@
 # RLM MCP server configuration. Values here override the baked-in defaults in src/config.py.
+mode: auto                             # auto | claude-cli | api. auto: prefer the `claude` CLI
+                                       # (reuses your Claude Code login — no token/API key needed),
+                                       # else fall back to ANTHROPIC_API_KEY. Override per-launch
+                                       # with the RLM_MODE env var. claude-cli forces the CLI; api forces the SDK.
 root_model: claude-sonnet-4-6          # default root/orchestrator (1M ctx)
 root_model_override: claude-opus-4-8   # override for the hardest tasks (1M ctx)
 sub_model: claude-haiku-4-5            # cheap sub-LLM for chunk work (200K ctx)

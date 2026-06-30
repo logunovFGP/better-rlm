@@ -55,8 +55,13 @@ _DEFAULTS: dict[str, Any] = {
     "throttle_min_interval_s": 1.0,    # >= this many seconds between dispatches
     "oauth_retry_waits": [5, 10, 15],  # 429 backoff on OAuth (tight subscription limits)
     "apikey_retry_waits": [1, 2, 4],   # 429 backoff on API key (higher limits)
-    # Claude Code CLI transport (see transport.py). Under OAuth the server drives
-    # the official `claude` CLI instead of the HTTP API, so OAuth "just works" via
+    # Transport mode: auto | claude-cli | api. "auto" prefers the `claude` CLI
+    # (reuse the Claude Code login — no token/key needed) and falls back to the
+    # API key. Overridable per-launch with the RLM_MODE env var (e.g. in the
+    # `claude mcp add -e RLM_MODE=claude-cli` registration).
+    "mode": "auto",
+    # Claude Code CLI transport (see transport.py). Under claude-cli mode the server
+    # drives the official `claude` CLI instead of the HTTP API, so it "just works" via
     # the existing Claude Code login — no token plumbing, no premium-model gating.
     "cli_path": "claude",
     "cli_system_prompt_mode": "replace",  # replace (clean RLM prompt; verified to keep premium access) | append
@@ -105,6 +110,7 @@ class Config:
     throttle_min_interval_s: float
     oauth_retry_waits: tuple[float, ...]
     apikey_retry_waits: tuple[float, ...]
+    mode: str
     cli_path: str
     cli_system_prompt_mode: str
     cli_timeout_s: int
@@ -146,6 +152,8 @@ def load_config() -> Config:
         throttle_min_interval_s=float(m["throttle_min_interval_s"]),
         oauth_retry_waits=tuple(float(x) for x in m["oauth_retry_waits"]),
         apikey_retry_waits=tuple(float(x) for x in m["apikey_retry_waits"]),
+        # RLM_MODE env wins over config.yaml so the mode can be set at registration.
+        mode=str(os.getenv("RLM_MODE") or m["mode"]).strip().lower(),
         cli_path=str(m["cli_path"]),
         cli_system_prompt_mode=str(m["cli_system_prompt_mode"]),
         cli_timeout_s=int(m["cli_timeout_s"]),

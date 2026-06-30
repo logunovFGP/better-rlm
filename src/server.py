@@ -329,22 +329,25 @@ def rlm_status() -> str:
     RESOLVED models, loaded contexts, and sandbox/Docker availability."""
     import shutil
     docker_ok = shutil.which("docker") is not None
-    auth_mode = auth.auth_status()
     claude_cli = shutil.which(CFG.cli_path)
-    transport = ("cli (claude CLI)" if auth_mode == "oauth"
-                 else "api (Anthropic SDK)" if auth_mode == "apikey" else "none")
-    strat = models.get_strategy(CFG, auth_mode)
+    creds = auth.auth_status()  # which explicit credential exists (display only)
+    try:
+        resolved = auth.resolve_auth_mode(CFG)      # "oauth" (CLI) | "apikey" (SDK)
+        transport = "cli (claude CLI)" if resolved == "oauth" else "api (Anthropic SDK)"
+    except Exception as exc:
+        resolved, transport = None, f"UNRESOLVED — {exc}"
+    strat = models.get_strategy(CFG, resolved or "apikey")
     root = strat.model_for(models.Role.ROOT)
     override = strat.model_for(models.Role.OVERRIDE)
     sub = strat.model_for(models.Role.SUB)
     ids = STORE.list_ids()
     return _bound(
         "## RLM MCP status\n"
-        f"- auth: {auth_mode}  (oauth = reusing Claude Code login via `claude setup-token`)\n"
-        f"- transport: {transport}  "
-        f"(oauth drives the `claude` CLI; apikey uses the Anthropic SDK)\n"
+        f"- mode (configured): {CFG.mode}   (auto | claude-cli | api; RLM_MODE env overrides)\n"
+        f"- transport (resolved): {transport}\n"
         f"- claude CLI ({CFG.cli_path}): {'found at ' + claude_cli if claude_cli else 'NOT FOUND on PATH'}"
         f"  | system-prompt mode: {CFG.cli_system_prompt_mode}, safe-mode: {CFG.cli_safe_mode}\n"
+        f"- explicit credentials present: {creds}  (claude-cli mode needs NONE — the CLI uses its own login)\n"
         f"- selection strategy: {type(strat).__name__}\n"
         f"- resolved models → root: {root} | override: {override} | sub: {sub}\n"
         f"- configured models → root: {CFG.root_model} | override: {CFG.root_model_override} | sub: {CFG.sub_model}\n"
@@ -358,11 +361,14 @@ def rlm_status() -> str:
 
 
 def main() -> None:
-    logger.info("Starting RLM MCP server (auth=%s root=%s sub=%s sandbox=%s)",
-                auth.auth_status(),
-                models.select(CFG, models.Role.ROOT),
-                models.select(CFG, models.Role.SUB),
-                CFG.sandbox)
+    try:
+        mode = auth.resolve_auth_mode(CFG)
+        logger.info("Starting RLM MCP server (mode=%s transport=%s root=%s sub=%s sandbox=%s)",
+                    CFG.mode, mode, models.select(CFG, models.Role.ROOT),
+                    models.select(CFG, models.Role.SUB), CFG.sandbox)
+    except Exception as exc:
+        logger.warning("Starting RLM MCP server (mode=%s) — transport not yet resolvable: %s",
+                       CFG.mode, exc)
     mcp.run()
 
 

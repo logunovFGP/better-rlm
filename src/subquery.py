@@ -12,7 +12,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from .auth import auth_status
+from .auth import resolve_auth_mode
 from .config import load_config
 from .ratelimit import retry_and_queue_retries
 from .transport import get_transport
@@ -32,7 +32,7 @@ class SubResult:
 @retry_and_queue_retries
 def _call(model: str, prompt: str, max_tokens: int,
           system: str | None) -> tuple[str, int, int]:
-    transport = get_transport(auth_status(), _CFG)
+    transport = get_transport(resolve_auth_mode(_CFG), _CFG)
     res = transport.complete(
         [{"role": "user", "content": prompt}], system, model, max_tokens)
     return res.text, res.input_tokens, res.output_tokens

@@ -12,23 +12,25 @@ Python REPL and recursively sub-querying it, instead of pushing it into the prom
 **This is a supplement, not a replacement** for Claude Code's native tools. Reach for it when
 an input is too big to read directly; for normal feature work and small files, native tools win.
 
-## Auth — reuses your Claude Code login, no API key
-This server authenticates the **same way Claude Code does**, and a transport **Strategy**
-(`src/transport.py`) decides *how* each model call is made:
+## Auth — reuses your Claude Code login, zero setup
+A transport **Strategy** (`src/transport.py`) decides *how* each model call is made, selected by
+**`mode`** (`config.yaml` or the `RLM_MODE` env var):
 
-- **OAuth (default):** run `claude setup-token` once (requires a Claude subscription), put the
-  token in `.env`, and the server **drives the official `claude` CLI** (`claude -p`) for every
-  completion — it does **not** call the HTTP API. The CLI is itself the authorized Claude Code
-  tool, so a subscription "just works": no token plumbing into requests and **no premium-model
-  gating** to work around. **No Anthropic API key is needed.**
-- **API key (fallback):** if only `ANTHROPIC_API_KEY` is set, calls go over the Anthropic SDK.
+- **`claude-cli`** — the server **drives the official `claude` CLI** (`claude -p`) for every
+  completion; it does **not** call the HTTP API. The CLI authenticates from your **existing Claude
+  Code login** (keychain), so there's **nothing to set up**: no API key, no `setup-token`, no token
+  in `.env` — and no premium-model gating to work around. (A `CLAUDE_CODE_OAUTH_TOKEN` in the env is
+  still honored, e.g. for a headless box with no keychain.)
+- **`api`** — calls go over the Anthropic SDK using `ANTHROPIC_API_KEY`.
+- **`auto`** (default) — prefer the `claude` CLI when it's installed (reuse the Claude Code login,
+  zero setup); otherwise fall back to `ANTHROPIC_API_KEY`.
 
-The function interface is identical in both modes; only the transport swaps, and both run behind
-the same throttle + auth-aware retry. On missing credentials the server **fails fast** with a
-clear message. `rlm_status` shows `auth:` and `transport:` (cli vs api).
+The function interface is identical in every mode; only the transport swaps, and both run behind the
+same throttle + auth-aware retry. If no transport is available the server **fails fast** with a clear
+message. `rlm_status` shows the configured `mode` and the resolved `transport`.
 
 ## What changed vs the upstream wrapper
-- Auth: OpenRouter/`OPENROUTER_API_KEY` → **Claude Code OAuth via the `claude` CLI** (`claude setup-token`), API key optional.
+- Auth: OpenRouter/`OPENROUTER_API_KEY` → **reuse your Claude Code login via the `claude` CLI** (no key, no `setup-token`); `mode: api` + `ANTHROPIC_API_KEY` optional.
 - Backend `litellm` → **`anthropic`** (litellm was removed from the engine; the old wrapper errors against `rlms 0.1.3`).
 - Models grok/gpt-4o-mini → **Sonnet 4.6 root** (Opus 4.8 override) + **Haiku 4.5 sub**.
 - `environment="local"` (host exec) → **Docker sandbox by default**.
@@ -50,14 +52,15 @@ Role→model mapping lives in one place — `src/models.py` (a strategy pattern)
 ## Prerequisites
 - macOS/Linux, **Python 3.12 or 3.13** (the engine has no 3.14 wheels), `uv` recommended.
 - **Docker** running (for the default sandbox). Apple Silicon supported.
-- A **Claude Code login / subscription** (for `claude setup-token`). No API key required.
+- A **Claude Code login / subscription** — just be logged into the `claude` CLI (run `claude` once). No API key, no `setup-token` required.
 
 ## Install
 ```bash
 cd rlm-mcp
 ./install.sh                       # venv + pinned deps + builds the rlm-sandbox image
-claude setup-token                 # prints a long-lived OAuth token — copy it
-./scripts/set-token.sh             # paste the token when prompted (hidden); writes .env safely
+# Auth: if you're already logged into the `claude` CLI, you're done — nothing to set up (mode=auto).
+# Headless box with no keychain? `claude setup-token` then `./scripts/set-token.sh` to store the token.
+# Prefer the API instead? put ANTHROPIC_API_KEY in .env and set mode: api (or RLM_MODE=api).
 ```
 
 ## Register with Claude Code (CLI + desktop share ~/.claude)
@@ -70,7 +73,8 @@ Equivalent JSON (`~/.claude.json` → `mcpServers`):
 { "mcpServers": { "rlm": { "command": "bash", "args": ["/ABS/PATH/rlm-mcp/run_server.sh"] } } }
 ```
 A single user-scoped registration surfaces in both the CLI and the desktop app. After adding,
-restart/reopen a session; `rlm_status` confirms config and shows `auth: oauth`.
+restart/reopen a session; `rlm_status` confirms config and shows the resolved `transport`. To pin
+the mode at registration (no file editing), add `-e RLM_MODE=claude-cli` (or `api`) to `claude mcp add`.
 
 ## Optional: auto-reach for RLM on big inputs
 Add to `~/.claude/CLAUDE.md`:
@@ -83,10 +87,12 @@ only findings come back.
 ```
 
 ## Configuration
-- `.env` — `CLAUDE_CODE_OAUTH_TOKEN` (primary; from `claude setup-token`). Optional
-  `ANTHROPIC_API_KEY` fallback. Credentials stay host-side; they never enter the container.
-- `config.yaml` — models, `max_depth`/`max_iterations`, `sandbox` (`docker`|`local`),
-  `sandbox_image`, `sandbox_timeout_s`, concurrency, `output_cap_bytes`, chunk defaults, dirs.
+- **`mode`** (`config.yaml`, or the `RLM_MODE` env var which wins) — `auto` (default) | `claude-cli`
+  | `api`. `auto` reuses your Claude Code login via the CLI; **no credentials file needed**.
+- `.env` — usually **empty**. Optional `CLAUDE_CODE_OAUTH_TOKEN` (headless box, no keychain) or
+  `ANTHROPIC_API_KEY` (for `mode: api`). Credentials stay host-side; they never enter the container.
+- `config.yaml` — `mode`, models, `max_depth`/`max_iterations`, `sandbox` (`docker`|`local`),
+  `sandbox_image`, `sandbox_timeout_s`, concurrency, `output_cap_bytes`, `cli_*` knobs, chunk defaults, dirs.
 
 Model routing & cost (verified rates per MTok): Sonnet 4.6 $3/$15, Opus 4.8 $5/$25, Haiku 4.5 $1/$5.
 `rlm_query`/`rlm_sub_query*` return a per-model usage table so you can see exactly what ran on Haiku vs Sonnet.
@@ -128,7 +134,8 @@ single source of retry policy.)
 ## Troubleshooting
 | Symptom | Fix |
 |---|---|
-| `No Claude credentials found` | run `claude setup-token`, put the token in `.env` as `CLAUDE_CODE_OAUTH_TOKEN` (or set `ANTHROPIC_API_KEY`) |
+| `No transport available` | neither the `claude` CLI nor `ANTHROPIC_API_KEY` is usable. Log into the `claude` CLI (run `claude` once — recommended, zero setup), or set `ANTHROPIC_API_KEY` + `mode: api`. `rlm_status` shows what's detected. |
+| `mode=api but ANTHROPIC_API_KEY is not set` / `mode=claude-cli but the claude CLI was not found` | you pinned a `mode` whose dependency is missing — install/log into the CLI, set the key, or switch back to `mode: auto`. |
 | Sonnet/Opus `429` on OAuth (historical) | This was the old **HTTP-OAuth** failure: subscription tokens gated premium models to *Claude-Code-shaped* requests. The current OAuth transport drives the `claude` CLI instead, which is inherently Claude-Code-shaped — so **the gate no longer applies** (verified: Sonnet served over the CLI in both `--system-prompt` and `--append-system-prompt` modes). No identity-block hack needed. The grounding directive (`src/engine.py`) stays — it stops the agent identity from making the model *simulate* the REPL. |
 | OAuth rate/usage limit | Your **Claude subscription** quota is saturated — often because an interactive Claude Code session is using the same subscription. The CLI failure is retried with backoff, then surfaced. Run RLM when that session is idle/closed, or set `ANTHROPIC_API_KEY` (separate, higher limits) for bulk/concurrent use. |
 | `Failed to start container` / docker errors | start Docker Desktop; run `./install.sh` to build `rlm-sandbox`; or set `sandbox: local` |

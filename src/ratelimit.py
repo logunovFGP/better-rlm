@@ -55,9 +55,9 @@ def _retry_after_seconds(exc: BaseException) -> float:
 
 
 def _waits() -> list[float]:
-    """Backoff schedule for the active auth mode (OAuth gets the longer waits)."""
-    from .auth import auth_status  # lazy import to avoid a cycle
-    sched = _CFG.oauth_retry_waits if auth_status() == "oauth" else _CFG.apikey_retry_waits
+    """Backoff schedule for the active transport (claude CLI gets the longer waits)."""
+    from .auth import resolve_auth_mode  # lazy import to avoid a cycle
+    sched = _CFG.oauth_retry_waits if resolve_auth_mode(_CFG) == "oauth" else _CFG.apikey_retry_waits
     return list(sched)
 
 

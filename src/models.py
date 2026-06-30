@@ -81,8 +81,8 @@ def get_strategy(cfg: Config, auth_mode: str) -> ModelStrategy:
 
 
 def _current_strategy(cfg: Config) -> ModelStrategy:
-    from .auth import auth_status  # lazy to avoid import cycle
-    return get_strategy(cfg, auth_status())
+    from .auth import resolve_auth_mode  # lazy to avoid import cycle
+    return get_strategy(cfg, resolve_auth_mode(cfg))
 
 
 def select(cfg: Config, role: Role) -> str:

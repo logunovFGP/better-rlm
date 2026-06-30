@@ -219,6 +219,12 @@ class CliTransport(CompletionTransport):
     def _subprocess_env() -> dict:
         env = dict(os.environ)
         env.pop("ANTHROPIC_API_KEY", None)  # force the subscription/OAuth path
+        # Drop an empty/placeholder OAuth token so the CLI cleanly uses its own
+        # keychain login instead of trying to authenticate with a blank token.
+        from .auth import _clean_secret
+        tok = env.get("CLAUDE_CODE_OAUTH_TOKEN")
+        if tok is not None and _clean_secret(tok) is None:
+            env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
         return env
 
     def _argv(self, model: str, system_text: str | None) -> list[str]:

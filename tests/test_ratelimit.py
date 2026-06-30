@@ -50,13 +50,13 @@ def test_non_429_is_not_retried():
     assert n["calls"] == 1
 
 
-def test_waits_are_auth_aware(monkeypatch):
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-x")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    assert rl._waits()[0] == 5  # OAuth → patient backoff
+def test_waits_are_transport_aware(monkeypatch):
+    import src.auth as auth_mod
+    # Backoff keys off the RESOLVED transport, not raw env tokens.
+    monkeypatch.setattr(auth_mod, "resolve_auth_mode", lambda cfg: "oauth")
+    assert rl._waits()[0] == 5  # claude CLI → patient backoff
 
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-x")
+    monkeypatch.setattr(auth_mod, "resolve_auth_mode", lambda cfg: "apikey")
     assert rl._waits()[0] == 1  # API key → faster backoff
 
 
