@@ -76,8 +76,14 @@ A single user-scoped registration surfaces in both the CLI and the desktop app. 
 restart/reopen a session; `rlm_status` confirms config and shows the resolved `transport`. To pin
 the mode at registration (no file editing), add `-e RLM_MODE=claude-cli` (or `api`) to `claude mcp add`.
 
-## Optional: auto-reach for RLM on big inputs
-Add to `~/.claude/CLAUDE.md`:
+## Making Claude reach for RLM automatically
+`install.sh` installs a user skill **`rlm-large-context`** (symlinked into `~/.claude/skills/`,
+shared by CLI + desktop — `skills/rlm-large-context/SKILL.md` in this repo). Its description triggers
+on oversized-input intents ("what's in / find X across / summarize this huge log|dump|dataset"), so
+Claude reaches for the `rlm` tools without being told. **Restart the session after install** so the
+skill loads; you can also invoke it manually with `/rlm-large-context`.
+
+Prefer a global rule too? Add to `~/.claude/CLAUDE.md`:
 ```md
 ## Oversized inputs → RLM
 When a file is larger than ~200 KB or ~5,000 lines (logs, dumps, manifest sets), do NOT read it

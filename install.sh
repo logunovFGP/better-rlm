@@ -23,8 +23,18 @@ else
   echo "           on the host (less safe — see README Security)."
 fi
 
-echo "==> .env"
-[ -f .env ] || { cp .env.example .env; echo "  created .env — add your ANTHROPIC_API_KEY"; }
+echo "==> .env (optional — mode=auto reuses your Claude Code login, no key needed)"
+[ -f .env ] || { cp .env.example .env; echo "  created .env (only needed for mode: api — add ANTHROPIC_API_KEY there)"; }
+
+echo "==> Skill (rlm-large-context) — makes Claude reach for RLM on oversized inputs"
+mkdir -p "$HOME/.claude/skills"
+LINK="$HOME/.claude/skills/rlm-large-context"
+if [ -e "$LINK" ] && [ ! -L "$LINK" ]; then
+  echo "  WARNING: $LINK exists and is not a symlink — leaving it. Copy skills/rlm-large-context there manually."
+else
+  ln -sfn "$DIR/skills/rlm-large-context" "$LINK"
+  echo "  linked $LINK -> $DIR/skills/rlm-large-context  (shared by CLI + desktop)"
+fi
 
 cat <<MSG
 
@@ -34,5 +44,10 @@ cat <<MSG
   claude mcp add -s user rlm -- bash "$DIR/run_server.sh"
   claude mcp list            # confirm 'rlm' is listed
 
-Then set ANTHROPIC_API_KEY in $DIR/.env before running live queries.
+Auth: mode=auto reuses your Claude Code login via the \`claude\` CLI — no API key needed.
+      (SDK path instead: put ANTHROPIC_API_KEY in $DIR/.env and set mode: api, or
+      register with: claude mcp add -s user rlm -e RLM_MODE=api -- bash "$DIR/run_server.sh")
+
+Restart/reopen your Claude session so the 'rlm' server AND the 'rlm-large-context'
+skill load. Then ask about any oversized log/dump — Claude will reach for RLM.
 MSG

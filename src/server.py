@@ -84,8 +84,10 @@ def _resolve_root_model(model_override: str) -> str:
 def rlm_load_context(source: str, source_type: str = "auto") -> str:
     """Load context from inline text, a file path, or a directory into the
     external store. Use this FIRST for any oversized input (big logs, repo dumps,
-    k8s manifest sets) — the content is kept on disk and never returned, so it
-    never enters this conversation's context. Returns a ctx_id + metadata.
+    k8s manifest sets) — PREFER it over reading a large file directly (Read/cat)
+    when the input is > ~200 KB / ~5,000 lines or would be truncated. The content
+    is kept on disk and never returned, so it never enters this conversation's
+    context. Returns a ctx_id; then call rlm_query / rlm_sub_query / rlm_exec.
 
     source_type: auto | text | file | dir (auto detects path vs inline text).
     """
@@ -111,9 +113,10 @@ def rlm_load_context(source: str, source_type: str = "auto") -> str:
 
 @mcp.tool()
 def rlm_load_file(path: str, data_type: str = "text") -> str:
-    """Load a single file into the external store. data_type: text | log | pdf
-    (pdf needs the optional pypdf extra). Large text/log files are referenced in
-    place (no copy). Returns a ctx_id + metadata."""
+    """Load a single file into the external store — use this INSTEAD of Read for any
+    file too large to read directly (big logs, dumps, exports). data_type: text | log
+    | pdf (pdf needs the optional pypdf extra). Large text/log files are referenced in
+    place (no copy). Returns a ctx_id; then call rlm_query / rlm_sub_query / rlm_exec."""
     try:
         meta = STORE.load_file(path, data_type=data_type)
         return _bound("## File loaded\n" + _meta_block(meta))
