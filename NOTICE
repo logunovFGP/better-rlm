@@ -1,0 +1,14 @@
+rlm-mcp — MCP server for Recursive Language Models
+Copyright (c) 2026
+
+This project is MIT-licensed (see LICENSE).
+
+It is a fork/modernization of the base MCP wrapper:
+  - eesb99/rlm-mcp  (MIT)  — original FastMCP wrapper structure
+
+It wraps the Recursive Language Models (RLM) engine:
+  - github.com/alexzhang13/rlm (pip: rlms), MIT
+  - Recursive Language Models — Alex L. Zhang, Tim Kraska, Omar Khattab (MIT CSAIL)
+
+Tool-design ideas were also studied (not copied) from:
+  win10ogod/RLM-MCP, richardwhiteii/rlm, MuhammadIndar/MCP-RLM, delonsp/rlm-mcp-server.

@@ -1,0 +1,173 @@
+"""Configuration for the RLM MCP server.
+
+Secrets come from ``.env``; tunables come from ``config.yaml`` layered over the
+baked-in defaults below. Real environment variables always win over ``.env``.
+Model IDs and cost rates were verified against the authoritative ``claude-api``
+reference, not memory.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+from dotenv import load_dotenv
+
+PKG_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PKG_ROOT / ".env")  # no-op if the file is absent
+
+# --- Verified Anthropic model IDs (claude-api reference) ---
+MODEL_SONNET = "claude-sonnet-4-6"  # 1M ctx — default root/orchestrator
+MODEL_OPUS = "claude-opus-4-8"      # 1M ctx — root override for the hardest tasks
+MODEL_HAIKU = "claude-haiku-4-5"    # 200K ctx — cheap sub-LLM for chunk work
+
+COST_PER_MTOK: dict[str, tuple[float, float]] = {
+    MODEL_SONNET: (3.0, 15.0),
+    MODEL_OPUS: (5.0, 25.0),
+    MODEL_HAIKU: (1.0, 5.0),
+}
+
+HAIKU_CONTEXT_TOKENS = 200_000
+
+_DEFAULTS: dict[str, Any] = {
+    "root_model": MODEL_SONNET,
+    "root_model_override": MODEL_OPUS,
+    "sub_model": MODEL_HAIKU,
+    "max_depth": 2,
+    "max_iterations": 20,
+    "max_output_tokens": 32768,
+    "sandbox": "docker",
+    "sandbox_image": "rlm-sandbox",
+    "sandbox_timeout_s": 300,
+    "max_concurrent_subcalls": 2,
+    "subquery_concurrency": 3,
+    "output_cap_bytes": 4096,
+    "preview_bytes": 2048,
+    "chunk_strategy": "lines",
+    "chunk_lines": 2000,
+    "chunk_chars": 120_000,
+    "chunk_overlap": 0,
+    # Rate-limit handling (see ratelimit.py): global throttle + auth-aware retry.
+    "throttle_max_concurrency": 3,     # at most N API calls in flight at once
+    "throttle_min_interval_s": 1.0,    # >= this many seconds between dispatches
+    "oauth_retry_waits": [5, 10, 15],  # 429 backoff on OAuth (tight subscription limits)
+    "apikey_retry_waits": [1, 2, 4],   # 429 backoff on API key (higher limits)
+    # Claude Code CLI transport (see transport.py). Under OAuth the server drives
+    # the official `claude` CLI instead of the HTTP API, so OAuth "just works" via
+    # the existing Claude Code login — no token plumbing, no premium-model gating.
+    "cli_path": "claude",
+    "cli_system_prompt_mode": "replace",  # replace (clean RLM prompt; verified to keep premium access) | append
+    "cli_timeout_s": 600,                # per-call CLI budget (cold start + generation)
+    "cli_disable_tools": True,           # --tools "" : RLM runs its OWN sandbox, CLI emits text only
+    "cli_safe_mode": True,               # --safe-mode : no hooks/CLAUDE.md/skills/MCP (prevents recursion)
+    "cli_no_session_persistence": True,  # --no-session-persistence : stateless calls
+    "cli_fallback_model": "",            # optional --fallback-model on overload
+    "cli_extra_args": [],                # escape hatch: extra argv tokens
+    "log_dir": "~/.rlm/logs",
+    "store_dir": "~/.rlm/contexts",
+}
+
+
+def _load_yaml() -> dict[str, Any]:
+    path = PKG_ROOT / "config.yaml"
+    if not path.exists():
+        return {}
+    with open(path) as fh:
+        data = yaml.safe_load(fh) or {}
+    return data if isinstance(data, dict) else {}
+
+
+@dataclass(frozen=True)
+class Config:
+    """Immutable resolved configuration (defaults <- config.yaml)."""
+
+    root_model: str
+    root_model_override: str
+    sub_model: str
+    max_depth: int
+    max_iterations: int
+    max_output_tokens: int
+    sandbox: str
+    sandbox_image: str
+    sandbox_timeout_s: int
+    max_concurrent_subcalls: int
+    subquery_concurrency: int
+    output_cap_bytes: int
+    preview_bytes: int
+    chunk_strategy: str
+    chunk_lines: int
+    chunk_chars: int
+    chunk_overlap: int
+    throttle_max_concurrency: int
+    throttle_min_interval_s: float
+    oauth_retry_waits: tuple[float, ...]
+    apikey_retry_waits: tuple[float, ...]
+    cli_path: str
+    cli_system_prompt_mode: str
+    cli_timeout_s: int
+    cli_disable_tools: bool
+    cli_safe_mode: bool
+    cli_no_session_persistence: bool
+    cli_fallback_model: str
+    cli_extra_args: tuple[str, ...]
+    log_dir: Path
+    store_dir: Path
+
+    @property
+    def use_docker(self) -> bool:
+        return self.sandbox == "docker"
+
+
+def load_config() -> Config:
+    """Build the resolved Config from defaults overlaid with config.yaml."""
+    m = {**_DEFAULTS, **_load_yaml()}
+    return Config(
+        root_model=str(m["root_model"]),
+        root_model_override=str(m["root_model_override"]),
+        sub_model=str(m["sub_model"]),
+        max_depth=int(m["max_depth"]),
+        max_iterations=int(m["max_iterations"]),
+        max_output_tokens=int(m["max_output_tokens"]),
+        sandbox=str(m["sandbox"]),
+        sandbox_image=str(m["sandbox_image"]),
+        sandbox_timeout_s=int(m["sandbox_timeout_s"]),
+        max_concurrent_subcalls=int(m["max_concurrent_subcalls"]),
+        subquery_concurrency=int(m["subquery_concurrency"]),
+        output_cap_bytes=int(m["output_cap_bytes"]),
+        preview_bytes=int(m["preview_bytes"]),
+        chunk_strategy=str(m["chunk_strategy"]),
+        chunk_lines=int(m["chunk_lines"]),
+        chunk_chars=int(m["chunk_chars"]),
+        chunk_overlap=int(m["chunk_overlap"]),
+        throttle_max_concurrency=int(m["throttle_max_concurrency"]),
+        throttle_min_interval_s=float(m["throttle_min_interval_s"]),
+        oauth_retry_waits=tuple(float(x) for x in m["oauth_retry_waits"]),
+        apikey_retry_waits=tuple(float(x) for x in m["apikey_retry_waits"]),
+        cli_path=str(m["cli_path"]),
+        cli_system_prompt_mode=str(m["cli_system_prompt_mode"]),
+        cli_timeout_s=int(m["cli_timeout_s"]),
+        cli_disable_tools=bool(m["cli_disable_tools"]),
+        cli_safe_mode=bool(m["cli_safe_mode"]),
+        cli_no_session_persistence=bool(m["cli_no_session_persistence"]),
+        cli_fallback_model=str(m["cli_fallback_model"]),
+        cli_extra_args=tuple(str(x) for x in m["cli_extra_args"]),
+        log_dir=Path(os.path.expanduser(str(m["log_dir"]))),
+        store_dir=Path(os.path.expanduser(str(m["store_dir"]))),
+    )
+
+
+def estimate_tokens(text_or_len: str | int) -> int:
+    """Rough token estimate (~4 chars/token). Use count_tokens for precision."""
+    n = len(text_or_len) if isinstance(text_or_len, str) else int(text_or_len)
+    return max(1, n // 4)
+
+
+def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
+    """USD cost for a model call from token counts and known rates."""
+    rate = COST_PER_MTOK.get(model)
+    if not rate:
+        return 0.0
+    return (input_tokens / 1_000_000) * rate[0] + (output_tokens / 1_000_000) * rate[1]
