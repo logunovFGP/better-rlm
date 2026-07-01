@@ -10,6 +10,7 @@ root model's messages, so the root context never overflows.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from rlm.core.rlm import RLM
@@ -17,7 +18,10 @@ from rlm.environments import get_environment
 
 from .auth import patch_engine
 from .config import Config, cost_usd
+from .logsetup import log_event
 from rlm.utils.prompts import RLM_SYSTEM_PROMPT
+
+_LOG = logging.getLogger("rlm-mcp")
 
 # Claude Code's agent identity primes the model to *simulate* a REPL transcript
 # (fabricate ```repl output``` blocks and answer in one turn) — pronounced over the
@@ -92,8 +96,18 @@ def run_query(cfg: Config, context_text: str, question: str,
     rlm = build_rlm(cfg, root_model, sub_model)
     result = rlm.completion(prompt=context_text, root_prompt=question)
     rows, total = usage_breakdown(result.usage_summary)
+    answer = result.response or ""
+    # turns ~= number of root-model calls (one per orchestrator iteration).
+    turns = next((r["calls"] for r in rows if r["model"] == root_model), 0)
+    log_event(_LOG, "rlm_query", root=root_model, sub=sub_model, turns=turns,
+              max_iter_hit=(turns >= cfg.max_iterations),
+              exec_time=round(result.execution_time, 2),
+              in_tok=sum(r["input_tokens"] for r in rows),
+              out_tok=sum(r["output_tokens"] for r in rows),
+              cost=round(total, 4), answer_bytes=len(answer),
+              truncated=(len(answer) > cfg.answer_cap_bytes))
     return {
-        "answer": result.response,
+        "answer": answer,
         "execution_time": round(result.execution_time, 2),
         "root_model": root_model,
         "sub_model": sub_model,

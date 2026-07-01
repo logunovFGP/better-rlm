@@ -18,9 +18,7 @@ Run:  python -m src.server   (stdio transport)
 from __future__ import annotations
 
 import json
-import logging
 import os
-import sys
 
 from mcp.server.fastmcp import FastMCP
 
@@ -29,14 +27,15 @@ from .chunking import STRATEGIES, chunk_text
 from .config import HAIKU_CONTEXT_TOKENS, cost_usd, estimate_tokens, load_config
 from .context_store import ContextStore
 from .engine import ReplSession, run_query
+from .logsetup import configure_logging, log_event, logged_tool
 from .output import bound_output
+from .shutdown import install_shutdown_hooks
 from .subquery import sub_query, sub_query_batch
 
-# Logs go to stderr; stdout is reserved for the MCP JSON-RPC stream.
-logging.basicConfig(level=logging.INFO, stream=sys.stderr)
-logger = logging.getLogger("rlm-mcp")
-
 CFG = load_config()
+# stdout is the JSON-RPC channel; detailed logs go to a per-PID file in log_dir with
+# bounded retention, and stderr stays WARNING-only (see logsetup.py).
+LOG = configure_logging(CFG)
 STORE = ContextStore(CFG)
 mcp = FastMCP("rlm")
 
@@ -91,6 +90,7 @@ def _resolve_root_model(model_override: str) -> str:
 # Loading & inspection
 # ============================================================================
 @mcp.tool()
+@logged_tool
 def rlm_load_context(source: str, source_type: str = "auto") -> str:
     """Load context from inline text, a file path, or a directory into the
     external store. Use this FIRST for any oversized input (big logs, repo dumps,
@@ -122,6 +122,7 @@ def rlm_load_context(source: str, source_type: str = "auto") -> str:
 
 
 @mcp.tool()
+@logged_tool
 def rlm_load_file(path: str, data_type: str = "text") -> str:
     """Load a single file into the external store — use this INSTEAD of Read for any
     file too large to read directly (big logs, dumps, exports). data_type: text | log
@@ -135,6 +136,7 @@ def rlm_load_file(path: str, data_type: str = "text") -> str:
 
 
 @mcp.tool()
+@logged_tool
 def rlm_inspect_context(ctx_id: str, preview_lines: int = 40) -> str:
     """Return metadata plus a small bounded preview (head lines) for a loaded
     context. Use to sanity-check what was loaded without pulling the content."""
@@ -153,6 +155,7 @@ def rlm_inspect_context(ctx_id: str, preview_lines: int = 40) -> str:
 
 
 @mcp.tool()
+@logged_tool
 def rlm_chunk_context(ctx_id: str, strategy: str = "", size: int = 0, overlap: int = 0) -> str:
     """Split a loaded context into chunks and record the chunk index on the
     context. strategy: lines | paragraphs | functions | headings | semantic | files
@@ -187,6 +190,7 @@ def rlm_chunk_context(ctx_id: str, strategy: str = "", size: int = 0, overlap: i
 # Querying
 # ============================================================================
 @mcp.tool()
+@logged_tool
 def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
     """Answer a question over a loaded context using the FULL recursive RLM loop:
     the root model (Sonnet 5 by default) writes Python in a Docker sandbox to
@@ -217,6 +221,7 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
 
 
 @mcp.tool()
+@logged_tool
 def rlm_sub_query(ctx_id: str, prompt: str, chunk_index: int = -1) -> str:
     """Run a single Haiku 4.5 sub-query over a context (or one chunk of it).
     Use for cheap, targeted questions. If chunk_index < 0 the whole context is
@@ -246,6 +251,7 @@ def rlm_sub_query(ctx_id: str, prompt: str, chunk_index: int = -1) -> str:
 
 
 @mcp.tool()
+@logged_tool
 def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = True) -> str:
     """Map a prompt over the chunks of a context via Haiku 4.5 (concurrent), then by
     default REDUCE the per-chunk findings into one synthesized answer. Map-reduce that
@@ -328,6 +334,7 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
 # Sandbox REPL — exec & variables
 # ============================================================================
 @mcp.tool()
+@logged_tool
 def rlm_exec(code: str, ctx_id: str = "") -> str:
     """Execute Python in the Docker sandbox. If ctx_id is given, that context is
     loaded as the REPL variable `context` first. Use for grep/parse/aggregate
@@ -347,6 +354,7 @@ def rlm_exec(code: str, ctx_id: str = "") -> str:
 
 
 @mcp.tool()
+@logged_tool
 def rlm_set_variable(name: str, value: str) -> str:
     """Set a variable in the sandbox REPL. `value` is parsed as JSON if possible
     (so dicts/lists/numbers work), else treated as a string."""
@@ -362,6 +370,7 @@ def rlm_set_variable(name: str, value: str) -> str:
 
 
 @mcp.tool()
+@logged_tool
 def rlm_get_variable(name: str) -> str:
     """Return the repr of a variable from the sandbox REPL (bounded)."""
     try:
@@ -371,6 +380,7 @@ def rlm_get_variable(name: str) -> str:
 
 
 @mcp.tool()
+@logged_tool
 def rlm_set_answer(value: str) -> str:
     """Set the sandbox REPL's final-answer signal (answer['content']/['ready'])."""
     try:
@@ -381,6 +391,7 @@ def rlm_set_answer(value: str) -> str:
 
 
 @mcp.tool()
+@logged_tool
 def rlm_status() -> str:
     """Report configuration, the active auth + model-selection strategy with the
     RESOLVED models, loaded contexts, and sandbox/Docker availability."""
@@ -419,14 +430,16 @@ def rlm_status() -> str:
 
 
 def main() -> None:
+    # Graceful teardown (close the sandbox container) on SIGTERM/SIGINT + clean EOF.
+    install_shutdown_hooks(LOG, lambda: _repl.close() if _repl is not None else None)
     try:
         mode = auth.resolve_auth_mode(CFG)
-        logger.info("Starting RLM MCP server (mode=%s transport=%s root=%s sub=%s sandbox=%s)",
-                    CFG.mode, mode, models.select(CFG, models.Role.ROOT),
-                    models.select(CFG, models.Role.SUB), CFG.sandbox)
+        log_event(LOG, "startup", mode=CFG.mode, transport=mode,
+                  root=models.select(CFG, models.Role.ROOT),
+                  sub=models.select(CFG, models.Role.SUB), sandbox=CFG.sandbox)
     except Exception as exc:
-        logger.warning("Starting RLM MCP server (mode=%s) — transport not yet resolvable: %s",
-                       CFG.mode, exc)
+        log_event(LOG, "startup", mode=CFG.mode, transport="unresolved",
+                  err=f"{type(exc).__name__}: {exc}")
     mcp.run()
 
 

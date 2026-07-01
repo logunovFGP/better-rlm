@@ -26,12 +26,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import subprocess
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from .config import Config
+from .logsetup import log_event
+
+_LOG = logging.getLogger("rlm-mcp")
 
 _RATE_LIMIT_MARKERS = (
     "rate limit", "rate_limit", "429", "overloaded", "usage limit",
@@ -251,6 +256,7 @@ class CliTransport(CompletionTransport):
 
     def complete(self, messages, system, model, max_tokens) -> CompletionResult:
         argv, prompt = self._prepare(messages, system, model)
+        start = time.monotonic()
         try:
             proc = subprocess.run(
                 argv, input=prompt, capture_output=True, text=True,
@@ -258,12 +264,17 @@ class CliTransport(CompletionTransport):
                 timeout=self.cfg.cli_timeout_s,
             )
         except subprocess.TimeoutExpired as exc:
+            log_event(_LOG, "cli_spawn", model=model,
+                      dur_ms=round((time.monotonic() - start) * 1000), outcome="timeout")
             raise CliCompletionError(
                 f"claude CLI timed out after {self.cfg.cli_timeout_s}s") from exc
+        log_event(_LOG, "cli_spawn", model=model,
+                  dur_ms=round((time.monotonic() - start) * 1000), exit=proc.returncode)
         return _parse_cli_output(proc.returncode, proc.stdout, proc.stderr, model)
 
     async def acomplete(self, messages, system, model, max_tokens) -> CompletionResult:
         argv, prompt = self._prepare(messages, system, model)
+        start = time.monotonic()
         proc = await asyncio.create_subprocess_exec(
             *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, cwd=self._neutral_cwd(),
@@ -274,8 +285,12 @@ class CliTransport(CompletionTransport):
                 proc.communicate(prompt.encode()), timeout=self.cfg.cli_timeout_s)
         except asyncio.TimeoutError as exc:
             proc.kill()
+            log_event(_LOG, "cli_spawn", model=model,
+                      dur_ms=round((time.monotonic() - start) * 1000), outcome="timeout")
             raise CliCompletionError(
                 f"claude CLI timed out after {self.cfg.cli_timeout_s}s") from exc
+        log_event(_LOG, "cli_spawn", model=model,
+                  dur_ms=round((time.monotonic() - start) * 1000), exit=proc.returncode)
         return _parse_cli_output(
             proc.returncode, out.decode(errors="replace"),
             err.decode(errors="replace"), model)

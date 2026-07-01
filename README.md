@@ -103,6 +103,23 @@ only findings come back.
 Model routing & cost (per MTok): Sonnet 5 $3/$15 (default root; rate cloned from 4.6 pending published pricing), Sonnet 4.6 $3/$15, Opus 4.8 $5/$25, Haiku 4.5 $1/$5.
 `rlm_query`/`rlm_sub_query*` return a per-model usage table so you can see exactly what ran on Haiku vs Sonnet.
 
+## Logging & diagnostics
+Structured logs go to a **per-PID file** `~/.rlm/logs/rlm-mcp-<date>-<pid>.log` (logfmt:
+`ts=… pid=… lvl=… evt=… k=v`). stdout stays the JSON-RPC channel; **stderr is WARNING-only**
+so healthy runs don't spam Claude Code's "error"-tagged MCP log. Events: `startup`,
+`tool_call` (rid, args summary, duration, outcome), `rlm_query` (root/sub model, turns,
+`max_iter_hit`, tokens, cost, answer bytes, truncated), `cli_spawn` (per `claude -p`: model,
+duration, exit), `retry` (backoff), `shutdown`.
+
+**Bounded disk — never accumulates.** A race-safe startup sweep caps `~/.rlm/logs` to
+**≤ 20 files AND ≤ 50 MB AND ≤ 7 days** across ALL processes, so the many short-lived
+session/spare-pool servers can't fill the disk; per-file rotation is 2 MB × 3 backups. Tune via
+`config.yaml`: `log_level`, `log_to_file`, `log_max_bytes`, `log_backup_count`,
+`log_retention_files`, `log_retention_total_bytes`, `log_retention_days`, `log_sweep_cooldown_s`.
+
+**Graceful shutdown:** SIGTERM/SIGINT (and clean stdin EOF) tear down the sandbox container and
+log a `shutdown` record before exiting — fixing the prior SIGINT-ignored / hard-kill teardown.
+
 ## Rate-limit handling (throttle + auth-aware retry)
 External vendors enforce rate limits; this server **sacrifices speed for stability** via
 `retry_and_queue_retries` (`src/ratelimit.py`). Every model call — engine root, engine

@@ -76,6 +76,17 @@ _DEFAULTS: dict[str, Any] = {
     "cli_no_session_persistence": True,  # --no-session-persistence : stateless calls
     "cli_fallback_model": "",            # optional --fallback-model on overload
     "cli_extra_args": [],                # escape hatch: extra argv tokens
+    # Structured file logging + bounded retention (see logsetup.py). Per-PID rotated
+    # files in log_dir; a startup sweep caps total files/bytes/age across ALL processes
+    # so many churning server processes can never fill the disk.
+    "log_level": "INFO",                 # file handler level; stderr stays WARNING-only
+    "log_to_file": True,                 # master switch for file logging + sweep
+    "log_max_bytes": 2_097_152,          # 2 MB per file before rotation
+    "log_backup_count": 3,               # per-PID rotated backups (one family <= 8 MB)
+    "log_retention_files": 20,           # sweep: keep newest N rlm-mcp-*.log*
+    "log_retention_total_bytes": 52_428_800,  # sweep: total across all files <= 50 MB
+    "log_retention_days": 7,             # sweep: delete files older than this
+    "log_sweep_cooldown_s": 60,          # skip the sweep if it ran within this window
     "log_dir": "~/.rlm/logs",
     "store_dir": "~/.rlm/contexts",
 }
@@ -125,6 +136,14 @@ class Config:
     cli_no_session_persistence: bool
     cli_fallback_model: str
     cli_extra_args: tuple[str, ...]
+    log_level: str
+    log_to_file: bool
+    log_max_bytes: int
+    log_backup_count: int
+    log_retention_files: int
+    log_retention_total_bytes: int
+    log_retention_days: int
+    log_sweep_cooldown_s: int
     log_dir: Path
     store_dir: Path
 
@@ -169,6 +188,14 @@ def load_config() -> Config:
         cli_no_session_persistence=bool(m["cli_no_session_persistence"]),
         cli_fallback_model=str(m["cli_fallback_model"]),
         cli_extra_args=tuple(str(x) for x in m["cli_extra_args"]),
+        log_level=str(m["log_level"]).upper(),
+        log_to_file=bool(m["log_to_file"]),
+        log_max_bytes=int(m["log_max_bytes"]),
+        log_backup_count=int(m["log_backup_count"]),
+        log_retention_files=int(m["log_retention_files"]),
+        log_retention_total_bytes=int(m["log_retention_total_bytes"]),
+        log_retention_days=int(m["log_retention_days"]),
+        log_sweep_cooldown_s=int(m["log_sweep_cooldown_s"]),
         log_dir=Path(os.path.expanduser(str(m["log_dir"]))),
         store_dir=Path(os.path.expanduser(str(m["store_dir"]))),
     )

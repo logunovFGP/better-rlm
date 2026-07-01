@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import logging
 import threading
 import time
 from contextlib import contextmanager
@@ -32,8 +33,10 @@ from contextlib import contextmanager
 import anthropic
 
 from .config import load_config
+from .logsetup import log_event
 
 _CFG = load_config()
+_LOG = logging.getLogger("rlm-mcp")
 
 
 def _is_rate_limit(exc: BaseException) -> bool:
@@ -102,6 +105,7 @@ def retry_and_queue_retries(fn):
                     if not _is_rate_limit(exc) or attempt >= len(waits):
                         raise
                     delay = max(waits[attempt], _retry_after_seconds(exc))
+            log_event(_LOG, "retry", attempt=attempt + 1, delay_s=round(delay, 1), reason="rate_limit")
             time.sleep(delay)  # slot released — let queued calls proceed while we wait
             attempt += 1
 
@@ -122,6 +126,8 @@ def aretry_and_queue_retries(fn):
                 if not _is_rate_limit(exc) or attempt >= len(waits):
                     raise
                 delay = max(waits[attempt], _retry_after_seconds(exc))
+            log_event(_LOG, "retry", attempt=attempt + 1, delay_s=round(delay, 1),
+                      reason="rate_limit", mode="async")
             await asyncio.sleep(delay)
             attempt += 1
 
