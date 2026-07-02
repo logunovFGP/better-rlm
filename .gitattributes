@@ -1,0 +1,22 @@
+# Normalize line endings so scripts run correctly regardless of the
+# host's core.autocrlf setting. Without this, checking out on Windows
+# (core.autocrlf=true) rewrites shell scripts with CRLF, and bash then
+# fails with errors like: "set: invalid option name: pipefail\r".
+
+# Treat everything as text with normalized (LF) endings on commit.
+* text=auto eol=lf
+
+# Shell scripts MUST be LF — they are executed by bash on Linux/WSL/macOS.
+*.sh   text eol=lf
+
+# Windows batch/PowerShell scripts MUST keep CRLF.
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+
+# Binary files: never touch.
+*.png  binary
+*.jpg  binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary

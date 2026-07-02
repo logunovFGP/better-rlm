@@ -222,13 +222,37 @@ class CliTransport(CompletionTransport):
 
     @staticmethod
     def _subprocess_env() -> dict:
-        env = dict(os.environ)
-        env.pop("ANTHROPIC_API_KEY", None)  # force the subscription/OAuth path
-        # Drop an empty/placeholder OAuth token so the CLI cleanly uses its own
-        # keychain login instead of trying to authenticate with a blank token.
+        """Build the environment for the nested ``claude`` CLI.
+
+        Two jobs:
+          1. Force the subscription/OAuth path (drop ``ANTHROPIC_API_KEY``).
+          2. Strip the Claude Code *session* markers this server inherits when it is
+             itself launched **by** Claude Code (as an MCP server). Left in place,
+             vars like ``CLAUDECODE`` / ``CLAUDE_CODE_CHILD_SESSION`` /
+             ``CLAUDE_CODE_SESSION_ID`` / ``CLAUDE_CODE_SDK_HAS_*_REFRESH`` /
+             ``CLAUDE_CODE_OAUTH_SCOPES`` make the nested CLI take the *delegated
+             child-session* auth path (which fails with a misleading "organization
+             has disabled Claude subscription access") instead of authenticating
+             standalone from the Claude Code login (macOS keychain / Windows
+             credential store / ``~/.claude/.credentials.json``). Stripping them makes
+             the spawned ``claude -p`` behave exactly like one run from a clean shell,
+             which is the login that actually works. A *valid* explicit
+             ``CLAUDE_CODE_OAUTH_TOKEN`` (the headless-box case) is preserved.
+        """
         from .auth import _clean_secret
-        tok = env.get("CLAUDE_CODE_OAUTH_TOKEN")
-        if tok is not None and _clean_secret(tok) is None:
+        tok = _clean_secret(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
+        env = {}
+        for k, v in os.environ.items():
+            if k in ("ANTHROPIC_API_KEY", "CLAUDECODE", "CLAUDE_AGENT_SDK_VERSION"):
+                continue
+            # Drop inherited Claude Code session/SDK markers; keep only a valid
+            # explicit OAuth token (re-added below).
+            if k.startswith("CLAUDE_CODE_") and k != "CLAUDE_CODE_OAUTH_TOKEN":
+                continue
+            env[k] = v
+        if tok:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = tok
+        else:
             env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
         return env
 

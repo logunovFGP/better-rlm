@@ -5,16 +5,19 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
-echo "==> Python env (.venv, 3.12) + dependencies"
-# Idempotent: create the venv only if missing (uv errors on an existing venv unless
-# --clear is passed), but always (re)install deps. For a clean rebuild: rm -rf .venv first.
+echo "==> Python env (.venv_sh, 3.12) + dependencies"
+# Always rebuild the venv fresh. Reusing an existing venv proved flaky on a
+# WSL-shared checkout; a clean create is reliable and deterministic. Per-platform
+# name (.venv_sh) keeps it separate from the Windows .venv_windows. (On POSIX an
+# open file survives rm, so a running server is unaffected until its next start.)
+rm -rf .venv_sh
 if command -v uv >/dev/null 2>&1; then
-  [ -d .venv ] || uv venv --python 3.12 .venv
-  uv pip install --python .venv/bin/python -e ".[dev,pdf]"
+  uv venv --python 3.12 .venv_sh
+  uv pip install --python .venv_sh/bin/python -e ".[dev,pdf]"
 else
-  [ -d .venv ] || python3 -m venv .venv
-  .venv/bin/pip install -U pip
-  .venv/bin/pip install -e ".[dev,pdf]"
+  python3 -m venv .venv_sh
+  .venv_sh/bin/pip install -U pip
+  .venv_sh/bin/pip install -e ".[dev,pdf]"
 fi
 
 echo "==> Docker sandbox image (rlm-sandbox)"
