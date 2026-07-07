@@ -135,6 +135,12 @@ def _looks_rate_limited(text: str | None) -> bool:
     return any(marker in low for marker in _RATE_LIMIT_MARKERS)
 
 
+def _spawn_err(stderr: str | None, stdout: str | None) -> str:
+    """One-line failure reason for a non-zero CLI spawn (stderr preferred, stdout
+    fallback). Whitespace-collapsed; log_event clamps the length. Never empty."""
+    return " ".join((stderr or stdout or "").split()) or "no output"
+
+
 # --------------------------------------------------------------------------- #
 # Transports
 # --------------------------------------------------------------------------- #
@@ -289,12 +295,15 @@ class CliTransport(CompletionTransport):
             )
         except subprocess.TimeoutExpired as exc:
             log_event(_LOG, "cli_spawn", model=model,
-                      dur_ms=round((time.monotonic() - start) * 1000), outcome="timeout")
+                      dur_ms=round((time.monotonic() - start) * 1000),
+                      outcome="timeout", limit_s=self.cfg.cli_timeout_s)
             raise CliCompletionError(
                 f"claude CLI timed out after {self.cfg.cli_timeout_s}s") from exc
+        rc = proc.returncode
         log_event(_LOG, "cli_spawn", model=model,
-                  dur_ms=round((time.monotonic() - start) * 1000), exit=proc.returncode)
-        return _parse_cli_output(proc.returncode, proc.stdout, proc.stderr, model)
+                  dur_ms=round((time.monotonic() - start) * 1000), exit=rc,
+                  err=_spawn_err(proc.stderr, proc.stdout) if rc != 0 else None)
+        return _parse_cli_output(rc, proc.stdout, proc.stderr, model)
 
     async def acomplete(self, messages, system, model, max_tokens) -> CompletionResult:
         argv, prompt = self._prepare(messages, system, model)
@@ -310,14 +319,17 @@ class CliTransport(CompletionTransport):
         except asyncio.TimeoutError as exc:
             proc.kill()
             log_event(_LOG, "cli_spawn", model=model,
-                      dur_ms=round((time.monotonic() - start) * 1000), outcome="timeout")
+                      dur_ms=round((time.monotonic() - start) * 1000),
+                      outcome="timeout", limit_s=self.cfg.cli_timeout_s)
             raise CliCompletionError(
                 f"claude CLI timed out after {self.cfg.cli_timeout_s}s") from exc
+        rc = proc.returncode
+        out_s = out.decode(errors="replace")
+        err_s = err.decode(errors="replace")
         log_event(_LOG, "cli_spawn", model=model,
-                  dur_ms=round((time.monotonic() - start) * 1000), exit=proc.returncode)
-        return _parse_cli_output(
-            proc.returncode, out.decode(errors="replace"),
-            err.decode(errors="replace"), model)
+                  dur_ms=round((time.monotonic() - start) * 1000), exit=rc,
+                  err=_spawn_err(err_s, out_s) if rc != 0 else None)
+        return _parse_cli_output(rc, out_s, err_s, model)
 
 
 def _parse_cli_output(returncode: int, stdout: str, stderr: str,

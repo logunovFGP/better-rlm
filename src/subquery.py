@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from .auth import resolve_auth_mode
 from .config import load_config
+from .logsetup import bind_rid, current_rid
 from .ratelimit import retry_and_queue_retries
 from .transport import get_transport
 
@@ -49,13 +50,19 @@ def sub_query(prompt: str, model: str, *, max_tokens: int = 4096,
 
 def sub_query_batch(prompts: list[str], model: str, *, concurrency: int,
                     max_tokens: int = 2048, system: str | None = None) -> list[SubResult]:
+    # Pool workers start with a fresh contextvars context, so capture the caller's
+    # correlation id here and re-bind it inside each worker — otherwise the nested
+    # cli_spawn/retry events lose the originating tool call's rid.
+    parent_rid = current_rid()
+
     def work(item: tuple[int, str]) -> SubResult:
         idx, prompt = item
-        try:
-            text, itok, otok = _call(model, prompt, max_tokens, system)
-            return SubResult(idx, text, itok, otok)
-        except Exception as exc:
-            return SubResult(idx, "", 0, 0, error=str(exc))
+        with bind_rid(parent_rid):
+            try:
+                text, itok, otok = _call(model, prompt, max_tokens, system)
+                return SubResult(idx, text, itok, otok)
+            except Exception as exc:
+                return SubResult(idx, "", 0, 0, error=str(exc))
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
         results = list(pool.map(work, enumerate(prompts)))

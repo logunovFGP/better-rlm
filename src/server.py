@@ -278,6 +278,12 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
         itok = sum(r.input_tokens for r in results)
         otok = sum(r.output_tokens for r in results)
         errs = [r for r in results if r.error]
+        # Surface partial failures: the tool still returns a success string (so
+        # tool_call logs outcome=ok), which would otherwise hide that some chunks
+        # errored. Same rid ties this back to the parent tool_call.
+        if errs:
+            log_event(LOG, "sub_batch", phase="map", chunks=len(prompts),
+                      errors=len(errs), err_sample=errs[0].error)
 
         note = ""
         if max_chunks > 0 and max_chunks < n:
@@ -317,6 +323,8 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
         )
         red = sub_query(reduce_prompt, sub_model, max_tokens=4096)
         if red.error:
+            log_event(LOG, "sub_batch", phase="reduce", chunks=len(prompts),
+                      errors=len(errs), reduce_error=red.error)
             return _raw(f"\n_(reduce pass failed: {red.error}; showing raw findings)_")
         itok += red.input_tokens
         otok += red.output_tokens

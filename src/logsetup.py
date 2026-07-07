@@ -15,6 +15,8 @@ and token/cost — never prompt or context text.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import functools
 import inspect
 import logging
@@ -29,9 +31,31 @@ from .config import Config
 LOGGER_NAME = "rlm-mcp"
 _MAX_VAL_LEN = 500  # clamp any single logged value so one record can't bloat the file
 
+# Correlation id for the in-flight tool call. logged_tool binds it; log_event reads
+# it and stamps every nested event (cli_spawn, rlm_query, retry, sub_batch) with the
+# same rid, so a single request's fan-out is traceable across processes/threads.
+# Defaults to None (dropped by log_event) for events outside any tool call.
+_RID: contextvars.ContextVar[str | None] = contextvars.ContextVar("rlm_rid", default=None)
+
 
 def get_logger() -> logging.Logger:
     return logging.getLogger(LOGGER_NAME)
+
+
+def current_rid() -> str | None:
+    """The correlation id bound to the current context, or None."""
+    return _RID.get()
+
+
+@contextlib.contextmanager
+def bind_rid(rid: str | None):
+    """Bind ``rid`` for the duration of the block. Needed to carry the id into worker
+    threads (a ThreadPoolExecutor worker starts with a fresh contextvars context)."""
+    token = _RID.set(rid)
+    try:
+        yield
+    finally:
+        _RID.reset(token)
 
 
 class _UTCFormatter(logging.Formatter):
@@ -49,8 +73,16 @@ def _fmt_val(value: object) -> str:
 
 
 def log_event(logger: logging.Logger, evt: str, **fields: object) -> None:
-    """Emit one logfmt record: ``evt=<evt> k=v ...`` (None-valued fields dropped)."""
+    """Emit one logfmt record: ``evt=<evt> [rid=…] k=v ...`` (None-valued fields dropped).
+
+    If a correlation id is bound to the current context and the caller did not pass an
+    explicit ``rid``, it is injected right after ``evt`` so nested events (cli_spawn,
+    rlm_query, retry, sub_batch) share the originating tool call's id.
+    """
     parts = [f"evt={evt}"]
+    rid = _RID.get()
+    if rid is not None and "rid" not in fields:
+        parts.append(f"rid={_fmt_val(rid)}")
     for key, val in fields.items():
         if val is None:
             continue
@@ -213,16 +245,22 @@ def logged_tool(fn):
                 fields[f"{k}_len"] = len(v)
 
         start = time.monotonic()
+        rid_token = _RID.set(rid)  # visible to every nested event for this call
         try:
             result = fn(*args, **kwargs)
         except Exception as exc:  # tools normally return strings, but be safe
             log_event(logger, "tool_call", **fields, dur_ms=round((time.monotonic() - start) * 1000),
                       outcome="error", err=f"{type(exc).__name__}: {exc}")
             raise
+        finally:
+            _RID.reset(rid_token)
         dur_ms = round((time.monotonic() - start) * 1000)
+        # Tools signal a handled failure by returning a string starting with "ERROR";
+        # record the reason (clamped by log_event) so the failure is diagnosable.
         is_err = isinstance(result, str) and result.lstrip().startswith("ERROR")
         log_event(logger, "tool_call", **fields, dur_ms=dur_ms,
                   outcome="error" if is_err else "ok",
+                  err=result.strip() if is_err else None,
                   result_bytes=len(result) if isinstance(result, str) else None)
         return result
 
