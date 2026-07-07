@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from mcp.server.fastmcp import FastMCP
 
@@ -184,6 +185,98 @@ def rlm_chunk_context(ctx_id: str, strategy: str = "", size: int = 0, overlap: i
         return _bound("\n".join(lines))
     except Exception as exc:
         return _bound(f"ERROR chunking: {exc}")
+
+
+# ============================================================================
+# Deterministic retrieval (no model call, no cost)
+# ============================================================================
+@mcp.tool()
+@logged_tool
+def rlm_grep(ctx_id: str, pattern: str, ignore_case: bool = False, max_matches: int = 50) -> str:
+    """Search a loaded context for a regex and return matching lines with 1-based line
+    numbers — deterministic and FREE (no model call). PREFER this over rlm_sub_query for
+    "find / locate / where is X" questions over a huge log or dump. Streams the file so it
+    works on multi-GB contexts; stops after max_matches (the result notes if more may exist).
+
+    pattern: a Python regular expression. ignore_case: case-insensitive match.
+    """
+    try:
+        matches, capped = STORE.grep(ctx_id, pattern, ignore_case=ignore_case,
+                                     max_matches=max(1, max_matches))
+        if not matches:
+            return _bound(f"## grep `{pattern}` in {ctx_id}\n\nNo matches.")
+        note = f" (stopped at {len(matches)} — more may exist)" if capped else ""
+        body = "\n".join(f"{ln}: {txt}" for ln, txt in matches)
+        return _bound(
+            f"## grep `{pattern}` in {ctx_id} — {len(matches)} match(es){note}\n"
+            f"```\n{body}\n```"
+        )
+    except re.error as exc:
+        return _bound(f"ERROR: invalid regex '{pattern}': {exc}")
+    except Exception as exc:
+        return _bound(f"ERROR in rlm_grep: {exc}")
+
+
+@mcp.tool()
+@logged_tool
+def rlm_read_chunk(ctx_id: str, chunk_index: int) -> str:
+    """Return the raw content of a single chunk (bounded), after rlm_chunk_context.
+    Deterministic and FREE (no model call) — use to inspect exactly what a chunk holds,
+    e.g. a chunk that rlm_sub_query_batch flagged. Chunk indices are 0-based."""
+    try:
+        meta = STORE.get(ctx_id)
+        if not meta.chunks:
+            return _bound(f"ERROR: {ctx_id} has not been chunked; call rlm_chunk_context first.")
+        if chunk_index < 0 or chunk_index >= len(meta.chunks):
+            return _bound(f"ERROR: chunk {chunk_index} out of range (0..{len(meta.chunks) - 1}).")
+        ch = meta.chunks[chunk_index]
+        lbl = f" — {ch['label']}" if ch.get("label") else ""
+        body = STORE.read_chunk(ctx_id, chunk_index)
+        return _bound(
+            f"## chunk {chunk_index}/{len(meta.chunks) - 1} of {ctx_id}{lbl}\n"
+            f"lines {ch['start_line']}-{ch['end_line']}, ~{ch['est_tokens']:,} tok\n"
+            f"```\n{body}\n```"
+        )
+    except Exception as exc:
+        return _bound(f"ERROR in rlm_read_chunk: {exc}")
+
+
+# ============================================================================
+# Context lifecycle
+# ============================================================================
+@mcp.tool()
+@logged_tool
+def rlm_list_contexts() -> str:
+    """List all loaded contexts with size / token / chunk metadata (no content).
+    Use to see what's in the store and pick a ctx_id; pair with rlm_drop_context to
+    evict ones you no longer need."""
+    try:
+        metas = STORE.list_metas()
+        if not metas:
+            return _bound("No contexts loaded.")
+        lines = [f"## Loaded contexts ({len(metas)})", ""]
+        for m in metas:
+            lines.append(
+                f"- `{m.ctx_id}` — {m.bytes:,} B, ~{m.est_tokens:,} tok, {m.lines:,} lines, "
+                f"{len(m.chunks)} chunk(s) — {m.source_type}/{m.data_type} — {m.source}"
+            )
+        return _bound("\n".join(lines))
+    except Exception as exc:
+        return _bound(f"ERROR in rlm_list_contexts: {exc}")
+
+
+@mcp.tool()
+@logged_tool
+def rlm_drop_context(ctx_id: str) -> str:
+    """Evict a loaded context from the store, freeing its metadata and any materialized
+    copy. A file loaded in place is NOT deleted — only the store's reference to it. Ids
+    are not reusable after dropping."""
+    try:
+        if not STORE.drop(ctx_id):
+            return _bound(f"ERROR: unknown context id: {ctx_id}")
+        return _bound(f"Dropped `{ctx_id}`.")
+    except Exception as exc:
+        return _bound(f"ERROR in rlm_drop_context: {exc}")
 
 
 # ============================================================================

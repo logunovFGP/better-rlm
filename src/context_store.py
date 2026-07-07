@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import shutil
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -105,6 +107,30 @@ class ContextStore:
 
     def list_ids(self) -> list[str]:
         return sorted(p.name for p in self.root.glob("ctx_*") if (p / "meta.json").exists())
+
+    def list_metas(self) -> list[ContextMeta]:
+        """All stored contexts as metadata, newest-first; unreadable ones are skipped."""
+        metas: list[ContextMeta] = []
+        for cid in self.list_ids():
+            try:
+                metas.append(self.get(cid))
+            except Exception:
+                continue
+        metas.sort(key=lambda m: m.created, reverse=True)  # created is ISO8601 -> lexical sort
+        return metas
+
+    def drop(self, ctx_id: str) -> bool:
+        """Delete a context's store directory (meta.json + any materialized content).
+        A file referenced in place lives OUTSIDE this dir and is never touched. Returns
+        False if the id was unknown. Guards against path traversal: the target must be a
+        direct ``ctx_*`` child of the store root."""
+        d = self._dir(ctx_id)
+        if d.parent != self.root or not d.name.startswith("ctx_"):
+            raise ValueError(f"Invalid context id: {ctx_id!r}")
+        if not (d / "meta.json").exists():
+            return False
+        shutil.rmtree(d, ignore_errors=True)
+        return True
 
     # -- loaders -----------------------------------------------------------
     def _finalize(self, meta: ContextMeta) -> ContextMeta:
@@ -202,6 +228,28 @@ class ContextStore:
             raise IndexError(f"chunk {index} out of range (0..{len(meta.chunks) - 1})")
         ch = meta.chunks[index]
         return self.read_text(ctx_id)[ch["start"]:ch["end"]]
+
+    def grep(self, ctx_id: str, pattern: str, *, ignore_case: bool = False,
+             max_matches: int = 50, max_line_len: int = 500) -> tuple[list[tuple[int, str]], bool]:
+        """Stream the context content line by line and return up to ``max_matches``
+        ``(1-based lineno, clamped line)`` tuples plus a ``capped`` flag (True if the scan
+        stopped early on reaching ``max_matches`` — more may exist). Streaming keeps this
+        bounded on multi-GB contexts. Raises ``re.error`` on a bad pattern."""
+        rx = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
+        cp = Path(self.get(ctx_id).content_path)
+        out: list[tuple[int, str]] = []
+        capped = False
+        with open(cp, encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh, 1):
+                if rx.search(line):
+                    s = line.rstrip("\n")
+                    if len(s) > max_line_len:
+                        s = s[:max_line_len] + "…"
+                    out.append((i, s))
+                    if len(out) >= max_matches:
+                        capped = True
+                        break
+        return out, capped
 
     def set_chunks(self, ctx_id: str, strategy: str, chunks: list[dict]) -> ContextMeta:
         meta = self.get(ctx_id)
