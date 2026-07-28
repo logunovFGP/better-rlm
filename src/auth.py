@@ -66,19 +66,19 @@ def auth_status() -> str:
 def resolve_auth_mode(cfg: Config) -> str:
     """Authoritative transport selector → 'oauth' (claude CLI) | 'apikey' (SDK).
 
-    Honors ``cfg.mode`` (auto | claude-cli | api, plus lenient aliases). ``auto``
-    prefers the ``claude`` CLI — reusing the existing Claude Code login, so NO token
-    or API key is needed — and falls back to ``ANTHROPIC_API_KEY``.
+    Honors ``cfg.mode`` — the three values config.yaml documents. ``auto`` prefers
+    the ``claude`` CLI — reusing the existing Claude Code login, so NO token or API
+    key is needed — and falls back to ``ANTHROPIC_API_KEY``.
     """
     m = (cfg.mode or MODE_AUTO).strip().lower()
-    if m in (MODE_CLI, "cli", "oauth", "claude_cli"):
+    if m == MODE_CLI:
         if not claude_cli_available(cfg):
             raise RuntimeError(
                 f"mode=claude-cli but the `claude` CLI was not found (cli_path={cfg.cli_path!r}). "
                 "Install Claude Code and log in, or set mode=api with ANTHROPIC_API_KEY."
             )
         return "oauth"
-    if m in (MODE_API, "apikey", "api_key", "sdk"):
+    if m == MODE_API:
         if not _clean_secret(os.getenv("ANTHROPIC_API_KEY")):
             raise RuntimeError("mode=api but ANTHROPIC_API_KEY is not set.")
         return "apikey"

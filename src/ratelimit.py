@@ -64,6 +64,17 @@ def _waits() -> list[float]:
     return list(sched)
 
 
+def _next_delay(exc: BaseException, attempt: int, waits: list[float]) -> float | None:
+    """Seconds to wait before retrying ``exc``, or None if it must propagate.
+
+    The single home of the retry decision, so the sync and async wrappers below
+    cannot drift apart.
+    """
+    if not _is_rate_limit(exc) or attempt >= len(waits):
+        return None
+    return max(waits[attempt], _retry_after_seconds(exc))
+
+
 class _Throttle:
     """Bounded concurrency + minimum inter-dispatch spacing (a global rate gate)."""
 
@@ -102,9 +113,9 @@ def retry_and_queue_retries(fn):
                 try:
                     return fn(*args, **kwargs)
                 except Exception as exc:
-                    if not _is_rate_limit(exc) or attempt >= len(waits):
+                    delay = _next_delay(exc, attempt, waits)
+                    if delay is None:
                         raise
-                    delay = max(waits[attempt], _retry_after_seconds(exc))
             log_event(_LOG, "retry", attempt=attempt + 1, delay_s=round(delay, 1), reason="rate_limit")
             time.sleep(delay)  # slot released — let queued calls proceed while we wait
             attempt += 1
@@ -123,9 +134,9 @@ def aretry_and_queue_retries(fn):
             try:
                 return await fn(*args, **kwargs)
             except Exception as exc:
-                if not _is_rate_limit(exc) or attempt >= len(waits):
+                delay = _next_delay(exc, attempt, waits)
+                if delay is None:
                     raise
-                delay = max(waits[attempt], _retry_after_seconds(exc))
             log_event(_LOG, "retry", attempt=attempt + 1, delay_s=round(delay, 1),
                       reason="rate_limit", mode="async")
             await asyncio.sleep(delay)

@@ -1,8 +1,7 @@
-"""Model-selection strategy.
+"""Model-selection policy.
 
 Centralizes role -> model selection so the logic lives in ONE place instead of
-being hardcoded across engine/server/subquery. The strategy is chosen by auth
-mode:
+being hardcoded across engine/server/subquery. Selection depends on auth mode:
 
 * API key / first-party  -> use the configured model per role verbatim.
 * Claude Code OAuth       -> map each role's model to the closest sibling the
@@ -15,7 +14,6 @@ To change selection behavior, edit here — not every call site.
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from enum import Enum
 
 from .config import Config
@@ -38,58 +36,36 @@ OAUTH_SIBLING: dict[str, str] = {
 }
 
 
-class ModelStrategy(ABC):
-    """Maps a Role to a concrete model id."""
-
-    def __init__(self, cfg: Config):
-        self._by_role = {
-            Role.ROOT: cfg.root_model,
-            Role.OVERRIDE: cfg.root_model_override,
-            Role.SUB: cfg.sub_model,
-        }
-
-    @abstractmethod
-    def model_for(self, role: Role) -> str: ...
-
-    @abstractmethod
-    def map_explicit(self, model_id: str) -> str:
-        """Map a user-supplied explicit model id through the same policy."""
+def configured(cfg: Config, role: Role) -> str:
+    """The model configured for a role, before any auth-mode mapping."""
+    return {
+        Role.ROOT: cfg.root_model,
+        Role.OVERRIDE: cfg.root_model_override,
+        Role.SUB: cfg.sub_model,
+    }[role]
 
 
-class DirectStrategy(ModelStrategy):
-    """API key / first-party: configured model per role, verbatim."""
-
-    def model_for(self, role: Role) -> str:
-        return self._by_role[role]
-
-    def map_explicit(self, model_id: str) -> str:
-        return model_id
+def map_for_mode(auth_mode: str, model_id: str) -> str:
+    """Apply an auth mode's policy to one model id: OAuth remaps to the closest
+    subscription-supported sibling, the API-key path passes through."""
+    return OAUTH_SIBLING.get(model_id, model_id) if auth_mode == "oauth" else model_id
 
 
-class OAuthSiblingStrategy(ModelStrategy):
-    """Claude Code OAuth: each role -> closest subscription-supported sibling."""
-
-    def model_for(self, role: Role) -> str:
-        return OAUTH_SIBLING.get(self._by_role[role], self._by_role[role])
-
-    def map_explicit(self, model_id: str) -> str:
-        return OAUTH_SIBLING.get(model_id, model_id)
+def policy_name(auth_mode: str) -> str:
+    """Name of the active policy, for status display."""
+    return "OAuthSibling" if auth_mode == "oauth" else "Direct"
 
 
-def get_strategy(cfg: Config, auth_mode: str) -> ModelStrategy:
-    return OAuthSiblingStrategy(cfg) if auth_mode == "oauth" else DirectStrategy(cfg)
-
-
-def _current_strategy(cfg: Config) -> ModelStrategy:
-    from .auth import resolve_auth_mode  # lazy to avoid import cycle
-    return get_strategy(cfg, resolve_auth_mode(cfg))
+def _mode(cfg: Config) -> str:
+    from .auth import resolve_auth_mode  # lazy to avoid an import cycle
+    return resolve_auth_mode(cfg)
 
 
 def select(cfg: Config, role: Role) -> str:
     """Resolve the model for a role under the active auth mode."""
-    return _current_strategy(cfg).model_for(role)
+    return map_for_mode(_mode(cfg), configured(cfg, role))
 
 
 def map_model(cfg: Config, model_id: str) -> str:
     """Resolve an explicit user-supplied model id under the active auth mode."""
-    return _current_strategy(cfg).map_explicit(model_id)
+    return map_for_mode(_mode(cfg), model_id)

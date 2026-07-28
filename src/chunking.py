@@ -39,11 +39,9 @@ class Chunk:
 
 
 def _line_starts(text: str) -> list[int]:
-    starts = [0]
-    for i, ch in enumerate(text):
-        if ch == "\n":
-            starts.append(i + 1)
-    return starts
+    """Char offset of every line start. re.finditer beats a per-character loop on
+    the multi-MB contexts this runs over."""
+    return [0, *(m.end() for m in re.finditer("\n", text))]
 
 
 def _mk(text: str, starts: list[int], spans: list[tuple[int, int, str]]) -> list[Chunk]:
