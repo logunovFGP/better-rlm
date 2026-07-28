@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+from itertools import islice
 
 from mcp.server.fastmcp import FastMCP
 
@@ -75,15 +76,14 @@ def _meta_block(meta) -> str:
 
 
 def _resolve_root_model(model_override: str) -> str:
-    """Map the model_override arg to a concrete model via the selection strategy.
-
-    '' / default / sonnet / root -> Role.ROOT;  opus / override / hardest -> Role.OVERRIDE;
-    an explicit model id is used as-is (but still sibling-mapped under OAuth).
+    """Map the model_override arg to a concrete model, per the documented values:
+    '' -> Role.ROOT;  'opus' -> Role.OVERRIDE;  an explicit model id is used as-is
+    (but still sibling-mapped under OAuth).
     """
     mo = (model_override or "").strip().lower()
-    if mo in ("opus", "override", "hardest", "max"):
+    if mo == "opus":
         return models.select(CFG, models.Role.OVERRIDE)
-    if model_override and mo not in ("", "default", "sonnet", "root"):
+    if mo:
         return models.map_model(CFG, model_override)
     return models.select(CFG, models.Role.ROOT)
 
@@ -144,13 +144,8 @@ def rlm_inspect_context(ctx_id: str, preview_lines: int = 40) -> str:
     context. Use to sanity-check what was loaded without pulling the content."""
     try:
         meta = STORE.get(ctx_id)
-        head: list[str] = []
         with open(meta.content_path, encoding="utf-8", errors="replace") as fh:
-            for i, line in enumerate(fh):
-                if i >= preview_lines:
-                    break
-                head.append(line.rstrip("\n"))
-        preview = "\n".join(head)
+            preview = "".join(islice(fh, preview_lines)).rstrip("\n")
         return _bound(f"## Context {ctx_id}\n{_meta_block(meta)}\n\n### Preview (first {preview_lines} lines)\n```\n{preview}\n```")
     except Exception as exc:
         return _bound(f"ERROR: {exc}")
@@ -505,10 +500,11 @@ def rlm_status() -> str:
         transport = "cli (claude CLI)" if resolved == "oauth" else "api (Anthropic SDK)"
     except Exception as exc:
         resolved, transport = None, f"UNRESOLVED — {exc}"
-    strat = models.get_strategy(CFG, resolved or "apikey")
-    root = strat.model_for(models.Role.ROOT)
-    override = strat.model_for(models.Role.OVERRIDE)
-    sub = strat.model_for(models.Role.SUB)
+    mode = resolved or "apikey"
+    root, override, sub = (
+        models.map_for_mode(mode, models.configured(CFG, r))
+        for r in (models.Role.ROOT, models.Role.OVERRIDE, models.Role.SUB)
+    )
     ids = STORE.list_ids()
     return _bound(
         "## RLM MCP status\n"
@@ -517,7 +513,7 @@ def rlm_status() -> str:
         f"- claude CLI ({CFG.cli_path}): {'found at ' + claude_cli if claude_cli else 'NOT FOUND on PATH'}"
         f"  | system-prompt mode: {CFG.cli_system_prompt_mode}, safe-mode: {CFG.cli_safe_mode}\n"
         f"- explicit credentials present: {creds}  (claude-cli mode needs NONE — the CLI uses its own login)\n"
-        f"- selection strategy: {type(strat).__name__}\n"
+        f"- selection policy: {models.policy_name(mode)}\n"
         f"- resolved models → root: {root} | override: {override} | sub: {sub}\n"
         f"- configured models → root: {CFG.root_model} | override: {CFG.root_model_override} | sub: {CFG.sub_model}\n"
         f"- sandbox: {CFG.sandbox} (image: {CFG.sandbox_image})\n"

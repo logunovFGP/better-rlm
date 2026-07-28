@@ -1,37 +1,30 @@
 import dataclasses
 
 from src.config import MODEL_HAIKU, MODEL_OPUS, MODEL_SONNET_5, load_config
-from src.models import (
-    DirectStrategy,
-    OAuthSiblingStrategy,
-    Role,
-    get_strategy,
-)
+from src.models import Role, configured, map_for_mode, policy_name
 
 
-def test_direct_strategy_uses_configured_models():
+def test_apikey_mode_uses_configured_models_verbatim():
     cfg = load_config()
-    s = DirectStrategy(cfg)
-    assert s.model_for(Role.ROOT) == MODEL_SONNET_5
-    assert s.model_for(Role.OVERRIDE) == MODEL_OPUS
-    assert s.model_for(Role.SUB) == MODEL_HAIKU
-    assert s.map_explicit("claude-fable-5") == "claude-fable-5"  # no remap on api key
+    for role, expected in ((Role.ROOT, MODEL_SONNET_5),
+                           (Role.OVERRIDE, MODEL_OPUS),
+                           (Role.SUB, MODEL_HAIKU)):
+        assert map_for_mode("apikey", configured(cfg, role)) == expected
+    assert map_for_mode("apikey", "claude-fable-5") == "claude-fable-5"  # no remap
 
 
-def test_oauth_strategy_maps_unavailable_to_closest_sibling():
+def test_oauth_mode_maps_unavailable_to_closest_sibling():
     cfg = load_config()
-    s = OAuthSiblingStrategy(cfg)
     # current models pass through unchanged
-    assert s.model_for(Role.ROOT) == MODEL_SONNET_5
-    assert s.model_for(Role.SUB) == MODEL_HAIKU
+    assert map_for_mode("oauth", configured(cfg, Role.ROOT)) == MODEL_SONNET_5
+    assert map_for_mode("oauth", configured(cfg, Role.SUB)) == MODEL_HAIKU
     # an unavailable model is mapped to its closest sibling
-    assert s.map_explicit("claude-fable-5") == "claude-opus-4-8"
+    assert map_for_mode("oauth", "claude-fable-5") == "claude-opus-4-8"
     # and via role config too
     cfg2 = dataclasses.replace(cfg, root_model="claude-fable-5")
-    assert OAuthSiblingStrategy(cfg2).model_for(Role.ROOT) == "claude-opus-4-8"
+    assert map_for_mode("oauth", configured(cfg2, Role.ROOT)) == "claude-opus-4-8"
 
 
-def test_get_strategy_picks_by_auth_mode():
-    cfg = load_config()
-    assert isinstance(get_strategy(cfg, "oauth"), OAuthSiblingStrategy)
-    assert isinstance(get_strategy(cfg, "apikey"), DirectStrategy)
+def test_policy_name_reports_the_active_mode():
+    assert policy_name("oauth") == "OAuthSibling"
+    assert policy_name("apikey") == "Direct"
