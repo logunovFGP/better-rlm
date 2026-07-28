@@ -17,6 +17,7 @@ from rlm.core.rlm import RLM
 from rlm.environments import get_environment
 
 from .auth import patch_engine
+from .sandbox_patch import patch_sandbox
 from .config import Config, cost_usd
 from .logsetup import log_event
 from rlm.utils.prompts import RLM_SYSTEM_PROMPT
@@ -48,6 +49,7 @@ def build_rlm(cfg: Config, root_model: str, sub_model: str) -> RLM:
     """Construct an RLM with the given (already-resolved) root + sub models on
     the Docker sandbox. Auth is injected by patch_engine() — no real key here."""
     patch_engine()
+    patch_sandbox()
     env_kwargs = {"image": cfg.sandbox_image} if cfg.use_docker else {}
     return RLM(
         backend="anthropic",
@@ -132,6 +134,7 @@ class ReplSession:
 
     def _ensure(self):
         if self._env is None:
+            patch_sandbox()
             env_kwargs = {"image": self.cfg.sandbox_image} if self.cfg.use_docker else {}
             self._env = get_environment(self.cfg.sandbox, env_kwargs)
             self._env.execute_code("answer = {'content': '', 'ready': False}")
