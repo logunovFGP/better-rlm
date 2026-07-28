@@ -62,6 +62,9 @@ def build_rlm(cfg: Config, root_model: str, sub_model: str) -> RLM:
         environment_kwargs=env_kwargs,
         max_depth=cfg.max_depth,
         max_iterations=cfg.max_iterations,
+        # Was never passed: the engine fell back to its own default of 4, silently
+        # ignoring the configured value.
+        max_concurrent_subcalls=cfg.max_concurrent_subcalls,
         other_backends=["anthropic"],
         other_backend_kwargs=[{
             "model_name": sub_model,

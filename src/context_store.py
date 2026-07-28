@@ -208,18 +208,6 @@ class ContextStore:
     def read_text(self, ctx_id: str) -> str:
         return Path(self.get(ctx_id).content_path).read_text(encoding="utf-8", errors="replace")
 
-    def preview(self, ctx_id: str, n_bytes: int) -> str:
-        cp = Path(self.get(ctx_id).content_path)
-        size = cp.stat().st_size
-        with open(cp, "rb") as fh:
-            head = fh.read(n_bytes)
-            if size > 2 * n_bytes:
-                fh.seek(-n_bytes, 2)
-                tail = fh.read(n_bytes)
-                return (head.decode("utf-8", "ignore") + "\n…[middle elided]…\n"
-                        + tail.decode("utf-8", "ignore"))
-        return head.decode("utf-8", "ignore")
-
     def read_chunk(self, ctx_id: str, index: int) -> str:
         meta = self.get(ctx_id)
         if not meta.chunks:

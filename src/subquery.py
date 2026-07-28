@@ -64,6 +64,6 @@ def sub_query_batch(prompts: list[str], model: str, *, concurrency: int,
             except Exception as exc:
                 return SubResult(idx, "", 0, 0, error=str(exc))
 
+    # pool.map yields in submission order, so results already line up with `prompts`.
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
-        results = list(pool.map(work, enumerate(prompts)))
-    return sorted(results, key=lambda r: r.index)
+        return list(pool.map(work, enumerate(prompts)))
