@@ -55,15 +55,12 @@ class CompletionResult:
     cost_usd: float | None = None
 
 
-class CliError(RuntimeError):
-    """Base for failures from the `claude` CLI transport."""
+class CliCompletionError(RuntimeError):
+    """Non-retryable failure from the `claude` CLI (bad invocation, crash,
+    unparseable output)."""
 
 
-class CliCompletionError(CliError):
-    """Non-retryable CLI failure (bad invocation, crash, unparseable output)."""
-
-
-class CliRateLimitError(CliError):
+class CliRateLimitError(RuntimeError):
     """CLI hit a rate/usage limit. Flagged so ratelimit._is_rate_limit retries it."""
 
     is_rate_limit = True

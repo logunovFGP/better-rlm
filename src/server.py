@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 
 from mcp.server.fastmcp import FastMCP
 
@@ -462,7 +463,7 @@ def rlm_set_variable(name: str, value: str) -> str:
     try:
         try:
             parsed = json.loads(value)
-        except (json.JSONDecodeError, ValueError):
+        except ValueError:  # JSONDecodeError is a ValueError
             parsed = value
         _get_repl().set_var(name, parsed)
         return _bound(f"set `{name}` = {parsed!r}")
@@ -496,7 +497,6 @@ def rlm_set_answer(value: str) -> str:
 def rlm_status() -> str:
     """Report configuration, the active auth + model-selection strategy with the
     RESOLVED models, loaded contexts, and sandbox/Docker availability."""
-    import shutil
     docker_ok = shutil.which("docker") is not None
     claude_cli = shutil.which(CFG.cli_path)
     creds = auth.auth_status()  # which explicit credential exists (display only)

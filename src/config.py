@@ -50,7 +50,6 @@ _DEFAULTS: dict[str, Any] = {
     "subquery_concurrency": 3,
     "output_cap_bytes": 4096,      # raw-content tools (load/inspect/chunk/exec/vars/status)
     "answer_cap_bytes": 131072,    # synthesis tools (rlm_query/sub_query[_batch]) — the answer IS the deliverable
-    "preview_bytes": 2048,
     "chunk_strategy": "lines",
     "chunk_lines": 2000,
     "chunk_chars": 120_000,
@@ -118,7 +117,6 @@ class Config:
     subquery_concurrency: int
     output_cap_bytes: int
     answer_cap_bytes: int
-    preview_bytes: int
     chunk_strategy: str
     chunk_lines: int
     chunk_chars: int
@@ -169,7 +167,6 @@ def load_config() -> Config:
         subquery_concurrency=int(m["subquery_concurrency"]),
         output_cap_bytes=int(m["output_cap_bytes"]),
         answer_cap_bytes=int(m["answer_cap_bytes"]),
-        preview_bytes=int(m["preview_bytes"]),
         chunk_strategy=str(m["chunk_strategy"]),
         chunk_lines=int(m["chunk_lines"]),
         chunk_chars=int(m["chunk_chars"]),

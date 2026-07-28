@@ -33,6 +33,8 @@ import uuid
 
 from rlm.environments import docker_repl as _dr
 
+from .config import load_config
+
 _LOG = logging.getLogger("rlm-mcp")
 
 #: Per-variable cap for the ``locals`` echo — enough to identify a variable,
@@ -43,10 +45,9 @@ REPR_CAP = 200
 #: instead of being read as "the cell printed nothing".
 SENTINEL = "__RLM_RESULT__"
 
-#: Wall-clock ceiling for one sandbox call, mirroring config's
-#: ``sandbox_timeout_s``. Env override keeps it tunable without threading the
-#: config object into the vendored environment.
-TIMEOUT_S = int(os.environ.get("RLM_EXEC_TIMEOUT_S", "300"))
+#: Wall-clock ceiling for one sandbox call. Reads the ``sandbox_timeout_s`` knob
+#: that config.yaml already documents — until now nothing enforced it.
+TIMEOUT_S = load_config().sandbox_timeout_s
 
 
 def _sub(script: str, old: str, new: str, what: str) -> str:

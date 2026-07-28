@@ -28,9 +28,3 @@ def test_load_dir_concatenates_and_chunks_per_file(cfg, tmp_path):
     store.set_chunks(meta.ctx_id, "files", [c.as_dict() for c in chunks])
     assert len(store.get(meta.ctx_id).chunks) == 2
     assert "print(" in store.read_chunk(meta.ctx_id, 0)
-
-
-def test_preview_head(cfg):
-    store = ContextStore(cfg)
-    meta = store.load_text("hello world\n" * 10, source="t")
-    assert "hello world" in store.preview(meta.ctx_id, 64)

@@ -25,11 +25,9 @@ import os
 import shutil
 
 import anthropic
-from dotenv import load_dotenv
 
-from .config import PKG_ROOT, Config
-
-load_dotenv(PKG_ROOT / ".env")
+# Importing .config runs its module body, which loads .env — no second load here.
+from .config import Config
 
 MODE_AUTO = "auto"
 MODE_CLI = "claude-cli"
