@@ -91,6 +91,8 @@ def chunk_text(text: str, strategy: str, *, chunk_lines: int, chunk_chars: int, 
                 break
         return _mk(text, starts, spans)
 
+    # "semantic" is paragraph-boundary splitting with a larger target — NOT
+    # embedding-based. Same code path, bigger chunks.
     if strategy in ("paragraphs", "semantic"):
         target = chunk_chars if strategy == "semantic" else min(chunk_chars, 40_000)
         paras = [m.start() for m in re.finditer(r"\n[ \t]*\n", text)]
@@ -105,12 +107,10 @@ def chunk_text(text: str, strategy: str, *, chunk_lines: int, chunk_chars: int, 
         spans = _split_points_to_spans(text, [s for s, _, _ in spans], chunk_chars)
         return _mk(text, starts, spans)
 
-    if strategy == "functions":
-        pts = [m.start() for m in _FUNC.finditer(text)]
-        return _mk(text, starts, _split_points_to_spans(text, pts, chunk_chars))
-
-    if strategy == "headings":
-        pts = [m.start() for m in _HEADING.finditer(text)]
+    # Both split on a marker regex; only the regex differs.
+    marker = {"functions": _FUNC, "headings": _HEADING}.get(strategy)
+    if marker is not None:
+        pts = [m.start() for m in marker.finditer(text)]
         return _mk(text, starts, _split_points_to_spans(text, pts, chunk_chars))
 
     # strategy == "files"

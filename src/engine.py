@@ -151,16 +151,6 @@ class ReplSession:
         r = self._ensure().execute_code(code)
         return (r.stdout or ""), (r.stderr or "")
 
-    def set_var(self, name: str, value) -> None:
-        self._ensure().execute_code(f"{name} = {value!r}")
-
-    def get_var(self, name: str) -> str:
-        r = self._ensure().execute_code(f"print(repr({name}))")
-        return (r.stdout or "").strip()
-
-    def set_answer(self, value: str) -> None:
-        self._ensure().execute_code(f"answer = {{'content': {value!r}, 'ready': True}}")
-
     def close(self) -> None:
         if self._env is not None and hasattr(self._env, "cleanup"):
             self._env.cleanup()
