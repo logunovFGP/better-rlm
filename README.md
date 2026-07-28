@@ -43,11 +43,17 @@ Role→model mapping lives in one place — `src/models.py` (a strategy pattern)
 - **Claude Code OAuth:** each role maps to the closest **subscription-supported sibling**. Verified by a live probe: current 4.x IDs work as-is; `claude-fable-5` is mapped to `claude-opus-4-8` (the API's own guidance), and deprecated dated IDs map to their current equivalents.
 `rlm_status` prints both the configured and the resolved models for the active auth mode.
 
-## Tools (12)
-`rlm_load_context` · `rlm_load_file` · `rlm_inspect_context` · `rlm_chunk_context` ·
-`rlm_query` (full recursive: Sonnet root + Haiku sub in Docker) · `rlm_sub_query` ·
-`rlm_sub_query_batch` (Haiku map-reduce) · `rlm_exec` (Python in the sandbox) ·
-`rlm_set_variable` · `rlm_get_variable` · `rlm_set_answer` · `rlm_status`.
+## Tools (13)
+**Load & inspect** — `rlm_load_context` · `rlm_load_file` · `rlm_inspect_context` ·
+`rlm_chunk_context`
+**Deterministic retrieval (free, no model call)** — `rlm_grep` · `rlm_read_chunk`
+**Lifecycle** — `rlm_list_contexts` · `rlm_drop_context`
+**Model-backed** — `rlm_query` (full recursive: Sonnet root + Haiku sub in Docker) ·
+`rlm_sub_query` · `rlm_sub_query_batch` (Haiku map-reduce)
+**Sandbox & status** — `rlm_exec` (Python in the sandbox) · `rlm_status`
+
+Set or read sandbox variables through `rlm_exec` itself (`name = value`,
+`print(repr(name))`) — there are no separate variable tools.
 
 ## Prerequisites
 - macOS/Linux, **Python 3.12 or 3.13** (the engine has no 3.14 wheels), `uv` recommended.

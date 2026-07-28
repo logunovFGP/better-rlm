@@ -17,7 +17,6 @@ Run:  python -m src.server   (stdio transport)
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
@@ -53,7 +52,7 @@ def _get_repl() -> ReplSession:
 
 
 def _bound(text: str) -> str:
-    # Raw-content tools (load/inspect/chunk/exec/vars/status): keep the tiny cap so
+    # Raw-content tools (load/inspect/chunk/grep/read/list/exec/status): keep the tiny cap so
     # raw file content never floods the root context.
     return bound_output(text, CFG.output_cap_bytes)
 
@@ -413,34 +412,6 @@ def rlm_exec(code: str, ctx_id: str = "") -> str:
     if err.strip():
         body += f"\n### stderr\n```\n{err}\n```"
     return _bound(body)
-
-
-@mcp.tool()
-@logged_tool
-def rlm_set_variable(name: str, value: str) -> str:
-    """Set a variable in the sandbox REPL. `value` is parsed as JSON if possible
-    (so dicts/lists/numbers work), else treated as a string."""
-    try:
-        parsed = json.loads(value)
-    except ValueError:  # JSONDecodeError is a ValueError
-        parsed = value
-    _get_repl().set_var(name, parsed)
-    return _bound(f"set `{name}` = {parsed!r}")
-
-
-@mcp.tool()
-@logged_tool
-def rlm_get_variable(name: str) -> str:
-    """Return the repr of a variable from the sandbox REPL (bounded)."""
-    return _bound(f"`{name}` = {_get_repl().get_var(name)}")
-
-
-@mcp.tool()
-@logged_tool
-def rlm_set_answer(value: str) -> str:
-    """Set the sandbox REPL's final-answer signal (answer['content']/['ready'])."""
-    _get_repl().set_answer(value)
-    return _bound("answer set (ready=True)")
 
 
 @mcp.tool()
