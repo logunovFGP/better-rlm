@@ -26,7 +26,8 @@ import time
 import uuid
 from pathlib import Path
 
-from .config import Config
+from .config import Config, load_config
+from .output import bound_output
 
 LOGGER_NAME = "rlm-mcp"
 _MAX_VAL_LEN = 500  # clamp any single logged value so one record can't bloat the file
@@ -219,8 +220,10 @@ _LEN_ARGS = ("question", "prompt", "code", "source", "value")
 
 def logged_tool(fn):
     """Wrap an @mcp.tool() function to emit an ``evt=tool_call`` record (rid, args
-    summary, duration, outcome). Uses functools.wraps so FastMCP still introspects the
-    original signature for the tool schema."""
+    summary, duration, outcome) and to turn an unhandled exception into the bounded
+    ``ERROR in <tool>: ...`` string the tools contract on — the tool boundary is the
+    one place that conversion belongs. Uses functools.wraps so FastMCP still
+    introspects the original signature for the tool schema."""
     sig = inspect.signature(fn)
     tool = fn.__name__
     logger = get_logger()
@@ -248,10 +251,10 @@ def logged_tool(fn):
         rid_token = _RID.set(rid)  # visible to every nested event for this call
         try:
             result = fn(*args, **kwargs)
-        except Exception as exc:  # tools normally return strings, but be safe
+        except Exception as exc:
             log_event(logger, "tool_call", **fields, dur_ms=round((time.monotonic() - start) * 1000),
                       outcome="error", err=f"{type(exc).__name__}: {exc}")
-            raise
+            return bound_output(f"ERROR in {tool}: {exc}", load_config().output_cap_bytes)
         finally:
             _RID.reset(rid_token)
         dur_ms = round((time.monotonic() - start) * 1000)

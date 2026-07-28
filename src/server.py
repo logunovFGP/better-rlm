@@ -103,24 +103,21 @@ def rlm_load_context(source: str, source_type: str = "auto") -> str:
 
     source_type: auto | text | file | dir (auto detects path vs inline text).
     """
-    try:
-        st = source_type
-        if st == "auto":
-            if os.path.isdir(source):
-                st = "dir"
-            elif os.path.isfile(source):
-                st = "file"
-            else:
-                st = "text"
-        if st == "dir":
-            meta = STORE.load_dir(source)
-        elif st == "file":
-            meta = STORE.load_file(source, data_type="text")
+    st = source_type
+    if st == "auto":
+        if os.path.isdir(source):
+            st = "dir"
+        elif os.path.isfile(source):
+            st = "file"
         else:
-            meta = STORE.load_text(source)
-        return _bound("## Context loaded\n" + _meta_block(meta))
-    except Exception as exc:
-        return _bound(f"ERROR loading context: {exc}")
+            st = "text"
+    if st == "dir":
+        meta = STORE.load_dir(source)
+    elif st == "file":
+        meta = STORE.load_file(source, data_type="text")
+    else:
+        meta = STORE.load_text(source)
+    return _bound("## Context loaded\n" + _meta_block(meta))
 
 
 @mcp.tool()
@@ -130,11 +127,8 @@ def rlm_load_file(path: str, data_type: str = "text") -> str:
     file too large to read directly (big logs, dumps, exports). data_type: text | log
     | pdf (pdf needs the optional pypdf extra). Large text/log files are referenced in
     place (no copy). Returns a ctx_id; then call rlm_query / rlm_sub_query / rlm_exec."""
-    try:
-        meta = STORE.load_file(path, data_type=data_type)
-        return _bound("## File loaded\n" + _meta_block(meta))
-    except Exception as exc:
-        return _bound(f"ERROR loading file: {exc}")
+    meta = STORE.load_file(path, data_type=data_type)
+    return _bound("## File loaded\n" + _meta_block(meta))
 
 
 @mcp.tool()
@@ -142,13 +136,10 @@ def rlm_load_file(path: str, data_type: str = "text") -> str:
 def rlm_inspect_context(ctx_id: str, preview_lines: int = 40) -> str:
     """Return metadata plus a small bounded preview (head lines) for a loaded
     context. Use to sanity-check what was loaded without pulling the content."""
-    try:
-        meta = STORE.get(ctx_id)
-        with open(meta.content_path, encoding="utf-8", errors="replace") as fh:
-            preview = "".join(islice(fh, preview_lines)).rstrip("\n")
-        return _bound(f"## Context {ctx_id}\n{_meta_block(meta)}\n\n### Preview (first {preview_lines} lines)\n```\n{preview}\n```")
-    except Exception as exc:
-        return _bound(f"ERROR: {exc}")
+    meta = STORE.get(ctx_id)
+    with open(meta.content_path, encoding="utf-8", errors="replace") as fh:
+        preview = "".join(islice(fh, preview_lines)).rstrip("\n")
+    return _bound(f"## Context {ctx_id}\n{_meta_block(meta)}\n\n### Preview (first {preview_lines} lines)\n```\n{preview}\n```")
 
 
 @mcp.tool()
@@ -159,28 +150,25 @@ def rlm_chunk_context(ctx_id: str, strategy: str = "", size: int = 0, overlap: i
     (default from config). 'size' = lines-per-chunk for the lines strategy.
     Returns chunk count + per-chunk metadata (no content). Chunk defaults stay
     well under Haiku's 200K-token ceiling so sub-queries fit."""
-    try:
-        strategy = strategy or CFG.chunk_strategy
-        if strategy not in STRATEGIES:
-            return _bound(f"ERROR: unknown strategy '{strategy}'. Choose from {', '.join(STRATEGIES)}.")
-        text = STORE.read_text(ctx_id)
-        chunks = chunk_text(
-            text, strategy,
-            chunk_lines=size or CFG.chunk_lines,
-            chunk_chars=CFG.chunk_chars,
-            overlap=overlap or CFG.chunk_overlap,
-        )
-        STORE.set_chunks(ctx_id, strategy, [c.as_dict() for c in chunks])
-        lines = [f"## Chunked {ctx_id} — {len(chunks)} chunks ({strategy})", ""]
-        for c in chunks[:25]:
-            lbl = f" {c.label}" if c.label else ""
-            lines.append(f"- [{c.index}] lines {c.start_line}-{c.end_line}, "
-                         f"~{c.est_tokens:,} tok{lbl}")
-        if len(chunks) > 25:
-            lines.append(f"… (+{len(chunks) - 25} more)")
-        return _bound("\n".join(lines))
-    except Exception as exc:
-        return _bound(f"ERROR chunking: {exc}")
+    strategy = strategy or CFG.chunk_strategy
+    if strategy not in STRATEGIES:
+        return _bound(f"ERROR: unknown strategy '{strategy}'. Choose from {', '.join(STRATEGIES)}.")
+    text = STORE.read_text(ctx_id)
+    chunks = chunk_text(
+        text, strategy,
+        chunk_lines=size or CFG.chunk_lines,
+        chunk_chars=CFG.chunk_chars,
+        overlap=overlap or CFG.chunk_overlap,
+    )
+    STORE.set_chunks(ctx_id, strategy, [c.as_dict() for c in chunks])
+    lines = [f"## Chunked {ctx_id} — {len(chunks)} chunks ({strategy})", ""]
+    for c in chunks[:25]:
+        lbl = f" {c.label}" if c.label else ""
+        lines.append(f"- [{c.index}] lines {c.start_line}-{c.end_line}, "
+                     f"~{c.est_tokens:,} tok{lbl}")
+    if len(chunks) > 25:
+        lines.append(f"… (+{len(chunks) - 25} more)")
+    return _bound("\n".join(lines))
 
 
 # ============================================================================
@@ -207,10 +195,8 @@ def rlm_grep(ctx_id: str, pattern: str, ignore_case: bool = False, max_matches: 
             f"## grep `{pattern}` in {ctx_id} — {len(matches)} match(es){note}\n"
             f"```\n{body}\n```"
         )
-    except re.error as exc:
+    except re.error as exc:  # a bad pattern deserves better than the generic message
         return _bound(f"ERROR: invalid regex '{pattern}': {exc}")
-    except Exception as exc:
-        return _bound(f"ERROR in rlm_grep: {exc}")
 
 
 @mcp.tool()
@@ -219,22 +205,19 @@ def rlm_read_chunk(ctx_id: str, chunk_index: int) -> str:
     """Return the raw content of a single chunk (bounded), after rlm_chunk_context.
     Deterministic and FREE (no model call) — use to inspect exactly what a chunk holds,
     e.g. a chunk that rlm_sub_query_batch flagged. Chunk indices are 0-based."""
-    try:
-        meta = STORE.get(ctx_id)
-        if not meta.chunks:
-            return _bound(f"ERROR: {ctx_id} has not been chunked; call rlm_chunk_context first.")
-        if chunk_index < 0 or chunk_index >= len(meta.chunks):
-            return _bound(f"ERROR: chunk {chunk_index} out of range (0..{len(meta.chunks) - 1}).")
-        ch = meta.chunks[chunk_index]
-        lbl = f" — {ch['label']}" if ch.get("label") else ""
-        body = STORE.read_chunk(ctx_id, chunk_index)
-        return _bound(
-            f"## chunk {chunk_index}/{len(meta.chunks) - 1} of {ctx_id}{lbl}\n"
-            f"lines {ch['start_line']}-{ch['end_line']}, ~{ch['est_tokens']:,} tok\n"
-            f"```\n{body}\n```"
-        )
-    except Exception as exc:
-        return _bound(f"ERROR in rlm_read_chunk: {exc}")
+    meta = STORE.get(ctx_id)
+    if not meta.chunks:
+        return _bound(f"ERROR: {ctx_id} has not been chunked; call rlm_chunk_context first.")
+    if chunk_index < 0 or chunk_index >= len(meta.chunks):
+        return _bound(f"ERROR: chunk {chunk_index} out of range (0..{len(meta.chunks) - 1}).")
+    ch = meta.chunks[chunk_index]
+    lbl = f" — {ch['label']}" if ch.get("label") else ""
+    body = STORE.read_chunk(ctx_id, chunk_index)
+    return _bound(
+        f"## chunk {chunk_index}/{len(meta.chunks) - 1} of {ctx_id}{lbl}\n"
+        f"lines {ch['start_line']}-{ch['end_line']}, ~{ch['est_tokens']:,} tok\n"
+        f"```\n{body}\n```"
+    )
 
 
 # ============================================================================
@@ -246,19 +229,16 @@ def rlm_list_contexts() -> str:
     """List all loaded contexts with size / token / chunk metadata (no content).
     Use to see what's in the store and pick a ctx_id; pair with rlm_drop_context to
     evict ones you no longer need."""
-    try:
-        metas = STORE.list_metas()
-        if not metas:
-            return _bound("No contexts loaded.")
-        lines = [f"## Loaded contexts ({len(metas)})", ""]
-        for m in metas:
-            lines.append(
-                f"- `{m.ctx_id}` — {m.bytes:,} B, ~{m.est_tokens:,} tok, {m.lines:,} lines, "
-                f"{len(m.chunks)} chunk(s) — {m.source_type}/{m.data_type} — {m.source}"
-            )
-        return _bound("\n".join(lines))
-    except Exception as exc:
-        return _bound(f"ERROR in rlm_list_contexts: {exc}")
+    metas = STORE.list_metas()
+    if not metas:
+        return _bound("No contexts loaded.")
+    lines = [f"## Loaded contexts ({len(metas)})", ""]
+    for m in metas:
+        lines.append(
+            f"- `{m.ctx_id}` — {m.bytes:,} B, ~{m.est_tokens:,} tok, {m.lines:,} lines, "
+            f"{len(m.chunks)} chunk(s) — {m.source_type}/{m.data_type} — {m.source}"
+        )
+    return _bound("\n".join(lines))
 
 
 @mcp.tool()
@@ -267,12 +247,9 @@ def rlm_drop_context(ctx_id: str) -> str:
     """Evict a loaded context from the store, freeing its metadata and any materialized
     copy. A file loaded in place is NOT deleted — only the store's reference to it. Ids
     are not reusable after dropping."""
-    try:
-        if not STORE.drop(ctx_id):
-            return _bound(f"ERROR: unknown context id: {ctx_id}")
-        return _bound(f"Dropped `{ctx_id}`.")
-    except Exception as exc:
-        return _bound(f"ERROR in rlm_drop_context: {exc}")
+    if not STORE.drop(ctx_id):
+        return _bound(f"ERROR: unknown context id: {ctx_id}")
+    return _bound(f"Dropped `{ctx_id}`.")
 
 
 # ============================================================================
@@ -290,23 +267,20 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
     model_override: '' (Sonnet) | 'opus' (Opus 4.8, hardest tasks) | explicit model id.
     Models are resolved by the selection strategy (closest OAuth sibling when on OAuth).
     """
-    try:
-        root_model = _resolve_root_model(model_override)
-        sub_model = models.select(CFG, models.Role.SUB)
-        text = STORE.read_text(ctx_id)
-        res = run_query(CFG, text, question, root_model, sub_model)
-        rows = "\n".join(
-            f"  - {r['model']}: {r['calls']} calls, "
-            f"{r['input_tokens']:,} in / {r['output_tokens']:,} out, ${r['cost_usd']:.4f}"
-            for r in res["usage"]
-        )
-        return _answer(
-            f"## RLM answer (root: {res['root_model']}, sub: {res['sub_model']})\n\n{res['answer']}\n\n"
-            f"---\n**Model routing / usage:**\n{rows}\n"
-            f"**Total cost:** ${res['cost_usd']:.4f}  |  **Time:** {res['execution_time']}s"
-        )
-    except Exception as exc:
-        return _bound(f"ERROR in rlm_query: {exc}")
+    root_model = _resolve_root_model(model_override)
+    sub_model = models.select(CFG, models.Role.SUB)
+    text = STORE.read_text(ctx_id)
+    res = run_query(CFG, text, question, root_model, sub_model)
+    rows = "\n".join(
+        f"  - {r['model']}: {r['calls']} calls, "
+        f"{r['input_tokens']:,} in / {r['output_tokens']:,} out, ${r['cost_usd']:.4f}"
+        for r in res["usage"]
+    )
+    return _answer(
+        f"## RLM answer (root: {res['root_model']}, sub: {res['sub_model']})\n\n{res['answer']}\n\n"
+        f"---\n**Model routing / usage:**\n{rows}\n"
+        f"**Total cost:** ${res['cost_usd']:.4f}  |  **Time:** {res['execution_time']}s"
+    )
 
 
 @mcp.tool()
@@ -315,28 +289,25 @@ def rlm_sub_query(ctx_id: str, prompt: str, chunk_index: int = -1) -> str:
     """Run a single Haiku 4.5 sub-query over a context (or one chunk of it).
     Use for cheap, targeted questions. If chunk_index < 0 the whole context is
     used — only do that when it fits Haiku's 200K-token window (else chunk first)."""
-    try:
-        meta = STORE.get(ctx_id)
-        if chunk_index >= 0:
-            body = STORE.read_chunk(ctx_id, chunk_index)
-        else:
-            if meta.est_tokens > 0.9 * HAIKU_CONTEXT_TOKENS:
-                return _bound(
-                    f"ERROR: context ~{meta.est_tokens:,} tokens exceeds Haiku's "
-                    f"{HAIKU_CONTEXT_TOKENS:,} window. Run rlm_chunk_context then "
-                    f"rlm_sub_query_batch, or use rlm_query."
-                )
-            body = STORE.read_text(ctx_id)
-        sub_model = models.select(CFG, models.Role.SUB)
-        res = sub_query(f"{prompt}\n\n--- CONTEXT ---\n{body}", sub_model)
-        if res.error:
-            return _bound(f"ERROR ({sub_model}): {res.error}")
-        return _answer(
-            f"## Sub-query answer ({sub_model})\n\n{res.answer}\n\n---\n"
-            f"tokens: {res.input_tokens:,} in / {res.output_tokens:,} out"
-        )
-    except Exception as exc:
-        return _bound(f"ERROR in rlm_sub_query: {exc}")
+    meta = STORE.get(ctx_id)
+    if chunk_index >= 0:
+        body = STORE.read_chunk(ctx_id, chunk_index)
+    else:
+        if meta.est_tokens > 0.9 * HAIKU_CONTEXT_TOKENS:
+            return _bound(
+                f"ERROR: context ~{meta.est_tokens:,} tokens exceeds Haiku's "
+                f"{HAIKU_CONTEXT_TOKENS:,} window. Run rlm_chunk_context then "
+                f"rlm_sub_query_batch, or use rlm_query."
+            )
+        body = STORE.read_text(ctx_id)
+    sub_model = models.select(CFG, models.Role.SUB)
+    res = sub_query(f"{prompt}\n\n--- CONTEXT ---\n{body}", sub_model)
+    if res.error:
+        return _bound(f"ERROR ({sub_model}): {res.error}")
+    return _answer(
+        f"## Sub-query answer ({sub_model})\n\n{res.answer}\n\n---\n"
+        f"tokens: {res.input_tokens:,} in / {res.output_tokens:,} out"
+    )
 
 
 @mcp.tool()
@@ -351,80 +322,77 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
                  best for "summarize / aggregate / what's the overall picture".
     reduce=False: the raw per-chunk findings concatenated — when you want every piece.
     """
-    try:
+    meta = STORE.get(ctx_id)
+    if not meta.chunks:
+        text = STORE.read_text(ctx_id)
+        chunks = chunk_text(text, CFG.chunk_strategy, chunk_lines=CFG.chunk_lines,
+                            chunk_chars=CFG.chunk_chars, overlap=CFG.chunk_overlap)
+        STORE.set_chunks(ctx_id, CFG.chunk_strategy, [c.as_dict() for c in chunks])
         meta = STORE.get(ctx_id)
-        if not meta.chunks:
-            text = STORE.read_text(ctx_id)
-            chunks = chunk_text(text, CFG.chunk_strategy, chunk_lines=CFG.chunk_lines,
-                                chunk_chars=CFG.chunk_chars, overlap=CFG.chunk_overlap)
-            STORE.set_chunks(ctx_id, CFG.chunk_strategy, [c.as_dict() for c in chunks])
-            meta = STORE.get(ctx_id)
-        n = len(meta.chunks)
-        sel = range(n if max_chunks <= 0 else min(max_chunks, n))
-        prompts = [f"{prompt}\n\n--- CHUNK {i + 1}/{n} ---\n{STORE.read_chunk(ctx_id, i)}" for i in sel]
-        sub_model = models.select(CFG, models.Role.SUB)
-        results = sub_query_batch(prompts, sub_model, concurrency=CFG.subquery_concurrency)
-        itok = sum(r.input_tokens for r in results)
-        otok = sum(r.output_tokens for r in results)
-        errs = [r for r in results if r.error]
-        # Surface partial failures: the tool still returns a success string (so
-        # tool_call logs outcome=ok), which would otherwise hide that some chunks
-        # errored. Same rid ties this back to the parent tool_call.
-        if errs:
-            log_event(LOG, "sub_batch", phase="map", chunks=len(prompts),
-                      errors=len(errs), err_sample=errs[0].error)
+    n = len(meta.chunks)
+    sel = range(n if max_chunks <= 0 else min(max_chunks, n))
+    prompts = [f"{prompt}\n\n--- CHUNK {i + 1}/{n} ---\n{STORE.read_chunk(ctx_id, i)}" for i in sel]
+    sub_model = models.select(CFG, models.Role.SUB)
+    results = sub_query_batch(prompts, sub_model, concurrency=CFG.subquery_concurrency)
+    itok = sum(r.input_tokens for r in results)
+    otok = sum(r.output_tokens for r in results)
+    errs = [r for r in results if r.error]
+    # Surface partial failures: the tool still returns a success string (so
+    # tool_call logs outcome=ok), which would otherwise hide that some chunks
+    # errored. Same rid ties this back to the parent tool_call.
+    if errs:
+        log_event(LOG, "sub_batch", phase="map", chunks=len(prompts),
+                  errors=len(errs), err_sample=errs[0].error)
 
-        note = ""
-        if max_chunks > 0 and max_chunks < n:
-            note += f"\n_NOTE: limited to first {max_chunks} of {n} chunks._"
-        if errs:
-            note += f"\n_NOTE: {len(errs)} of {len(prompts)} chunk(s) errored and were skipped._"
-        per_chunk = "\n".join(
-            f"### chunk {r.index}\n" + (f"[ERROR: {r.error}]" if r.error else r.answer.strip())
-            for r in results
-        )
+    note = ""
+    if max_chunks > 0 and max_chunks < n:
+        note += f"\n_NOTE: limited to first {max_chunks} of {n} chunks._"
+    if errs:
+        note += f"\n_NOTE: {len(errs)} of {len(prompts)} chunk(s) errored and were skipped._"
+    per_chunk = "\n".join(
+        f"### chunk {r.index}\n" + (f"[ERROR: {r.error}]" if r.error else r.answer.strip())
+        for r in results
+    )
 
-        def _raw(extra: str = "") -> str:
-            c = cost_usd(sub_model, itok, otok)
-            head = (f"## Batch sub-query — map over {len(prompts)} chunks ({sub_model})\n"
-                    f"tokens: {itok:,} in / {otok:,} out  |  cost: ${c:.4f}{note}{extra}\n\n")
-            return _answer(head + per_chunk)
+    def _raw(extra: str = "") -> str:
+        c = cost_usd(sub_model, itok, otok)
+        head = (f"## Batch sub-query — map over {len(prompts)} chunks ({sub_model})\n"
+                f"tokens: {itok:,} in / {otok:,} out  |  cost: ${c:.4f}{note}{extra}\n\n")
+        return _answer(head + per_chunk)
 
-        # findings = just the successful answers, for the reduce pass
-        findings = "\n".join(f"[chunk {r.index}] {r.answer.strip()}"
-                             for r in results if not r.error and r.answer.strip())
-        if not reduce:
-            return _raw()
-        if not findings:
-            return _raw("\n_(no findings to reduce)_")
-        if estimate_tokens(findings) > 0.9 * HAIKU_CONTEXT_TOKENS:
-            return _raw("\n_(findings too large to reduce in one pass — showing raw; use "
-                        "fewer/larger chunks, or rlm_query for engine-side reduction)_")
+    # findings = just the successful answers, for the reduce pass
+    findings = "\n".join(f"[chunk {r.index}] {r.answer.strip()}"
+                         for r in results if not r.error and r.answer.strip())
+    if not reduce:
+        return _raw()
+    if not findings:
+        return _raw("\n_(no findings to reduce)_")
+    if estimate_tokens(findings) > 0.9 * HAIKU_CONTEXT_TOKENS:
+        return _raw("\n_(findings too large to reduce in one pass — showing raw; use "
+                    "fewer/larger chunks, or rlm_query for engine-side reduction)_")
 
-        # REDUCE: fold the per-chunk findings into one synthesis (one more sub-model call).
-        reduce_prompt = (
-            "Reduce these independent per-chunk findings from one large document into a "
-            "single answer.\n"
-            f"Original request: {prompt}\n\n"
-            f"Per-chunk findings:\n{findings}\n\n"
-            "Synthesize ONE coherent, de-duplicated answer to the original request across "
-            "all chunks. Use only what the findings contain; do not invent anything."
-        )
-        red = sub_query(reduce_prompt, sub_model, max_tokens=4096)
-        if red.error:
-            log_event(LOG, "sub_batch", phase="reduce", chunks=len(prompts),
-                      errors=len(errs), reduce_error=red.error)
-            return _raw(f"\n_(reduce pass failed: {red.error}; showing raw findings)_")
-        itok += red.input_tokens
-        otok += red.output_tokens
-        cost = cost_usd(sub_model, itok, otok)
-        return _answer(
-            f"## Batch sub-query — map+reduce over {len(prompts)} chunks ({sub_model})\n"
-            f"tokens: {itok:,} in / {otok:,} out  |  cost: ${cost:.4f}{note}\n\n"
-            f"{red.answer.strip()}"
-        )
-    except Exception as exc:
-        return _bound(f"ERROR in rlm_sub_query_batch: {exc}")
+    # REDUCE: fold the per-chunk findings into one synthesis (one more sub-model call).
+    reduce_prompt = (
+        "Reduce these independent per-chunk findings from one large document into a "
+        "single answer.\n"
+        f"Original request: {prompt}\n\n"
+        f"Per-chunk findings:\n{findings}\n\n"
+        "Synthesize ONE coherent, de-duplicated answer to the original request across "
+        "all chunks. Use only what the findings contain; do not invent anything."
+    )
+    red = sub_query(reduce_prompt, sub_model, max_tokens=4096)
+    if red.error:
+        log_event(LOG, "sub_batch", phase="reduce", chunks=len(prompts),
+                  errors=len(errs), reduce_error=red.error)
+        return _raw(f"\n_(reduce pass failed: {red.error}; showing raw findings)_")
+    itok += red.input_tokens
+    otok += red.output_tokens
+    cost = cost_usd(sub_model, itok, otok)
+    return _answer(
+        f"## Batch sub-query — map+reduce over {len(prompts)} chunks ({sub_model})\n"
+        f"tokens: {itok:,} in / {otok:,} out  |  cost: ${cost:.4f}{note}\n\n"
+        f"{red.answer.strip()}"
+    )
 
 
 # ============================================================================
@@ -437,17 +405,14 @@ def rlm_exec(code: str, ctx_id: str = "") -> str:
     loaded as the REPL variable `context` first. Use for grep/parse/aggregate
     over a loaded context (e.g. count errors, bucket log lines by hour). Output
     is bounded — print only what you need."""
-    try:
-        repl = _get_repl()
-        if ctx_id and repl.loaded_ctx != ctx_id:
-            repl.load_context(STORE.read_text(ctx_id), ctx_id)
-        out, err = repl.execute(code)
-        body = f"### stdout\n```\n{out}\n```"
-        if err.strip():
-            body += f"\n### stderr\n```\n{err}\n```"
-        return _bound(body)
-    except Exception as exc:
-        return _bound(f"ERROR in rlm_exec: {exc}")
+    repl = _get_repl()
+    if ctx_id and repl.loaded_ctx != ctx_id:
+        repl.load_context(STORE.read_text(ctx_id), ctx_id)
+    out, err = repl.execute(code)
+    body = f"### stdout\n```\n{out}\n```"
+    if err.strip():
+        body += f"\n### stderr\n```\n{err}\n```"
+    return _bound(body)
 
 
 @mcp.tool()
@@ -456,35 +421,26 @@ def rlm_set_variable(name: str, value: str) -> str:
     """Set a variable in the sandbox REPL. `value` is parsed as JSON if possible
     (so dicts/lists/numbers work), else treated as a string."""
     try:
-        try:
-            parsed = json.loads(value)
-        except ValueError:  # JSONDecodeError is a ValueError
-            parsed = value
-        _get_repl().set_var(name, parsed)
-        return _bound(f"set `{name}` = {parsed!r}")
-    except Exception as exc:
-        return _bound(f"ERROR: {exc}")
+        parsed = json.loads(value)
+    except ValueError:  # JSONDecodeError is a ValueError
+        parsed = value
+    _get_repl().set_var(name, parsed)
+    return _bound(f"set `{name}` = {parsed!r}")
 
 
 @mcp.tool()
 @logged_tool
 def rlm_get_variable(name: str) -> str:
     """Return the repr of a variable from the sandbox REPL (bounded)."""
-    try:
-        return _bound(f"`{name}` = {_get_repl().get_var(name)}")
-    except Exception as exc:
-        return _bound(f"ERROR: {exc}")
+    return _bound(f"`{name}` = {_get_repl().get_var(name)}")
 
 
 @mcp.tool()
 @logged_tool
 def rlm_set_answer(value: str) -> str:
     """Set the sandbox REPL's final-answer signal (answer['content']/['ready'])."""
-    try:
-        _get_repl().set_answer(value)
-        return _bound("answer set (ready=True)")
-    except Exception as exc:
-        return _bound(f"ERROR: {exc}")
+    _get_repl().set_answer(value)
+    return _bound("answer set (ready=True)")
 
 
 @mcp.tool()

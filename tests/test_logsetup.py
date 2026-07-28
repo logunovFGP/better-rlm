@@ -138,6 +138,21 @@ def test_logged_tool_logs_ok_with_lengths_not_content():
     assert "question_len=6" in joined and "hello?" not in joined  # length, never content
 
 
+def test_logged_tool_converts_a_raise_into_an_error_string():
+    lg, cap = _capture(ls.LOGGER_NAME)
+
+    @ls.logged_tool
+    def exploding(ctx_id: str) -> str:
+        raise RuntimeError("boom")
+
+    out = exploding(ctx_id="c")
+    lg.removeHandler(cap)
+    # The tool contract is a string starting with ERROR — never a propagated raise.
+    assert out.startswith("ERROR in exploding: boom")
+    joined = " ".join(cap.msgs)
+    assert "outcome=error" in joined and "RuntimeError" in joined
+
+
 def test_logged_tool_flags_error_returns():
     lg, cap = _capture(ls.LOGGER_NAME)
 
