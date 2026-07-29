@@ -215,7 +215,7 @@ def configure_logging(cfg: Config) -> logging.Logger:
 # --------------------------------------------------------------------------- #
 # Args worth logging (identifiers/flags — never the content itself).
 _ID_ARGS = ("ctx_id", "model_override", "reduce", "chunk_index", "max_chunks", "strategy")
-_LEN_ARGS = ("question", "prompt", "code", "source", "value")
+_LEN_ARGS = ("question", "prompt", "code", "source")
 
 
 def logged_tool(fn):

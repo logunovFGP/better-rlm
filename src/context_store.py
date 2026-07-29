@@ -139,13 +139,13 @@ class ContextStore:
         meta.est_tokens = estimate_tokens(nbytes)
         return self._save(meta)
 
-    def load_text(self, text: str, source: str = "<inline text>", data_type: str = "text") -> ContextMeta:
+    def load_text(self, text: str, source: str = "<inline text>") -> ContextMeta:
         ctx_id = self._new_id()
         content_path = self._dir(ctx_id) / "content.txt"
         content_path.parent.mkdir(parents=True, exist_ok=True)
         content_path.write_text(text, encoding="utf-8")
         meta = ContextMeta(
-            ctx_id=ctx_id, source=source, source_type="text", data_type=data_type,
+            ctx_id=ctx_id, source=source, source_type="text", data_type="text",
             content_path=str(content_path), bytes=0, lines=0, est_tokens=0, sha256="",
             file_count=1, files=[source], created=datetime.now(timezone.utc).isoformat(),
         )
@@ -172,7 +172,7 @@ class ContextStore:
         )
         return self._finalize(meta)
 
-    def load_dir(self, path: str, pattern: str = "**/*") -> ContextMeta:
+    def load_dir(self, path: str) -> ContextMeta:
         root = Path(path).expanduser().resolve()
         if not root.is_dir():
             raise NotADirectoryError(f"Not a directory: {root}")
@@ -181,7 +181,7 @@ class ContextStore:
         content_path.parent.mkdir(parents=True, exist_ok=True)
         files: list[str] = []
         with open(content_path, "w", encoding="utf-8") as out:
-            for fp in sorted(root.glob(pattern)):
+            for fp in sorted(root.glob("**/*")):
                 if not fp.is_file():
                     continue
                 if any(part in _SKIP_DIRS for part in fp.parts) or fp.name in _SKIP_NAMES:

@@ -14,7 +14,7 @@ sandbox_image: rlm-sandbox
 sandbox_timeout_s: 300
 max_concurrent_subcalls: 2             # engine rlm_query_batched parallelism
 subquery_concurrency: 3                # our map-reduce parallelism
-output_cap_bytes: 4096                 # raw-content tools (load/inspect/chunk/exec/vars/status)
+output_cap_bytes: 4096                 # raw-content tools (load/inspect/chunk/grep/read/list/exec/status)
 answer_cap_bytes: 131072               # synthesis tools (rlm_query/sub_query) — the answer is the deliverable
 chunk_strategy: lines                  # lines | paragraphs | functions | headings | semantic | files
 chunk_lines: 2000
