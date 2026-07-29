@@ -48,7 +48,7 @@ _DEFAULTS: dict[str, Any] = {
     "sandbox_timeout_s": 300,
     "max_concurrent_subcalls": 2,
     "subquery_concurrency": 3,
-    "output_cap_bytes": 4096,      # raw-content tools (load/inspect/chunk/exec/vars/status)
+    "output_cap_bytes": 4096,      # raw-content tools (load/inspect/chunk/grep/read/list/exec/status)
     "answer_cap_bytes": 131072,    # synthesis tools (rlm_query/sub_query[_batch]) — the answer IS the deliverable
     "chunk_strategy": "lines",
     "chunk_lines": 2000,
