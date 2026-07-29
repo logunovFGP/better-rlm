@@ -7,10 +7,11 @@ architecture notes.
 ## Branching
 
 This repo uses trunk-based development. Read `TRUNK-BASED-PATTERNS.md` before
-any code change. Config: `.claude/trunk-based.json`. Worktrees and long-lived
+any code change. Config: `trunk-based.json` (repo root). Worktrees and long-lived
 branches are blocked by a PreToolUse guard.
 
-Verify command: `python -m pytest -q`.
+Verify command: `uv run --no-sync pytest -q` — `python` is not on PATH here, so it
+must go through uv (which is also what the pre-push hook runs).
 
 ## Patching the vendored engine
 
