@@ -31,15 +31,21 @@ fi
 echo "==> .env (optional — mode=auto reuses your Claude Code login, no key needed)"
 [ -f .env ] || { cp .env.example .env; echo "  created .env (only needed for mode: api — add ANTHROPIC_API_KEY there)"; }
 
-echo "==> Skill (rlm-large-context) — makes Claude reach for RLM on oversized inputs"
+echo "==> Skills — make Claude reach for RLM on oversized inputs"
+# Symlinked, not copied: editing skills/<name>/SKILL.md takes effect immediately with no
+# reinstall. Loops over skills/*/ so adding a skill needs no change here.
 mkdir -p "$HOME/.claude/skills"
-LINK="$HOME/.claude/skills/rlm-large-context"
-if [ -e "$LINK" ] && [ ! -L "$LINK" ]; then
-  echo "  WARNING: $LINK exists and is not a symlink — leaving it. Copy skills/rlm-large-context there manually."
-else
-  ln -sfn "$DIR/skills/rlm-large-context" "$LINK"
-  echo "  linked $LINK -> $DIR/skills/rlm-large-context  (shared by CLI + desktop)"
-fi
+for SRC in "$DIR"/skills/*/; do
+  SRC="${SRC%/}"
+  NAME="$(basename "$SRC")"
+  LINK="$HOME/.claude/skills/$NAME"
+  if [ -e "$LINK" ] && [ ! -L "$LINK" ]; then
+    echo "  WARNING: $LINK exists and is not a symlink — leaving it. Copy skills/$NAME there manually."
+  else
+    ln -sfn "$SRC" "$LINK"
+    echo "  linked $LINK -> $SRC  (shared by CLI + desktop)"
+  fi
+done
 
 cat <<MSG
 
