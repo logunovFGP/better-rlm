@@ -53,13 +53,16 @@ def test_fmt_val_quotes_spaces_and_clamps():
 
 
 # --------------------------- configure_logging --------------------------- #
-def test_configure_logging_no_stdout_and_creates_file(tmp_path):
+def test_configure_logging_no_stdout_and_defers_the_file(tmp_path):
     logger = ls.configure_logging(_cfg(tmp_path))
     try:
         for h in logger.handlers:
             assert getattr(h, "stream", None) is not sys.stdout  # never the JSON-RPC channel
         assert any(isinstance(h, logging.handlers.RotatingFileHandler) for h in logger.handlers)
-        assert list(tmp_path.glob("rlm-mcp-*.log"))  # a per-pid file was opened
+        # delay=True: an idle process must not leave a file behind at all.
+        assert not list(tmp_path.glob("rlm-mcp-*.log"))
+        ls.log_event(logger, "probe")
+        assert list(tmp_path.glob("rlm-mcp-*.log"))  # created on the first record
     finally:
         for h in list(logger.handlers):
             logger.removeHandler(h)
@@ -136,6 +139,24 @@ def test_logged_tool_logs_ok_with_lengths_not_content():
     joined = " ".join(cap.msgs)
     assert "evt=tool_call" in joined and "tool=sample" in joined and "outcome=ok" in joined
     assert "question_len=6" in joined and "hello?" not in joined  # length, never content
+
+
+def test_startup_is_held_until_a_tool_actually_runs():
+    lg, cap = _capture(ls.LOGGER_NAME)
+    ls.note_startup(mode="auto", transport="oauth")
+    assert ls.startup_pending()          # an idle spare logs nothing at all
+    assert not cap.msgs
+
+    @ls.logged_tool
+    def sample(ctx_id: str) -> str:
+        return "## ok"
+
+    sample(ctx_id="c")
+    lg.removeHandler(cap)
+    assert not ls.startup_pending()      # flushed exactly once, before the call
+    joined = " ".join(cap.msgs)
+    assert "evt=startup" in joined and "transport=oauth" in joined
+    assert joined.index("evt=startup") < joined.index("evt=tool_call")
 
 
 def test_logged_tool_converts_a_raise_into_an_error_string():

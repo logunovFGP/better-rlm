@@ -27,9 +27,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import time
 import uuid
+from pathlib import Path
 
 from rlm.environments import docker_repl as _dr
 
@@ -198,9 +200,79 @@ def _execute_code(self, code: str):  # noqa: ANN001 — bound as a method
     )
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # exists, owned by another user
+        return True
+    return True
+
+
+def workspace_root() -> str:
+    """Where the vendored env puts sandbox dirs — mirrors docker_repl.setup()."""
+    return os.environ.get(
+        "RLM_DOCKER_WORKSPACE_DIR", os.path.join(os.getcwd(), ".rlm_workspace"))
+
+
+def reap_orphans(root: str) -> list[str]:
+    """Remove sandboxes whose owning server is gone; return what was reaped.
+
+    SIGKILL and hard client teardowns bypass every exit hook, so a container
+    outlives its server: measured 11 of 19 processes exiting with no shutdown
+    record, containers alive for hours, workspace dirs left behind. A sweep at
+    startup catches what atexit structurally cannot.
+    """
+    reaped: list[str] = []
+    for d in sorted(Path(root).glob("docker_repl_*")):
+        marker = d / "owner"
+        pid: int | None = None
+        container = ""
+        if marker.exists():
+            try:
+                fields = marker.read_text(encoding="utf-8").split()
+                pid, container = int(fields[0]), (fields[1] if len(fields) > 1 else "")
+            except (ValueError, IndexError, OSError):
+                pid = None
+        elif time.time() - d.stat().st_mtime < 3600:
+            continue  # pre-patch or mid-setup: too young to call an orphan
+        if pid is not None and _pid_alive(pid):
+            continue
+        if container:
+            subprocess.run(["docker", "rm", "-f", container],
+                           capture_output=True, timeout=60)
+        shutil.rmtree(d, ignore_errors=True)
+        reaped.append(d.name)
+    if reaped:
+        _LOG.warning("evt=reaped_orphans count=%d dirs=%s", len(reaped), ",".join(reaped))
+    return reaped
+
+
+def _setup(self):
+    """Record who owns this sandbox so a later startup sweep can reap it if this
+    process dies without running any exit hook."""
+    result = _orig_setup(self)
+    try:
+        (Path(self.temp_dir) / "owner").write_text(
+            f"{os.getpid()}\n{self.container_id}\n", encoding="utf-8")
+    except OSError as exc:  # ownership is best-effort; never block the sandbox
+        _LOG.warning("evt=owner_marker_failed err=%r", exc)
+    return result
+
+
+_orig_setup = _dr.DockerREPL.setup
+
+
 def patch_sandbox() -> None:
-    """Rebind ``DockerREPL.execute_code`` with the hardened version. Idempotent."""
+    """Rebind ``DockerREPL.execute_code`` / ``setup`` with the hardened versions and
+    reap sandboxes abandoned by dead servers. Idempotent."""
     if getattr(_dr, "_rlmmcp_patched", False):
         return
     _dr.DockerREPL.execute_code = _execute_code
+    _dr.DockerREPL.setup = _setup
     _dr._rlmmcp_patched = True
+    try:
+        reap_orphans(workspace_root())
+    except Exception as exc:  # a janitor must never break startup
+        _LOG.warning("evt=reap_failed err=%r", exc)

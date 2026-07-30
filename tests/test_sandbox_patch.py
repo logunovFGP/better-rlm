@@ -7,12 +7,14 @@ survives — or loudly reports — a corrupt pickle.
 """
 
 import json
+import os
 import subprocess
 import sys
 
 import pytest
 from rlm.environments.docker_repl import _build_exec_script
 
+import src.sandbox_patch as sp
 from src.sandbox_patch import REPR_CAP, SENTINEL, harden_script
 
 
@@ -59,6 +61,29 @@ def test_corrupt_state_is_reported_not_silently_reset(tmp_path):
     data = _run("print(SHOW_VARS())", state, tmp_path)
     assert "state.dill unreadable" in data["stderr"]
     assert "No variables created yet" in data["stdout"]
+
+
+def test_reap_removes_dead_owners_and_keeps_live_ones(tmp_path, monkeypatch):
+    dead_pid = 999_999_999  # assert it is really absent rather than assume
+    with pytest.raises(ProcessLookupError):
+        os.kill(dead_pid, 0)
+
+    live = tmp_path / "docker_repl_live"
+    dead = tmp_path / "docker_repl_dead"
+    fresh = tmp_path / "docker_repl_nomarker"
+    for d in (live, dead, fresh):
+        d.mkdir()
+    (live / "owner").write_text(f"{os.getpid()}\nlive-container\n")
+    (dead / "owner").write_text(f"{dead_pid}\nno-such-container\n")
+
+    calls = []
+    monkeypatch.setattr(sp.subprocess, "run", lambda *a, **k: calls.append(a[0]))
+
+    assert sp.reap_orphans(str(tmp_path)) == ["docker_repl_dead"]
+    assert not dead.exists()
+    assert live.exists()          # owned by this very process
+    assert fresh.exists()         # no marker, but too young to call an orphan
+    assert calls == [["docker", "rm", "-f", "no-such-container"]]
 
 
 def test_harden_fails_loudly_if_upstream_template_moves():
