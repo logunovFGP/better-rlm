@@ -73,6 +73,33 @@ def _fmt_val(value: object) -> str:
     return s
 
 
+_startup: dict[str, object] | None = None
+
+
+def note_startup(**fields: object) -> None:
+    """Hold the startup record until the process logs something real.
+
+    Claude Code keeps a churning pool of pre-warmed spares: measured 19 startups
+    for 13 tool calls, 17 of 22 processes serving none. With the handler opened
+    lazily (delay=True), deferring this record means an idle spare leaves no file
+    and never evicts a log that has actual work in it.
+    """
+    global _startup
+    _startup = fields
+
+
+def startup_pending() -> bool:
+    """True while nothing has been logged yet — the startup record is still held."""
+    return _startup is not None
+
+
+def _emit_startup() -> None:
+    global _startup
+    if _startup is not None:
+        fields, _startup = _startup, None
+        log_event(get_logger(), "startup", **fields)
+
+
 def log_event(logger: logging.Logger, evt: str, **fields: object) -> None:
     """Emit one logfmt record: ``evt=<evt> [rid=…] k=v ...`` (None-valued fields dropped).
 
@@ -200,7 +227,7 @@ def configure_logging(cfg: Config) -> logging.Logger:
             _run_retention_sweep(cfg, own)  # sweep BEFORE opening our own file
             file_h = logging.handlers.RotatingFileHandler(
                 own, maxBytes=cfg.log_max_bytes, backupCount=cfg.log_backup_count,
-                encoding="utf-8",
+                encoding="utf-8", delay=True,  # no records -> no file on disk
             )
             file_h.setLevel(level)
             file_h.setFormatter(fmt)
@@ -230,6 +257,7 @@ def logged_tool(fn):
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
+        _emit_startup()  # this process is doing real work — now the log is worth a file
         rid = uuid.uuid4().hex[:8]
         fields: dict[str, object] = {"rid": rid, "tool": tool}
         try:

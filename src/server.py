@@ -29,7 +29,7 @@ from .chunking import STRATEGIES, chunk_text
 from .config import HAIKU_CONTEXT_TOKENS, cost_usd, estimate_tokens, load_config
 from .context_store import ContextStore
 from .engine import ReplSession, run_query
-from .logsetup import configure_logging, log_event, logged_tool
+from .logsetup import configure_logging, log_event, logged_tool, note_startup
 from .output import bound_output
 from .shutdown import install_shutdown_hooks
 from .subquery import sub_query, sub_query_batch
@@ -458,10 +458,13 @@ def main() -> None:
     install_shutdown_hooks(LOG, lambda: _repl.close() if _repl is not None else None)
     try:
         mode = auth.resolve_auth_mode(CFG)
-        log_event(LOG, "startup", mode=CFG.mode, transport=mode,
-                  root=models.select(CFG, models.Role.ROOT),
-                  sub=models.select(CFG, models.Role.SUB), sandbox=CFG.sandbox)
+        # Held until this process serves something — most spares never do.
+        note_startup(mode=CFG.mode, transport=mode,
+                     root=models.select(CFG, models.Role.ROOT),
+                     sub=models.select(CFG, models.Role.SUB), sandbox=CFG.sandbox)
     except Exception as exc:
+        # A server that cannot resolve a transport is worth a file even if no tool
+        # is ever called: this record is the only trace of why it is useless.
         log_event(LOG, "startup", mode=CFG.mode, transport="unresolved",
                   err=f"{type(exc).__name__}: {exc}")
     mcp.run()

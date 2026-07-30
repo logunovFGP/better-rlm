@@ -16,7 +16,7 @@ import signal
 import time
 from typing import Callable
 
-from .logsetup import log_event
+from .logsetup import log_event, startup_pending
 
 _shutting_down = False
 
@@ -47,9 +47,13 @@ def install_shutdown_hooks(logger: logging.Logger,
             close_repl()
         except Exception as exc:
             err = f"{type(exc).__name__}: {str(exc)[:200]}"
-        log_event(logger, "shutdown", signal=_signame(signum),
-                  repl_closed=(err is None),
-                  dur_ms=round((time.monotonic() - start) * 1000), err=err)
+        # An idle spare that logged nothing stays silent: a lone shutdown record
+        # would create a file and evict one that has real work in it. Teardown
+        # itself always runs — only the record is skipped.
+        if err is not None or not startup_pending():
+            log_event(logger, "shutdown", signal=_signame(signum),
+                      repl_closed=(err is None),
+                      dur_ms=round((time.monotonic() - start) * 1000), err=err)
         logging.shutdown()
 
     def _handler(signum, frame) -> None:
