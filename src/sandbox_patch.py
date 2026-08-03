@@ -251,11 +251,17 @@ def reap_orphans(root: str) -> list[str]:
 
 def _setup(self):
     """Record who owns this sandbox so a later startup sweep can reap it if this
-    process dies without running any exit hook."""
+    process dies without running any exit hook.
+
+    Third line is the host path of /workspace. The container cannot know it, yet
+    anything the sandbox writes there is loadable from the host by that path — the
+    route remotely-fetched data takes into the store (see the rlm-large-context
+    skill). Readers parse positionally, so a two-line marker still works.
+    """
     result = _orig_setup(self)
     try:
         (Path(self.temp_dir) / "owner").write_text(
-            f"{os.getpid()}\n{self.container_id}\n", encoding="utf-8")
+            f"{os.getpid()}\n{self.container_id}\n{self.temp_dir}\n", encoding="utf-8")
     except OSError as exc:  # ownership is best-effort; never block the sandbox
         _LOG.warning("evt=owner_marker_failed err=%r", exc)
     return result

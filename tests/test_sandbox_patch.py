@@ -86,6 +86,22 @@ def test_reap_removes_dead_owners_and_keeps_live_ones(tmp_path, monkeypatch):
     assert calls == [["docker", "rm", "-f", "no-such-container"]]
 
 
+def test_setup_marker_records_pid_container_and_host_workspace(tmp_path, monkeypatch):
+    """The 3rd line is how remotely-fetched data reaches the store: the container
+    writes to /workspace, the host then loads it by this path."""
+    monkeypatch.setattr(sp, "_orig_setup", lambda self: "ok")
+
+    class Env:
+        temp_dir = str(tmp_path)
+        container_id = "abc123"
+
+    assert sp._setup(Env()) == "ok"
+    pid, container, host = (tmp_path / "owner").read_text().split()
+    assert int(pid) == os.getpid()
+    assert container == "abc123"
+    assert host == str(tmp_path)
+
+
 def test_harden_fails_loudly_if_upstream_template_moves():
     with pytest.raises(RuntimeError, match="rlms internals changed"):
         harden_script("print('not the harness')")
