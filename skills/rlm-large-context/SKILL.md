@@ -60,7 +60,7 @@ load the file it wrote — after that every operation above works normally:
 |---|---|
 | **Google Sheet** | Fetch the export endpoint, not the share link: `https://docs.google.com/spreadsheets/d/<ID>/export?format=csv&gid=<GID>`. Works only if the sheet is link-shared. Several tabs = one fetch per `gid`. |
 | **A remote `main.js`, bundle or single asset** | One `requests.get` on the raw URL. For minified JS, `rlm_grep` over the loaded context beats reading it. |
-| **A whole website / many pages** | Crawl *inside* the sandbox: loop over links and append each page to ONE file under `/workspace`, then load that file once. One context beats N contexts — emit `===== FILE: <url> (N bytes) =====` separators and chunk with `strategy="files"`. |
+| **A whole website / many pages** | **Sitemap first, not nav-crawling.** Fetch `robots.txt`, follow its `Sitemap:` directives, expand the index, extract every `<loc>` — one `rlm_exec` regex, zero model calls. Measured on google.com: the homepage HTML exposes **17 anchors**, while its sitemap expands to **3,478 pages** (22 sub-sitemaps, 17.6 MB of XML — entries carry ~55 `hreflang` alternates each, so never read that raw). Crawl `<a href>` only if the site publishes no sitemap. Then fetch the pages you selected into ONE file under `/workspace` with `===== FILE: <url> (N bytes) =====` separators and chunk with `strategy="files"`. |
 | **A paginated API** | Same loop; write JSON lines to `/workspace`, load once, then `rlm_exec` to parse. |
 | **Anything private** | Pass the credential as a header inside the `rlm_exec` code. That code travels through this conversation, so use a short-lived token — never a long-lived password. |
 
@@ -68,6 +68,12 @@ Always sanity-check what you fetched: a private Sheet or an expired session retu
 HTML sign-in page with HTTP **200**. One free `rlm_grep` for `<title>` (or
 `rlm_inspect_context`) catches it — otherwise you will analyse a login page as if it
 were your data.
+
+**The sandbox has `requests`, not a browser — no JavaScript runs.** For a JS app you get
+the delivery shell, not the rendered frontend: google.com's homepage is 206 KB with **435
+characters of visible text** and 41% inline JS. If you need the rendered DOM, render it
+with a browser tool and save the result to a file, then load *that*. Do not try to make
+this server scrape an SPA.
 
 ## What it is *not* for
 
