@@ -22,7 +22,18 @@ fi
 
 echo "==> Docker sandbox image (rlm-sandbox)"
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  docker build -t rlm-sandbox -f docker/Dockerfile.sandbox docker/
+  # Non-fatal: a registry timeout on the base image must not abort setup under `set -e`
+  # and skip the .env and skill steps below, which need no Docker at all. Observed:
+  # "load metadata for python:3.11-slim: DeadlineExceeded" left the skill un-linked.
+  docker build -t rlm-sandbox -f docker/Dockerfile.sandbox docker/ || {
+    echo "  WARNING: image build failed (registry timeout / offline?)."
+    if docker image inspect rlm-sandbox >/dev/null 2>&1; then
+      echo "           Existing rlm-sandbox image kept — the sandbox still works."
+    else
+      echo "           No rlm-sandbox image present: rlm_exec/rlm_query will fail."
+    fi
+    echo "           Re-run ./install.sh when the network recovers."
+  }
 else
   echo "  WARNING: docker unavailable. Set 'sandbox: local' in config.yaml to run"
   echo "           on the host (less safe — see README Security)."
