@@ -102,6 +102,18 @@ def rlm_load_context(source: str, source_type: str = "auto") -> str:
 
     source_type: auto | text | file | dir (auto detects path vs inline text).
     """
+    # A URL would otherwise be stored as ~60 bytes of *text* and reported as a
+    # successful load, so every later answer would describe the link, not the data.
+    if re.match(r"^[a-z][a-z0-9+.-]*://", source.strip(), re.I):
+        return _bound(
+            f"ERROR: {source.strip()[:80]} is a URL, not a path — loading it would store "
+            "the link text, not its content. Fetch it in the sandbox instead:\n"
+            "  1. rlm_exec(\"import requests; "
+            "open('/workspace/data','wb').write(requests.get(URL).content)\")\n"
+            "  2. rlm_exec(\"print(open('/workspace/owner').read())\") -> 3rd line is the "
+            "host path of /workspace\n"
+            "  3. rlm_load_file(\"<that path>/data\") -> full chunk / grep / query support"
+        )
     st = source_type
     if st == "auto":
         if os.path.isdir(source):

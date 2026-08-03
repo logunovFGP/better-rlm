@@ -40,6 +40,35 @@ across four long-context tasks at comparable cost:
 - **Whole-repo or whole-directory understanding** — reasoning that spans many files at once
   (evaluated up to 4.2M tokens).
 
+## Remote sources — URLs, Google Sheets, whole websites, a remote bundle
+
+**Never pass a URL to `rlm_load_context`.** It has no HTTP support: the link would be
+stored as ~60 bytes of *text* and reported as a successful load, so every later answer
+would describe the link instead of the data. The tool now refuses URLs outright.
+
+The sandbox has DNS + HTTPS egress with `requests` installed, and its `/workspace` is
+bind-mounted to a host directory the store can read. So fetch inside the sandbox, then
+load the file it wrote — after that every operation above works normally:
+
+```
+1. rlm_exec("import requests; open('/workspace/data','wb').write(requests.get(URL).content)")
+2. rlm_exec("print(open('/workspace/owner').read())")   # 3rd line = host path of /workspace
+3. rlm_load_file("<that host path>/data")               # -> ctx_id, then chunk/grep/query
+```
+
+| Source | How |
+|---|---|
+| **Google Sheet** | Fetch the export endpoint, not the share link: `https://docs.google.com/spreadsheets/d/<ID>/export?format=csv&gid=<GID>`. Works only if the sheet is link-shared. Several tabs = one fetch per `gid`. |
+| **A remote `main.js`, bundle or single asset** | One `requests.get` on the raw URL. For minified JS, `rlm_grep` over the loaded context beats reading it. |
+| **A whole website / many pages** | Crawl *inside* the sandbox: loop over links and append each page to ONE file under `/workspace`, then load that file once. One context beats N contexts — emit `===== FILE: <url> (N bytes) =====` separators and chunk with `strategy="files"`. |
+| **A paginated API** | Same loop; write JSON lines to `/workspace`, load once, then `rlm_exec` to parse. |
+| **Anything private** | Pass the credential as a header inside the `rlm_exec` code. That code travels through this conversation, so use a short-lived token — never a long-lived password. |
+
+Always sanity-check what you fetched: a private Sheet or an expired session returns an
+HTML sign-in page with HTTP **200**. One free `rlm_grep` for `<title>` (or
+`rlm_inspect_context`) catches it — otherwise you will analyse a login page as if it
+were your data.
+
 ## What it is *not* for
 
 - Small files — just `Read` them.
