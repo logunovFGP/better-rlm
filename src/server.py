@@ -112,7 +112,10 @@ def rlm_load_context(source: str, source_type: str = "auto") -> str:
             "open('/workspace/data','wb').write(requests.get(URL).content)\")\n"
             "  2. rlm_exec(\"print(open('/workspace/owner').read())\") -> 3rd line is the "
             "host path of /workspace\n"
-            "  3. rlm_load_file(\"<that path>/data\") -> full chunk / grep / query support"
+            "  3. rlm_load_file(\"<that path>/data\") -> full chunk / grep / query support\n"
+            "No Docker (or sandbox: local)? Fetch on the host — curl also carries auth "
+            "headers/cookies:\n"
+            "  curl -sL \"<url>\" -o /tmp/data && rlm_load_file(\"/tmp/data\")"
         )
     st = source_type
     if st == "auto":
