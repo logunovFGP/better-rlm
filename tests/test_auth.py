@@ -74,6 +74,37 @@ def test_explicit_api_requires_key(monkeypatch):
     assert auth.resolve_auth_mode(_cfg(mode="api")) == "apikey"
 
 
+def test_non_anthropic_provider_needs_its_own_key(monkeypatch):
+    g = _cfg(provider="gemini")
+    with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
+        auth.resolve_auth_mode(g)
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-not-a-real-key")
+    assert auth.resolve_auth_mode(g) == "apikey"
+    assert auth.provider_key(g) == "dummy-not-a-real-key"
+
+
+def test_patch_engine_only_throttles_for_non_anthropic(monkeypatch):
+    """Anthropic gets its client REPLACED (routed to our transport). Any other provider
+    keeps the engine's native client and only gains throttle/retry — the vendor the
+    engine already speaks must not be hijacked."""
+    import rlm.clients.anthropic as ant_mod
+    import rlm.core.rlm as core
+
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-not-a-real-key")
+    monkeypatch.setattr("src.config.load_config", lambda: _cfg(provider="gemini"))
+    monkeypatch.setattr(core, "_rlmmcp_throttled", False, raising=False)
+    monkeypatch.setattr(ant_mod, "_rlmmcp_patched", False, raising=False)
+
+    before_client, before_get = ant_mod.AnthropicClient, core.get_client
+    monkeypatch.setattr(core, "get_client", before_get)  # restored by monkeypatch
+    auth.patch_engine()
+    assert ant_mod.AnthropicClient is before_client   # NOT hijacked
+    assert core.get_client is not before_get          # wrapped for throttle/retry
+    wrapped = core.get_client
+    auth.patch_engine()                               # idempotent
+    assert core.get_client is wrapped
+
+
 def test_make_client_requires_api_key(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):

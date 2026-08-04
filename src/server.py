@@ -26,7 +26,13 @@ from mcp.server.fastmcp import FastMCP
 
 from . import auth, models
 from .chunking import STRATEGIES, chunk_text
-from .config import HAIKU_CONTEXT_TOKENS, cost_usd, estimate_tokens, load_config
+from .config import (
+    HAIKU_CONTEXT_TOKENS,
+    PROVIDER_KEY_ENV,
+    cost_usd,
+    estimate_tokens,
+    load_config,
+)
 from .context_store import ContextStore
 from .engine import ReplSession, run_query
 from .logsetup import configure_logging, log_event, logged_tool, note_startup
@@ -450,6 +456,9 @@ def rlm_status() -> str:
     ids = STORE.list_ids()
     return _bound(
         "## RLM MCP status\n"
+        f"- provider: {CFG.provider}   (anthropic needs no key — it uses the claude CLI login; "
+        f"any other needs its {PROVIDER_KEY_ENV.get(CFG.provider, '<PROVIDER>_API_KEY')}; "
+        "RLM_PROVIDER env overrides)\n"
         f"- mode (configured): {CFG.mode}   (auto | claude-cli | api; RLM_MODE env overrides)\n"
         f"- transport (resolved): {transport}\n"
         f"- claude CLI ({CFG.cli_path}): {'found at ' + claude_cli if claude_cli else 'NOT FOUND on PATH'}"

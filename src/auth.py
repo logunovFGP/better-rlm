@@ -27,7 +27,7 @@ import shutil
 import anthropic
 
 # Importing .config runs its module body, which loads .env — no second load here.
-from .config import Config
+from .config import PROVIDER_KEY_ENV, Config
 
 MODE_AUTO = "auto"
 MODE_CLI = "claude-cli"
@@ -44,6 +44,12 @@ def _clean_secret(value: str | None) -> str | None:
     if not v or v.startswith("<") or v.endswith(">") or any(c.isspace() for c in v):
         return None
     return v
+
+
+def provider_key(cfg: Config) -> str | None:
+    """The configured provider's API key from the environment, or None."""
+    env = PROVIDER_KEY_ENV.get((cfg.provider or "anthropic").strip().lower())
+    return _clean_secret(os.getenv(env)) if env else None
 
 
 def claude_cli_available(cfg: Config) -> bool:
@@ -70,6 +76,16 @@ def resolve_auth_mode(cfg: Config) -> str:
     the ``claude`` CLI — reusing the existing Claude Code login, so NO token or API
     key is needed — and falls back to ``ANTHROPIC_API_KEY``.
     """
+    # Anthropic is the only provider with a keyless path (the `claude` CLI login). For
+    # anything else there is nothing to choose: its own API key or a hard error.
+    if (cfg.provider or "anthropic") != "anthropic":
+        if not provider_key(cfg):
+            raise RuntimeError(
+                f"provider={cfg.provider!r} needs "
+                f"{PROVIDER_KEY_ENV.get(cfg.provider, '<PROVIDER>_API_KEY')} set — only "
+                "provider=anthropic can authenticate without a key (via the claude CLI)."
+            )
+        return "apikey"
     m = (cfg.mode or MODE_AUTO).strip().lower()
     if m == MODE_CLI:
         if not claude_cli_available(cfg):
@@ -108,20 +124,58 @@ def make_client(async_: bool = False):
     return cls(api_key=key, timeout=_CLIENT_TIMEOUT, max_retries=_SDK_MAX_RETRIES)
 
 
+def _patch_throttle_only() -> None:
+    """Non-Anthropic provider: keep the engine's own client — it already speaks that
+    vendor — and only add the shared throttle + 429 retry, so a Gemini/OpenAI run gets
+    the same rate-limit behaviour Anthropic has. Idempotent.
+
+    Wraps ``rlm.core.rlm.get_client`` (the name the engine actually calls) rather than
+    each client class, so all six of its construction sites are covered at once.
+    """
+    import rlm.core.rlm as core
+
+    if getattr(core, "_rlmmcp_throttled", False):
+        return
+    from .ratelimit import aretry_and_queue_retries, retry_and_queue_retries
+
+    orig_get_client = core.get_client
+
+    def get_client(backend, backend_kwargs):
+        client = orig_get_client(backend, backend_kwargs)
+        cls = type(client)
+        if not getattr(cls, "_rlmmcp_throttled", False):
+            cls.completion = retry_and_queue_retries(cls.completion)
+            cls.acompletion = aretry_and_queue_retries(cls.acompletion)
+            cls._rlmmcp_throttled = True
+        return client
+
+    core.get_client = get_client
+    core._rlmmcp_throttled = True
+
+
 def patch_engine() -> None:
-    """Rebind ``rlm.clients.anthropic.AnthropicClient`` so the engine routes every
-    completion through the selected transport (claude CLI on 'oauth', Anthropic SDK on
-    'apikey') plus the shared throttle + auth-aware retry. Idempotent."""
+    """Make the engine's model calls go through our transport + throttle/retry.
+
+    Anthropic (default, and the local path): rebind ``AnthropicClient`` so every
+    completion routes through the selected transport — claude CLI on 'oauth', Anthropic
+    SDK on 'apikey'. Any other provider: leave the engine's native client in place and
+    only wrap it in the throttle/retry. Idempotent.
+    """
+    from .config import load_config
+
+    cfg = load_config()
+    if (cfg.provider or "anthropic").strip().lower() != "anthropic":
+        _patch_throttle_only()
+        return
+
     import rlm.clients.anthropic as ant_mod
 
     if getattr(ant_mod, "_rlmmcp_patched", False):
         return
-    from .config import load_config
     from .ratelimit import aretry_and_queue_retries, retry_and_queue_retries
     from .transport import get_transport, split_prompt
 
     base = ant_mod.AnthropicClient
-    cfg = load_config()
 
     class _ClaudeCodeAnthropicClient(base):  # type: ignore[misc, valid-type]
         def __init__(self, api_key=None, model_name=None, max_tokens=32768, **kwargs):

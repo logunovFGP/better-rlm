@@ -36,6 +36,18 @@ COST_PER_MTOK: dict[str, tuple[float, float]] = {
 
 HAIKU_CONTEXT_TOKENS = 200_000
 
+# Provider → env var holding its API key. The engine (rlm.clients.get_client) already
+# routes these backends; this map is only how we locate the credential. Anthropic is
+# listed but special: it is the ONE provider that can authenticate with no key at all,
+# through the local `claude` CLI login — see auth.resolve_auth_mode.
+PROVIDER_KEY_ENV: dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "azure_openai": "AZURE_OPENAI_API_KEY",
+    "portkey": "PORTKEY_API_KEY",
+}
+
 _DEFAULTS: dict[str, Any] = {
     "root_model": MODEL_SONNET_5,
     "root_model_override": MODEL_OPUS,
@@ -64,6 +76,10 @@ _DEFAULTS: dict[str, Any] = {
     # API key. Overridable per-launch with the RLM_MODE env var (e.g. in the
     # `claude mcp add -e RLM_MODE=claude-cli` registration).
     "mode": "auto",
+    # Which vendor answers. "anthropic" is the ONLY one that works with no API key,
+    # via the local `claude` CLI login — so it stays the default and the local path is
+    # untouched. Remote deploys (no keychain in a pod) set this + the provider's key.
+    "provider": "anthropic",
     # Claude Code CLI transport (see transport.py). Under claude-cli mode the server
     # drives the official `claude` CLI instead of the HTTP API, so it "just works" via
     # the existing Claude Code login — no token plumbing, no premium-model gating.
@@ -126,6 +142,7 @@ class Config:
     oauth_retry_waits: tuple[float, ...]
     apikey_retry_waits: tuple[float, ...]
     mode: str
+    provider: str
     cli_path: str
     cli_system_prompt_mode: str
     cli_timeout_s: int
@@ -177,6 +194,8 @@ def load_config() -> Config:
         apikey_retry_waits=tuple(float(x) for x in m["apikey_retry_waits"]),
         # RLM_MODE env wins over config.yaml so the mode can be set at registration.
         mode=str(os.getenv("RLM_MODE") or m["mode"]).strip().lower(),
+        # RLM_PROVIDER env wins, same as mode, so a pod sets it at registration.
+        provider=str(os.getenv("RLM_PROVIDER") or m["provider"]).strip().lower(),
         cli_path=str(m["cli_path"]),
         cli_system_prompt_mode=str(m["cli_system_prompt_mode"]),
         cli_timeout_s=int(m["cli_timeout_s"]),
