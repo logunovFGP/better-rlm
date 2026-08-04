@@ -27,7 +27,6 @@ from mcp.server.fastmcp import FastMCP
 from . import auth, models
 from .chunking import STRATEGIES, chunk_text
 from .config import (
-    HAIKU_CONTEXT_TOKENS,
     PROVIDER_KEY_ENV,
     cost_usd,
     estimate_tokens,
@@ -68,6 +67,15 @@ def _answer(text: str) -> str:
     # deliverable (already bounded by the model's max_output_tokens), so bound it
     # generously, not at the raw-content cap.
     return bound_output(text, CFG.answer_cap_bytes)
+
+
+def _cost_note(model: str, itok: int, otok: int) -> str:
+    """`  |  cost: $x.xxxx` when report_cost is on, else nothing. Off by default: the
+    rate table is Anthropic-only and the CLI path under-counts input tokens, so a
+    printed figure would be confidently wrong."""
+    if not CFG.report_cost:
+        return ""
+    return f"  |  cost: ${cost_usd(model, itok, otok):.4f}"
 
 
 def _meta_block(meta) -> str:
@@ -168,8 +176,8 @@ def rlm_chunk_context(ctx_id: str, strategy: str = "", size: int = 0, overlap: i
     """Split a loaded context into chunks and record the chunk index on the
     context. strategy: lines | paragraphs | functions | headings | semantic | files
     (default from config). 'size' = lines-per-chunk for the lines strategy.
-    Returns chunk count + per-chunk metadata (no content). Chunk defaults stay
-    well under Haiku's 200K-token ceiling so sub-queries fit."""
+    Returns chunk count + per-chunk metadata (no content). Chunk defaults stay well
+    under the sub-model's context ceiling (config: sub_context_tokens) so sub-queries fit."""
     strategy = strategy or CFG.chunk_strategy
     if strategy not in STRATEGIES:
         return _bound(f"ERROR: unknown strategy '{strategy}'. Choose from {', '.join(STRATEGIES)}.")
@@ -293,30 +301,34 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
     res = run_query(CFG, text, question, root_model, sub_model)
     rows = "\n".join(
         f"  - {r['model']}: {r['calls']} calls, "
-        f"{r['input_tokens']:,} in / {r['output_tokens']:,} out, ${r['cost_usd']:.4f}"
+        f"{r['input_tokens']:,} in / {r['output_tokens']:,} out"
+        + (f", ${r['cost_usd']:.4f}" if r["cost_usd"] is not None else "")
         for r in res["usage"]
     )
+    total = res["cost_usd"]
     return _answer(
         f"## RLM answer (root: {res['root_model']}, sub: {res['sub_model']})\n\n{res['answer']}\n\n"
         f"---\n**Model routing / usage:**\n{rows}\n"
-        f"**Total cost:** ${res['cost_usd']:.4f}  |  **Time:** {res['execution_time']}s"
+        + (f"**Total cost:** ${total:.4f}  |  " if total is not None else "")
+        + f"**Time:** {res['execution_time']}s"
     )
 
 
 @mcp.tool()
 @logged_tool
 def rlm_sub_query(ctx_id: str, prompt: str, chunk_index: int = -1) -> str:
-    """Run a single Haiku 4.5 sub-query over a context (or one chunk of it).
-    Use for cheap, targeted questions. If chunk_index < 0 the whole context is
-    used — only do that when it fits Haiku's 200K-token window (else chunk first)."""
+    """Run a single cheap sub-model query over a context (or one chunk of it).
+    Use for targeted questions. If chunk_index < 0 the whole context is used — only do
+    that when it fits the sub-model's context window (config: sub_context_tokens),
+    else chunk first."""
     meta = STORE.get(ctx_id)
     if chunk_index >= 0:
         body = STORE.read_chunk(ctx_id, chunk_index)
     else:
-        if meta.est_tokens > 0.9 * HAIKU_CONTEXT_TOKENS:
+        if meta.est_tokens > 0.9 * CFG.sub_context_tokens:
             return _bound(
                 f"ERROR: context ~{meta.est_tokens:,} tokens exceeds Haiku's "
-                f"{HAIKU_CONTEXT_TOKENS:,} window. Run rlm_chunk_context then "
+                f"{CFG.sub_context_tokens:,}-token window. Run rlm_chunk_context then "
                 f"rlm_sub_query_batch, or use rlm_query."
             )
         body = STORE.read_text(ctx_id)
@@ -375,9 +387,9 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
     )
 
     def _raw(extra: str = "") -> str:
-        c = cost_usd(sub_model, itok, otok)
         head = (f"## Batch sub-query — map over {len(prompts)} chunks ({sub_model})\n"
-                f"tokens: {itok:,} in / {otok:,} out  |  cost: ${c:.4f}{note}{extra}\n\n")
+                f"tokens: {itok:,} in / {otok:,} out{_cost_note(sub_model, itok, otok)}"
+                f"{note}{extra}\n\n")
         return _answer(head + per_chunk)
 
     # findings = just the successful answers, for the reduce pass
@@ -387,7 +399,7 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
         return _raw()
     if not findings:
         return _raw("\n_(no findings to reduce)_")
-    if estimate_tokens(findings) > 0.9 * HAIKU_CONTEXT_TOKENS:
+    if estimate_tokens(findings) > 0.9 * CFG.sub_context_tokens:
         return _raw("\n_(findings too large to reduce in one pass — showing raw; use "
                     "fewer/larger chunks, or rlm_query for engine-side reduction)_")
 
@@ -407,10 +419,9 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
         return _raw(f"\n_(reduce pass failed: {red.error}; showing raw findings)_")
     itok += red.input_tokens
     otok += red.output_tokens
-    cost = cost_usd(sub_model, itok, otok)
     return _answer(
         f"## Batch sub-query — map+reduce over {len(prompts)} chunks ({sub_model})\n"
-        f"tokens: {itok:,} in / {otok:,} out  |  cost: ${cost:.4f}{note}\n\n"
+        f"tokens: {itok:,} in / {otok:,} out{_cost_note(sub_model, itok, otok)}{note}\n\n"
         f"{red.answer.strip()}"
     )
 
