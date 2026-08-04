@@ -80,22 +80,24 @@ def build_rlm(cfg: Config, root_model: str, sub_model: str) -> RLM:
     )
 
 
-def usage_breakdown(usage_summary) -> tuple[list[dict], float]:
-    """Per-model token + cost rows from the engine's UsageSummary (keyed by model)."""
+def usage_breakdown(usage_summary, report_cost: bool = False) -> tuple[list[dict], float | None]:
+    """Per-model token rows from the engine's UsageSummary (keyed by model). Cost is
+    included only when ``report_cost`` — otherwise every cost is None, never 0.0."""
     rows: list[dict] = []
     total = 0.0
     summaries = getattr(usage_summary, "model_usage_summaries", {}) or {}
     for model, s in summaries.items():
-        c = cost_usd(model, s.total_input_tokens, s.total_output_tokens)
-        total += c
+        # None (not 0.0) when reporting is off: a zero would read as "this was free".
+        c = cost_usd(model, s.total_input_tokens, s.total_output_tokens) if report_cost else None
+        total += c or 0.0
         rows.append({
             "model": model,
             "calls": s.total_calls,
             "input_tokens": s.total_input_tokens,
             "output_tokens": s.total_output_tokens,
-            "cost_usd": round(c, 6),
+            "cost_usd": round(c, 6) if c is not None else None,
         })
-    return rows, round(total, 6)
+    return rows, (round(total, 6) if report_cost else None)
 
 
 def run_query(cfg: Config, context_text: str, question: str,
@@ -103,7 +105,7 @@ def run_query(cfg: Config, context_text: str, question: str,
     """Run a full recursive RLM query; return the final answer + routing/usage."""
     rlm = build_rlm(cfg, root_model, sub_model)
     result = rlm.completion(prompt=context_text, root_prompt=question)
-    rows, total = usage_breakdown(result.usage_summary)
+    rows, total = usage_breakdown(result.usage_summary, cfg.report_cost)
     answer = result.response or ""
     # turns ~= number of root-model calls (one per orchestrator iteration).
     turns = next((r["calls"] for r in rows if r["model"] == root_model), 0)
@@ -112,7 +114,9 @@ def run_query(cfg: Config, context_text: str, question: str,
               exec_time=round(result.execution_time, 2),
               in_tok=sum(r["input_tokens"] for r in rows),
               out_tok=sum(r["output_tokens"] for r in rows),
-              cost=round(total, 4), answer_bytes=len(answer),
+              # None is dropped by log_event, so a disabled cost logs no field at all.
+              cost=round(total, 4) if total is not None else None,
+              answer_bytes=len(answer),
               truncated=(len(answer) > cfg.answer_cap_bytes))
     return {
         "answer": answer,

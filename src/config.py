@@ -76,6 +76,15 @@ _DEFAULTS: dict[str, Any] = {
     # API key. Overridable per-launch with the RLM_MODE env var (e.g. in the
     # `claude mcp add -e RLM_MODE=claude-cli` registration).
     "mode": "auto",
+    # Cost reporting is OFF by default: the rate table below only covers Anthropic
+    # models, and on the claude-CLI path the reported input-token count under-counts
+    # the piped prompt — so a printed "$" figure would be confidently wrong. Turn it on
+    # only when the configured models are in COST_PER_MTOK and you trust the counts.
+    "report_cost": False,
+    # Context ceiling of the SUB model, used to refuse an oversized single sub-query and
+    # to skip a too-large reduce pass. 200K is Haiku's; other providers differ wildly
+    # (Gemini is 1M+), so it MUST track the configured sub_model, not a vendor constant.
+    "sub_context_tokens": HAIKU_CONTEXT_TOKENS,
     # Which vendor answers. "anthropic" is the ONLY one that works with no API key,
     # via the local `claude` CLI login — so it stays the default and the local path is
     # untouched. Remote deploys (no keychain in a pod) set this + the provider's key.
@@ -141,6 +150,8 @@ class Config:
     throttle_min_interval_s: float
     oauth_retry_waits: tuple[float, ...]
     apikey_retry_waits: tuple[float, ...]
+    report_cost: bool
+    sub_context_tokens: int
     mode: str
     provider: str
     cli_path: str
@@ -193,6 +204,8 @@ def load_config() -> Config:
         oauth_retry_waits=tuple(float(x) for x in m["oauth_retry_waits"]),
         apikey_retry_waits=tuple(float(x) for x in m["apikey_retry_waits"]),
         # RLM_MODE env wins over config.yaml so the mode can be set at registration.
+        report_cost=bool(m["report_cost"]),
+        sub_context_tokens=int(m["sub_context_tokens"]),
         mode=str(os.getenv("RLM_MODE") or m["mode"]).strip().lower(),
         # RLM_PROVIDER env wins, same as mode, so a pod sets it at registration.
         provider=str(os.getenv("RLM_PROVIDER") or m["provider"]).strip().lower(),
