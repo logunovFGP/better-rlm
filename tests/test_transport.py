@@ -67,6 +67,26 @@ def test_get_transport_selects_by_mode(cfg):
     tp._CACHE.clear()
 
 
+def test_get_transport_selects_by_provider(cfg, monkeypatch):
+    """Anthropic keeps its two dedicated transports (the local path); every other
+    provider goes through the engine's own client."""
+    import dataclasses
+
+    tp._CACHE.clear()
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-not-a-real-key")
+    assert cfg.provider == "anthropic"                      # default = the local run
+    assert isinstance(get_transport("oauth", cfg), CliTransport)
+
+    for provider in ("gemini", "openai", "azure_openai", "portkey"):
+        other = dataclasses.replace(cfg, provider=provider)
+        t = get_transport("apikey", other)
+        assert isinstance(t, tp.EngineClientTransport), provider
+        assert get_transport("apikey", other) is t          # cached per provider
+    # the anthropic entry must not have been clobbered by the shared "apikey" mode
+    assert isinstance(get_transport("oauth", cfg), CliTransport)
+    tp._CACHE.clear()
+
+
 # --------------------------- CLI argv --------------------------- #
 def test_cli_argv_append_mode(cfg):
     c = dataclasses.replace(cfg, cli_system_prompt_mode="append")

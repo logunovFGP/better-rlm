@@ -16,7 +16,7 @@ from typing import Optional
 from rlm.core.rlm import RLM
 from rlm.environments import get_environment
 
-from .auth import patch_engine
+from .auth import patch_engine, provider_key
 from .sandbox_patch import patch_sandbox
 from .config import Config, cost_usd
 from .logsetup import log_event
@@ -51,11 +51,14 @@ def build_rlm(cfg: Config, root_model: str, sub_model: str) -> RLM:
     patch_engine()
     patch_sandbox()
     env_kwargs = {"image": cfg.sandbox_image} if cfg.use_docker else {}
+    # Anthropic routes through our transport, which owns auth — hence the placeholder.
+    # Any other provider uses the engine's own client and needs the real key.
+    api_key = _PLACEHOLDER_KEY if cfg.provider == "anthropic" else (provider_key(cfg) or "")
     return RLM(
-        backend="anthropic",
+        backend=cfg.provider,
         backend_kwargs={
             "model_name": root_model,
-            "api_key": _PLACEHOLDER_KEY,
+            "api_key": api_key,
             "max_tokens": cfg.max_output_tokens,
         },
         environment=cfg.sandbox,
@@ -65,10 +68,10 @@ def build_rlm(cfg: Config, root_model: str, sub_model: str) -> RLM:
         # Was never passed: the engine fell back to its own default of 4, silently
         # ignoring the configured value.
         max_concurrent_subcalls=cfg.max_concurrent_subcalls,
-        other_backends=["anthropic"],
+        other_backends=[cfg.provider],
         other_backend_kwargs=[{
             "model_name": sub_model,
-            "api_key": _PLACEHOLDER_KEY,
+            "api_key": api_key,
             "max_tokens": cfg.max_output_tokens,
         }],
         custom_system_prompt=_SYSTEM_PROMPT,

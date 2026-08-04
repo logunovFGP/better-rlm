@@ -369,14 +369,73 @@ def _parse_cli_output(returncode: int, stdout: str, stderr: str,
     )
 
 
+class EngineClientTransport(CompletionTransport):
+    """Any non-Anthropic provider, via the engine's own client.
+
+    ``rlm.clients.get_client`` already speaks openai / gemini / azure_openai / portkey,
+    so there is nothing per-vendor to write here — one adapter turns that registry into
+    a CompletionTransport. Anthropic keeps its two dedicated transports because it alone
+    has the keyless `claude` CLI path.
+    """
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self._clients: dict[str, Any] = {}
+
+    def _client(self, model: str, max_tokens: int):
+        from rlm.clients import get_client
+
+        from .auth import provider_key
+
+        key = f"{model}:{max_tokens}"
+        if key not in self._clients:
+            self._clients[key] = get_client(
+                self.cfg.provider,
+                {"model_name": model, "api_key": provider_key(self.cfg),
+                 "max_tokens": max_tokens},
+            )
+        return self._clients[key]
+
+    @staticmethod
+    def _prompt(messages: list[dict], system) -> list[dict]:
+        # Engine clients take the same message-list shape; re-attach `system` as a
+        # leading system message so no provider silently loses the instruction.
+        head = [{"role": "system", "content": _content_to_text(system)}] if system else []
+        return head + messages
+
+    @staticmethod
+    def _result(client, text: str, model: str) -> CompletionResult:
+        u = client.get_last_usage()
+        return CompletionResult(
+            text=text, model=model,
+            input_tokens=getattr(u, "total_input_tokens", 0) or 0,
+            output_tokens=getattr(u, "total_output_tokens", 0) or 0,
+            cost_usd=getattr(u, "total_cost", None),
+        )
+
+    def complete(self, messages, system, model, max_tokens) -> CompletionResult:
+        c = self._client(model, max_tokens)
+        return self._result(c, c.completion(self._prompt(messages, system)), model)
+
+    async def acomplete(self, messages, system, model, max_tokens) -> CompletionResult:
+        c = self._client(model, max_tokens)
+        return self._result(c, await c.acompletion(self._prompt(messages, system)), model)
+
+
 _CACHE: dict[str, CompletionTransport] = {}
 
 
 def get_transport(auth_mode: str, cfg: Config) -> CompletionTransport:
-    """Strategy selector: OAuth → CLI, anything else (apikey) → SDK. Cached per
-    auth mode so SDK clients / neutral cwd are reused across calls."""
-    transport = _CACHE.get(auth_mode)
+    """Strategy selector. Anthropic: OAuth → CLI, apikey → SDK. Every other provider →
+    the engine's own client. Cached per provider+mode so clients and the neutral cwd are
+    reused across calls."""
+    provider = (cfg.provider or "anthropic").strip().lower()
+    ckey = f"{provider}:{auth_mode}"
+    transport = _CACHE.get(ckey)
     if transport is None:
-        transport = CliTransport(cfg) if auth_mode == "oauth" else ApiTransport(cfg)
-        _CACHE[auth_mode] = transport
+        if provider != "anthropic":
+            transport = EngineClientTransport(cfg)
+        else:
+            transport = CliTransport(cfg) if auth_mode == "oauth" else ApiTransport(cfg)
+        _CACHE[ckey] = transport
     return transport

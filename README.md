@@ -43,6 +43,24 @@ Role→model mapping lives in one place — `src/models.py` (a strategy pattern)
 - **Claude Code OAuth:** each role maps to the closest **subscription-supported sibling**. Verified by a live probe: current 4.x IDs work as-is; `claude-fable-5` is mapped to `claude-opus-4-8` (the API's own guidance), and deprecated dated IDs map to their current equivalents.
 `rlm_status` prints both the configured and the resolved models for the active auth mode.
 
+## Providers — one vendor locally, any vendor remotely
+`provider` (config.yaml, or `RLM_PROVIDER`) selects the vendor: **`anthropic`** (default) ·
+`gemini` · `openai` · `azure_openai` · `portkey`.
+
+- **`anthropic` is the only provider that needs no API key** — it authenticates through the local
+  `claude` CLI login. That is why it is the default and why local runs are unchanged.
+- **Every other provider needs its key** (`GEMINI_API_KEY`, `OPENAI_API_KEY`, …) plus that vendor's
+  model ids in `root_model`/`sub_model`. A missing key is a loud error at resolve time, not a failed call.
+- **This exists for remote deploys.** A container has no keychain for the `claude` CLI to read, so
+  `anthropic` + OAuth cannot work there; a keyed provider can.
+
+Nothing per-vendor is maintained here: the pinned `rlms` engine already ships clients for all of the
+above, so a non-Anthropic provider reuses *its* client through one adapter
+(`transport.EngineClientTransport`) and only gains our shared throttle + 429 retry. Anthropic keeps its
+two dedicated transports (`CliTransport`, `ApiTransport`) precisely because it is the odd one out with a
+keyless path. Mixing vendors per role (Claude root + a cheaper sub-model elsewhere) is possible — the
+engine takes `other_backends` separately — but is not wired to config yet.
+
 ## Tools (13)
 **Load & inspect** — `rlm_load_context` · `rlm_load_file` · `rlm_inspect_context` ·
 `rlm_chunk_context`
