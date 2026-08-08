@@ -11,6 +11,13 @@ Design: one rotated file per PID (no cross-process rotation race), plus a startu
 sweep enforcing ``<= log_retention_files`` AND ``<= log_retention_total_bytes`` AND
 ``<= log_retention_days``. Events are logfmt (``evt=… k=v``); we log lengths/counts
 and token/cost — never prompt or context text.
+
+Per-PID naming IS the Windows fix, so no platform-specific handler is needed. Windows
+cannot rename a file another handle holds open, so a single shared log would fail every
+rollover with ``PermissionError: [WinError 32]`` and silently drop the record. Measured
+both shapes on Windows: shared file → 0 backups and records lost; per-PID → ``.log.1/.2/.3``
+created, capped at ``backupCount``, every file within ``maxBytes``. Unique filenames remove
+the platform difference instead of abstracting over it — do not add a rotation adapter here.
 """
 
 from __future__ import annotations
@@ -119,7 +126,12 @@ def log_event(logger: logging.Logger, evt: str, **fields: object) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Retention sweep — the hard disk bound across all processes
+# Retention sweep — the disk bound across all processes. Eventually-consistent, not
+# hard: it runs at startup and skips inside log_sweep_cooldown_s, so N processes starting
+# in that window each add a file before anyone prunes (observed 23 files against a cap of
+# 20, pulled back to 20 by the next sweep). _unlink also skips a file Windows will not let
+# it delete because a live process holds it. The cap that protects disk is BYTES, and it
+# has headroom to absorb the overshoot.
 # --------------------------------------------------------------------------- #
 def _run_retention_sweep(cfg: Config, own_path: Path) -> None:
     """Prune ``rlm-mcp-*.log*`` in log_dir to stay within the file/byte/age caps.
