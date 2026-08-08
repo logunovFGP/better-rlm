@@ -287,10 +287,14 @@ def rlm_drop_context(ctx_id: str) -> str:
 @logged_tool
 def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
     """Answer a question over a loaded context using the FULL recursive RLM loop:
-    the root model (Sonnet 5 by default) writes Python in a Docker sandbox to
+    the root model (Sonnet 5 by default) writes Python in the configured sandbox to
     explore the context and delegates chunk-level work to Haiku 4.5, then returns
     a synthesized answer. This is the headline tool for giant inputs — the
     content stays in the sandbox; only the answer comes back.
+
+    The sandbox is Docker by default but is configurable: under `sandbox: local` /
+    RLM_SANDBOX=local the model-written Python runs ON THE HOST with no isolation.
+    Call rlm_status to see which is live before trusting this with untrusted input.
 
     model_override: '' (Sonnet) | 'opus' (Opus 4.8, hardest tasks) | explicit model id.
     Models are resolved by the selection strategy (closest OAuth sibling when on OAuth).
@@ -432,10 +436,13 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
 @mcp.tool()
 @logged_tool
 def rlm_exec(code: str, ctx_id: str = "") -> str:
-    """Execute Python in the Docker sandbox. If ctx_id is given, that context is
+    """Execute Python in the configured sandbox. If ctx_id is given, that context is
     loaded as the REPL variable `context` first. Use for grep/parse/aggregate
     over a loaded context (e.g. count errors, bucket log lines by hour). Output
-    is bounded — print only what you need."""
+    is bounded — print only what you need.
+
+    Docker by default; under `sandbox: local` / RLM_SANDBOX=local this code runs ON
+    THE HOST with no isolation. rlm_status reports which is live."""
     repl = _get_repl()
     if ctx_id and repl.loaded_ctx != ctx_id:
         repl.load_context(STORE.read_text(ctx_id), ctx_id)

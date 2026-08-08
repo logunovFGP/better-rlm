@@ -24,6 +24,7 @@ none of these paths.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -274,12 +275,46 @@ def _setup(self):
 
 _orig_setup = _dr.DockerREPL.setup
 
+_BUILTIN_OPEN = open
+
+#: Text-mode host writes in docker_repl that the Linux guest reads back. The vendored
+#: code calls bare ``open(path, "w")`` with no encoding at five sites (context text,
+#: context JSON, variables, history, and the exec script), so the host encodes with the
+#: locale codepage while the guest decodes UTF-8. Measured on a ru-RU Windows box: a
+#: context containing "→" died with ``UnicodeEncodeError: 'charmap' codec can't encode
+#: character '→'`` — and the script site means non-ASCII in model-written code
+#: would fail the same way. ``run_server.cmd`` sets PYTHONUTF8=1, but that only protects
+#: the documented launcher; this makes the encoding right however the engine is started.
+_UNENCODED_WRITE = 'with open(os.path.join(self.temp_dir, fname), "w") as f:'
+
+
+def _utf8_open(file, mode="r", *args, **kwargs):
+    """``open`` for docker_repl's module scope: UTF-8 for text, untouched for binary.
+
+    Shadowing the name in that one module fixes every call site at once instead of
+    re-implementing five vendored methods. ``state.dill`` uses "rb"/"wb" and must keep
+    its default — passing ``encoding`` to a binary open raises.
+    """
+    if "b" not in mode and "encoding" not in kwargs:
+        kwargs["encoding"] = "utf-8"
+    return _BUILTIN_OPEN(file, mode, *args, **kwargs)
+
 
 def patch_sandbox() -> None:
-    """Rebind ``DockerREPL.execute_code`` / ``setup`` with the hardened versions and
-    reap sandboxes abandoned by dead servers. Idempotent."""
+    """Rebind ``DockerREPL.execute_code`` / ``setup`` with the hardened versions, force
+    UTF-8 on the host-side writes the guest reads, and reap sandboxes abandoned by dead
+    servers. Idempotent."""
     if getattr(_dr, "_rlmmcp_patched", False):
         return
+    # Loud if those writes gained an explicit encoding (or moved): the shadow would be
+    # dead weight and the assumption behind it needs re-checking.
+    if _UNENCODED_WRITE not in inspect.getsource(_dr.DockerREPL.add_context):
+        raise RuntimeError(
+            "sandbox_patch: cannot force UTF-8 on docker_repl host writes — rlms "
+            "internals changed. Re-check rlm/environments/docker_repl.py against "
+            "pinned rlms==0.1.3; drop _utf8_open if upstream now sets encoding."
+        )
+    _dr.open = _utf8_open
     _dr.DockerREPL.execute_code = _execute_code
     _dr.DockerREPL.setup = _setup
     _dr._rlmmcp_patched = True
