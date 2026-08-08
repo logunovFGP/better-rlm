@@ -204,7 +204,21 @@ try {
         }
     }
 
-    # 5) Register with Claude Code ----------------------------------------
+    # 5) Verify gate ------------------------------------------------------
+    Write-Step 'Verify gate (git pre-push hook)'
+    # A hook in .git/hooks is untracked and never reaches a clone, which is why the
+    # "enforced by .git/hooks/pre-push" claim was false for every fresh checkout.
+    # Point git at the version-controlled directory instead.
+    if (Test-Path (Join-Path $PSScriptRoot '.git')) {
+        if ($PSCmdlet.ShouldProcess('core.hooksPath', 'git config')) {
+            Invoke-Native { git -C $PSScriptRoot config core.hooksPath scripts/githooks } 'git config core.hooksPath'
+            Write-Note "core.hooksPath -> scripts/githooks ('git push' now runs the verify gate)"
+        }
+    } else {
+        Write-Note 'Not a git checkout - skipped.'
+    }
+
+    # 6) Register with Claude Code ----------------------------------------
     Write-Step 'Register with Claude Code'
     $launcher = Join-Path $PSScriptRoot 'run_server.cmd'
     $registerCmd = "claude mcp add -s user rlm -- cmd /c `"$launcher`""

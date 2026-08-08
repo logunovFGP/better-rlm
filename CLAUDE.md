@@ -10,8 +10,11 @@ This repo uses trunk-based development. Read `TRUNK-BASED-PATTERNS.md` before
 any code change. Config: `trunk-based.json` (repo root). Worktrees and long-lived
 branches are blocked by a PreToolUse guard.
 
-Verify command: `uv run --no-sync pytest -q` — `python` is not on PATH here, so it
-must go through uv (which is also what the pre-push hook runs).
+Verify command: `uv run --extra dev pytest -q` — `python` is not on PATH here, so it
+must go through uv, and `--extra dev` is what pulls in pytest (it lives in the `dev`
+extra, so a plain `uv run` resolves the project without it). Same command the
+pre-push hook runs: `scripts/githooks/pre-push`, wired up by the installers via
+`core.hooksPath`.
 
 ## Patching the vendored engine
 

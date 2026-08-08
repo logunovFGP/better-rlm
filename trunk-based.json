@@ -5,7 +5,7 @@
   "leaf_prefix": "leaf",
   "leaf_max_hours": 24,
   "max_active_leaves": 3,
-  "verify_command": "uv run --no-sync pytest -q",
+  "verify_command": "uv run --extra dev pytest -q",
   "allow_direct_trunk_commits": false,
   "merge_style": "no-ff",
   "review": "self-on-green",

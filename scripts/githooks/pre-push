@@ -1,0 +1,35 @@
+#!/usr/bin/env sh
+# Verify gate for `git push` — the enforcement half of TRUNK-BASED-PATTERNS.md.
+#
+# Version-controlled on purpose. A hook living in .git/hooks is untracked, so it
+# never reaches a fresh clone and the "enforced by .git/hooks/pre-push" claim in
+# the docs was false for every new checkout. Both installers point
+# core.hooksPath at this directory, so cloning + install.sh|install.ps1 is enough.
+#
+# Runs where *git* runs it: no venv is activated and `python` is not on PATH on
+# every machine that clones this repo, so the obvious `python -m pytest -q` fails
+# with "command not found" and would reject every push. `uv` is a single
+# cross-platform binary and this repo ships a uv.lock, so it resolves the project
+# environment itself rather than pinning .venv_sh/bin/python (which would break
+# the Windows checkout) or .venv_windows (which would break the POSIX one).
+#
+# `--extra dev` is required, not cosmetic: pytest is declared in the `dev` extra,
+# so a plain `uv run` resolves the project WITHOUT pytest and the gate cannot
+# start. It also removes the setup step — uv creates .venv on first use, so this
+# works on a clone that has never been installed.
+#
+# uv touches .venv only. That is the verify-only environment, deliberately not the
+# one the MCP server runs from (.venv_sh / .venv_windows), so a push never
+# disturbs a live server's interpreter.
+set -e
+
+cd "$(git rev-parse --show-toplevel)"
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "pre-push: uv not found on PATH - cannot run the verify gate." >&2
+    echo "          Install uv (https://astral.sh/uv), then push again." >&2
+    exit 1
+fi
+
+echo "pre-push verify: uv run --extra dev pytest -q"
+uv run --extra dev pytest -q
