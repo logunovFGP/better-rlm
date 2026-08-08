@@ -63,6 +63,21 @@ def test_corrupt_state_is_reported_not_silently_reset(tmp_path):
     assert "No variables created yet" in data["stdout"]
 
 
+def test_utf8_open_forces_encoding_for_text_but_not_binary(tmp_path):
+    # docker_repl writes host files the Linux guest reads as UTF-8. On a non-UTF-8
+    # locale (measured: cp1251) the default encoding raised UnicodeEncodeError on "→".
+    # Binary must stay untouched — passing encoding= to a binary open is a TypeError.
+    text = tmp_path / "ctx.txt"
+    with sp._utf8_open(text, "w") as f:
+        f.write("→ ✓ é")
+    assert text.read_bytes() == "→ ✓ é".encode("utf-8")
+
+    binary = tmp_path / "state.dill"
+    with sp._utf8_open(binary, "wb") as f:
+        f.write(b"\x80\x04not-utf8")
+    assert binary.read_bytes() == b"\x80\x04not-utf8"
+
+
 def test_reap_removes_dead_owners_and_keeps_live_ones(tmp_path, monkeypatch):
     dead_pid = 999_999_999  # assert it is really absent rather than assume
     # POSIX signals ESRCH -> ProcessLookupError; Windows has no such mapping and
