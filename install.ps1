@@ -67,6 +67,31 @@ function Write-Step { param([Parameter(Mandatory)][string] $Message) Write-Host 
 function Write-Note { param([Parameter(Mandatory)][string] $Message) Write-Host "    $Message" -ForegroundColor DarkGray }
 function Test-Tool { param([Parameter(Mandatory)][string] $Name) [bool](Get-Command $Name -ErrorAction SilentlyContinue) }
 
+function Test-DockerRunning {
+    # Probe the daemon WITHOUT letting a stopped daemon abort the install. Windows
+    # PowerShell 5.1 turns a native command's *redirected* stderr into a terminating
+    # NativeCommandError while $ErrorActionPreference is 'Stop' (pwsh 7 does not), so
+    # `docker info *> $null` used inline would kill the script instead of falling
+    # through to the warning below. Scoping the preference to this function keeps a
+    # down daemon a plain $false on both editions.
+    $ErrorActionPreference = 'Continue'
+    docker info *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Test-McpRegistered {
+    # `claude mcp add` exits 1 when the name already exists, and Invoke-Native turns a
+    # non-zero exit into a terminating error — so without this probe, `-Register` would
+    # abort on every re-run of an otherwise idempotent script. `claude mcp get` is the
+    # cheap existence check: exit 0 = registered, exit 1 = absent. Output is discarded;
+    # only the code matters. $ErrorActionPreference is scoped for the same reason as in
+    # Test-DockerRunning (WinPS 5.1 turns redirected native stderr into a throw).
+    param([Parameter(Mandatory)][string] $Name)
+    $ErrorActionPreference = 'Continue'
+    & 'claude' 'mcp' 'get' $Name *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
 function Invoke-Native {
     # Run a native command and fail loudly on a non-zero exit code. $ErrorActionPreference
     # does NOT catch native (non-cmdlet) failures on Windows PowerShell / pre-7.4 pwsh.
@@ -128,8 +153,7 @@ try {
     } else {
         Write-Step 'Docker sandbox image (rlm-sandbox)'
         if (Test-Tool 'docker') {
-            docker info *> $null
-            if ($LASTEXITCODE -eq 0) {
+            if (Test-DockerRunning) {
                 if ($PSCmdlet.ShouldProcess('rlm-sandbox', 'docker build')) {
                     Invoke-Native { docker build -t rlm-sandbox -f 'docker/Dockerfile.sandbox' 'docker/' } 'docker build'
                 }
@@ -177,6 +201,12 @@ try {
     if ($Register) {
         if (-not (Test-Tool 'claude')) {
             Write-Warning "claude CLI not found on PATH - cannot auto-register. Run manually:`n  $registerCmd"
+        } elseif (Test-McpRegistered 'rlm') {
+            # Keep -Register re-runnable: an existing 'rlm' is reported, not re-added.
+            # It may point at a DIFFERENT checkout, so re-pointing is the user's call.
+            Write-Note "'rlm' is already registered - left as-is. To point it at THIS checkout:"
+            Write-Host "  claude mcp remove -s user rlm" -ForegroundColor Green
+            Write-Host "  $registerCmd" -ForegroundColor Green
         } elseif ($PSCmdlet.ShouldProcess('rlm', 'claude mcp add')) {
             Invoke-Native { & 'claude' 'mcp' 'add' '-s' 'user' 'rlm' '--' 'cmd' '/c' $launcher } 'claude mcp add'
             Write-Note 'Registered. Restart Claude Code to load the server and skill.'
