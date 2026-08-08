@@ -306,17 +306,23 @@ def patch_sandbox() -> None:
     servers. Idempotent."""
     if getattr(_dr, "_rlmmcp_patched", False):
         return
-    # Loud if those writes gained an explicit encoding (or moved): the shadow would be
-    # dead weight and the assumption behind it needs re-checking.
-    if _UNENCODED_WRITE not in inspect.getsource(_dr.DockerREPL.add_context):
-        raise RuntimeError(
-            "sandbox_patch: cannot force UTF-8 on docker_repl host writes — rlms "
-            "internals changed. Re-check rlm/environments/docker_repl.py against "
-            "pinned rlms==0.1.3; drop _utf8_open if upstream now sets encoding."
-        )
-    _dr.open = _utf8_open
     _dr.DockerREPL.execute_code = _execute_code
     _dr.DockerREPL.setup = _setup
+    # Docker-only, so gate it on the active sandbox. engine calls patch_sandbox()
+    # unconditionally, and `sandbox: local` never reaches these writes — a future rlms
+    # bump that moves the vendored pattern must not take the local path down with it.
+    # (The execute_code/setup rebinds above are safe to install either way: their own
+    # string matching lives in harden_script, which only a Docker exec ever calls.)
+    if load_config().use_docker:
+        # Loud if those writes gained an explicit encoding (or moved): the shadow would
+        # be dead weight and the assumption behind it needs re-checking.
+        if _UNENCODED_WRITE not in inspect.getsource(_dr.DockerREPL.add_context):
+            raise RuntimeError(
+                "sandbox_patch: cannot force UTF-8 on docker_repl host writes — rlms "
+                "internals changed. Re-check rlm/environments/docker_repl.py against "
+                "pinned rlms==0.1.3; drop _utf8_open if upstream now sets encoding."
+            )
+        _dr.open = _utf8_open
     _dr._rlmmcp_patched = True
     try:
         reap_orphans(workspace_root())

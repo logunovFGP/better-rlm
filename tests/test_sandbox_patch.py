@@ -78,6 +78,23 @@ def test_utf8_open_forces_encoding_for_text_but_not_binary(tmp_path):
     assert binary.read_bytes() == b"\x80\x04not-utf8"
 
 
+def test_docker_utf8_guard_never_breaks_local_mode(monkeypatch, tmp_path):
+    # engine calls patch_sandbox() in BOTH modes. The UTF-8 shadow is Docker-only, so an
+    # rlms bump that moves the vendored write must fail loudly for Docker users and stay
+    # invisible to `sandbox: local`, which never touches those writes.
+    monkeypatch.setattr(sp, "_UNENCODED_WRITE", "not present in vendored source")
+    monkeypatch.setenv("RLM_DOCKER_WORKSPACE_DIR", str(tmp_path))  # keep the reap sweep inert
+
+    monkeypatch.setattr(sp._dr, "_rlmmcp_patched", False, raising=False)
+    monkeypatch.setenv("RLM_SANDBOX", "local")
+    sp.patch_sandbox()  # must not raise
+
+    monkeypatch.setattr(sp._dr, "_rlmmcp_patched", False, raising=False)
+    monkeypatch.setenv("RLM_SANDBOX", "docker")
+    with pytest.raises(RuntimeError, match="rlms internals changed"):
+        sp.patch_sandbox()
+
+
 def test_reap_removes_dead_owners_and_keeps_live_ones(tmp_path, monkeypatch):
     dead_pid = 999_999_999  # assert it is really absent rather than assume
     # POSIX signals ESRCH -> ProcessLookupError; Windows has no such mapping and
