@@ -14,7 +14,10 @@ sub_model: claude-haiku-4-5            # cheap sub-LLM for chunk work (200K ctx)
 max_depth: 2
 max_iterations: 20
 max_output_tokens: 32768
-sandbox: docker                        # docker (default, sandboxed) | local (host exec — documented risk)
+sandbox: docker                        # docker (default, sandboxed) | local (host exec — documented risk).
+                                       # Override per-launch with RLM_SANDBOX=local (e.g. when no
+                                       # Docker daemon is available) — that keeps the committed
+                                       # default safe. Invalid values are rejected, not degraded.
 sandbox_image: rlm-sandbox
 sandbox_timeout_s: 300
 max_concurrent_subcalls: 2             # engine rlm_query_batched parallelism
