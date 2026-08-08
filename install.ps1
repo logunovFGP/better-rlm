@@ -79,17 +79,18 @@ function Test-DockerRunning {
     return ($LASTEXITCODE -eq 0)
 }
 
-function Test-McpRegistered {
-    # `claude mcp add` exits 1 when the name already exists, and Invoke-Native turns a
-    # non-zero exit into a terminating error — so without this probe, `-Register` would
-    # abort on every re-run of an otherwise idempotent script. `claude mcp get` is the
-    # cheap existence check: exit 0 = registered, exit 1 = absent. Output is discarded;
-    # only the code matters. $ErrorActionPreference is scoped for the same reason as in
-    # Test-DockerRunning (WinPS 5.1 turns redirected native stderr into a throw).
+function Get-McpRegistration {
+    # Returns `claude mcp get` output for $Name, or $null when it is not registered.
+    # Two callers need this: -Register must probe before adding (`claude mcp add` exits 1
+    # on an existing name, and Invoke-Native turns that into a throw, which aborted every
+    # re-run), and the status report needs the text to tell WHICH checkout is registered.
+    # $ErrorActionPreference is scoped for the same reason as in Test-DockerRunning:
+    # WinPS 5.1 turns a native command's redirected stderr into a terminating error.
     param([Parameter(Mandatory)][string] $Name)
     $ErrorActionPreference = 'Continue'
-    & 'claude' 'mcp' 'get' $Name *> $null
-    return ($LASTEXITCODE -eq 0)
+    $out = & 'claude' 'mcp' 'get' $Name 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0) { return $out }
+    return $null
 }
 
 function Invoke-Native {
@@ -187,7 +188,16 @@ try {
         if ($existing -and -not $existing.LinkType) {
             Write-Warning "$link exists and is not a link - left as-is. Remove it and re-run to link."
         } elseif ($existing) {
-            Write-Note 'Skill link already present.'
+            # A link may point at ANOTHER checkout. Reporting a bare "already present"
+            # served a stale SKILL.md while looking like success. .Target is string[] on
+            # WinPS 5.1 and a string on pwsh 7, so normalise before comparing.
+            if (@($existing.Target) -contains $target) {
+                Write-Note 'Skill link already present (this checkout).'
+            } else {
+                Write-Warning ("Skill link points at $(@($existing.Target)[0]) - NOT this " +
+                    "checkout, so a stale skill is being served. To switch:`n" +
+                    "  cmd /c rmdir `"$link`"`n  then re-run install.ps1")
+            }
         } elseif ($PSCmdlet.ShouldProcess($link, 'Create junction to repo skill')) {
             $null = New-Item -ItemType Junction -Path $link -Target $target
             Write-Note "Linked $link -> $target"
@@ -198,10 +208,12 @@ try {
     Write-Step 'Register with Claude Code'
     $launcher = Join-Path $PSScriptRoot 'run_server.cmd'
     $registerCmd = "claude mcp add -s user rlm -- cmd /c `"$launcher`""
+    $hasClaude = Test-Tool 'claude'
+    $reg = if ($hasClaude) { Get-McpRegistration 'rlm' } else { $null }
     if ($Register) {
-        if (-not (Test-Tool 'claude')) {
+        if (-not $hasClaude) {
             Write-Warning "claude CLI not found on PATH - cannot auto-register. Run manually:`n  $registerCmd"
-        } elseif (Test-McpRegistered 'rlm') {
+        } elseif ($reg) {
             # Keep -Register re-runnable: an existing 'rlm' is reported, not re-added.
             # It may point at a DIFFERENT checkout, so re-pointing is the user's call.
             Write-Note "'rlm' is already registered - left as-is. To point it at THIS checkout:"
@@ -211,11 +223,21 @@ try {
             Invoke-Native { & 'claude' 'mcp' 'add' '-s' 'user' 'rlm' '--' 'cmd' '/c' $launcher } 'claude mcp add'
             Write-Note 'Registered. Restart Claude Code to load the server and skill.'
         }
-    } else {
-        Write-Note 'Run this to register (or re-run install.ps1 with -Register):'
+    } elseif (-not $hasClaude) {
+        Write-Note 'Run this once the claude CLI is on PATH:'
         Write-Host "  $registerCmd" -ForegroundColor Green
-        Write-Note "Then restart Claude Code so the 'rlm' server and 'rlm-large-context' skill load."
+    } elseif (-not $reg) {
+        # The case that reads as routine but is not: nothing is registered, so the server
+        # will not load no matter how many times Claude Code restarts. Warn, don't note.
+        Write-Warning ("'rlm' is NOT registered - the server will not load. Run:`n" +
+            "  $registerCmd`n  (or re-run install.ps1 with -Register)")
+    } elseif ($reg -like "*$launcher*") {
+        Write-Note "'rlm' already registered to THIS checkout - nothing to do."
+    } else {
+        Write-Warning ("'rlm' is registered to a DIFFERENT checkout - this one will not be " +
+            "used. To switch:`n  claude mcp remove -s user rlm`n  $registerCmd")
     }
+    Write-Note "Restart Claude Code so the 'rlm' server and 'rlm-large-context' skill load."
 
     Write-Host ''
     Write-Host 'RLM MCP setup complete.' -ForegroundColor Green
