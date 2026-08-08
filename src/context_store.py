@@ -25,7 +25,11 @@ from .config import Config, estimate_tokens
 FILE_SEP = "\n\n===== FILE: {path} ({size} bytes) =====\n"
 
 # Skipped when loading a directory: dotfiles/dirs, VCS, caches, and likely secrets.
-_SKIP_DIRS = {".git", ".hg", ".svn", "__pycache__", "node_modules", ".venv", "venv"}
+#: Directory names never worth loading. ".venv_windows"/".venv_sh" are THIS repo's own
+#: installer-created venvs: without them, load_dir on this checkout ingested 7,383 files /
+#: 48.2 MB of which 47.7 MB (99%) was dependency source, burying the ~60 project files.
+_SKIP_DIRS = {".git", ".hg", ".svn", "__pycache__", "node_modules",
+              ".venv", "venv", ".venv_windows", ".venv_sh"}
 _SKIP_NAMES = {".env", ".env.local", "id_rsa", "id_ed25519", ".netrc", ".pgpass"}
 _MAX_DIR_FILE_BYTES = 25 * 1024 * 1024  # skip individual files larger than this in dir loads
 
