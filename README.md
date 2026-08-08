@@ -53,29 +53,232 @@ If you're logged into `claude`, installation is finished when `install.sh` exits
 
 ---
 
-## Quickstart
+## Getting Started
+
+Pick **your** platform and follow it top to bottom. Each section is complete and self-contained —
+there is nothing to cross-reference from the other two.
+
+- [macOS](#macos) · [Linux](#linux) · [Windows](#windows)
+
+---
+
+### macOS
+
+**1. Prerequisites**
+
+```bash
+brew install python@3.12 uv        # uv optional; installer falls back to venv + pip
+brew install --cask docker         # then LAUNCH Docker Desktop (Apple Silicon fine)
+claude                             # run once and log in — this is your auth
+```
+
+Python 3.11–3.13 all work; `install.sh` pins **3.12**. The engine ships no 3.14 wheels.
+No API key, no token, nothing in `.env` — the login above is the whole auth story.
+
+**2. Install**
 
 ```bash
 git clone https://github.com/logunovFGP/better-rlm && cd better-rlm
-./install.sh                 # venv + pinned deps + builds the rlm-sandbox image
-claude mcp add -s user rlm -- bash "$(pwd)/run_server.sh"
+./install.sh
 ```
 
-<details>
-<summary>Windows (PowerShell)</summary>
+This creates `.venv_sh`, installs pinned deps, builds the `rlm-sandbox` Docker image, creates
+`.env` (empty — only needed for `mode: api`), and symlinks the `rlm-large-context` skill into
+`~/.claude/skills/`. If Docker isn't running it prints a warning and continues; jump to step 5.
+
+**3. Register the server**
+
+```bash
+claude mcp add -s user rlm -- bash "$(pwd)/run_server.sh"
+claude mcp list                    # 'rlm' should appear
+```
+
+Or run `./install.sh --register` in step 2 to do both at once. Registration is opt-in either way:
+it writes `~/.claude.json` — global state, outside this checkout — and `claude mcp add` exits
+non-zero on a name that already exists. Re-running with an existing `rlm` reports it and prints the
+remove/re-add pair, rather than failing or silently hijacking another checkout's registration.
+
+**4. Verify**
+
+Restart your Claude session (so both the server and the skill load), then ask Claude for
+`rlm_status`. It reports the resolved transport, the models actually selected, the sandbox mode,
+and whether Docker was found. Then point it at something enormous.
+
+**5. No Docker? (optional)**
+
+Only `rlm_exec` and `rlm_query` need the sandbox; the other eleven tools — including the free
+`rlm_grep` and `rlm_read_chunk` — never touch it. To run those two without Docker:
+
+```bash
+claude mcp remove -s user rlm
+claude mcp add -s user rlm -e RLM_SANDBOX=local -- bash "$(pwd)/run_server.sh"
+```
+
+**This executes model-written Python directly on your Mac**, with your environment in scope. Use it
+for trusted inputs only — see [Security](#security).
+
+**macOS notes**
+
+- The venv is `.venv_sh`, deliberately separate from Windows' `.venv_windows`, so a shared
+  checkout can't cross-clobber interpreters. `install.sh` rebuilds it from scratch each run.
+- OAuth reuses your Claude Code login from the **macOS keychain**. Nothing to configure.
+- Re-running `./install.sh` is safe and idempotent.
+
+---
+
+### Linux
+
+**1. Prerequisites**
+
+```bash
+sudo apt install -y python3.12 python3.12-venv git      # or dnf/pacman equivalent
+curl -LsSf https://astral.sh/uv/install.sh | sh         # optional
+sudo apt install -y docker.io && sudo systemctl start docker
+sudo usermod -aG docker "$USER"                         # then log out/in so it applies
+claude                                                  # run once and log in — this is your auth
+```
+
+Python 3.11–3.13 all work; `install.sh` pins **3.12**. The engine ships no 3.14 wheels.
+No API key, no token, nothing in `.env` — the login above is the whole auth story.
+
+**2. Install**
+
+```bash
+git clone https://github.com/logunovFGP/better-rlm && cd better-rlm
+./install.sh
+```
+
+This creates `.venv_sh`, installs pinned deps, builds the `rlm-sandbox` Docker image, creates
+`.env` (empty — only needed for `mode: api`), and symlinks the `rlm-large-context` skill into
+`~/.claude/skills/`. If Docker isn't running it prints a warning and continues; jump to step 5.
+
+**3. Register the server**
+
+```bash
+claude mcp add -s user rlm -- bash "$(pwd)/run_server.sh"
+claude mcp list                    # 'rlm' should appear
+```
+
+Or run `./install.sh --register` in step 2 to do both at once. Registration is opt-in either way:
+it writes `~/.claude.json` — global state, outside this checkout — and `claude mcp add` exits
+non-zero on a name that already exists. Re-running with an existing `rlm` reports it and prints the
+remove/re-add pair, rather than failing or silently hijacking another checkout's registration.
+
+**4. Verify**
+
+Restart your Claude session (so both the server and the skill load), then ask Claude for
+`rlm_status`. It reports the resolved transport, the models actually selected, the sandbox mode,
+and whether Docker was found. Then point it at something enormous.
+
+**5. No Docker? (optional)**
+
+Only `rlm_exec` and `rlm_query` need the sandbox; the other eleven tools — including the free
+`rlm_grep` and `rlm_read_chunk` — never touch it. To run those two without Docker:
+
+```bash
+claude mcp remove -s user rlm
+claude mcp add -s user rlm -e RLM_SANDBOX=local -- bash "$(pwd)/run_server.sh"
+```
+
+**This executes model-written Python directly on your host**, with your environment in scope. Use it
+for trusted inputs only — see [Security](#security).
+
+**Linux notes**
+
+- If `docker info` needs `sudo`, the image build step will warn and skip. Fix the `docker` group
+  membership (above) and re-run `./install.sh`.
+- The venv is `.venv_sh`, deliberately separate from Windows' `.venv_windows`, so a WSL-shared
+  checkout can't cross-clobber interpreters. `install.sh` rebuilds it from scratch each run.
+- OAuth reuses your Claude Code login from `~/.claude/.credentials.json`. On a headless box with no
+  login, set `CLAUDE_CODE_OAUTH_TOKEN` in `.env` instead.
+
+---
+
+### Windows
+
+Native — **no WSL required**. Works in both Windows PowerShell 5.1 and PowerShell 7 (`pwsh`).
+
+**1. Prerequisites**
 
 ```powershell
-.\install.ps1 -Register      # same steps; creates .venv_windows and registers the server
+winget install Python.Python.3.13   # 3.11-3.13 all work; no 3.14 wheels exist
+winget install astral-sh.uv         # optional; installer falls back to venv + pip
+winget install Docker.DockerDesktop # then LAUNCH Docker Desktop and wait for "Engine running"
+claude                              # run once and log in — this is your auth
 ```
-The Windows venv is deliberately separate from the POSIX one, so a WSL-shared checkout can't
-cross-clobber interpreters.
-</details>
 
-Then restart your session and ask Claude about something enormous. `rlm_status` shows the resolved
-transport, models, and sandbox.
+`install.ps1` defaults to **3.13**; pass `-PythonVersion 3.12` to pin an older one. No API key, no
+token, nothing in `.env` — the login above is the whole auth story.
 
-**Prerequisites:** Python 3.12 or 3.13 (the engine ships no 3.14 wheels) · Docker running for the
-default sandbox (Apple Silicon fine) · a Claude Code login — run `claude` once.
+**2. Install**
+
+```powershell
+git clone https://github.com/logunovFGP/better-rlm
+cd better-rlm
+.\install.ps1 -Register
+```
+
+`-Register` does the install **and** registers the server in one shot. This creates
+`.venv_windows`, installs pinned deps, builds the `rlm-sandbox` Docker image, creates `.env`
+(empty — only needed for `mode: api`), and links the `rlm-large-context` skill into
+`%USERPROFILE%\.claude\skills`. If Docker isn't running it warns and continues; jump to step 5.
+
+> **Close any running Claude Code session first.** The script deletes and rebuilds `.venv_windows`
+> from scratch; a running server holds the interpreter open and the delete fails with
+> `Access to the path '.venv_windows' is denied`.
+
+Other flags: `-Sandbox local` (skip the Docker image build entirely) · `-SkipDocker` ·
+`-SkipSkill` · `-Verbose`.
+
+**3. Register the server** — skip if you used `-Register`
+
+Run `.\install.ps1` without `-Register` and it prints the exact command for your path. It looks
+like this:
+
+```powershell
+claude mcp add -s user rlm -- cmd /c "C:\path\to\better-rlm\run_server.cmd"
+claude mcp list                     # 'rlm' should appear
+```
+
+Note the launcher is **`run_server.cmd`**, not `run_server.sh`, and it must be invoked through
+`cmd /c`.
+
+**4. Verify**
+
+Restart your Claude session (so both the server and the skill load), then ask Claude for
+`rlm_status`. It reports the resolved transport, the models actually selected, the sandbox mode,
+and whether Docker was found. Then point it at something enormous.
+
+**5. No Docker? (optional)**
+
+Only `rlm_exec` and `rlm_query` need the sandbox; the other eleven tools — including the free
+`rlm_grep` and `rlm_read_chunk` — never touch it. To run those two without Docker:
+
+```powershell
+claude mcp remove -s user rlm
+claude mcp add -s user rlm -e RLM_SANDBOX=local -- cmd /c "C:\path\to\better-rlm\run_server.cmd"
+```
+
+**This executes model-written Python directly on your PC**, with your environment in scope. Use it
+for trusted inputs only — see [Security](#security).
+
+**Windows notes**
+
+- The venv is **`.venv_windows`**, deliberately separate from the POSIX `.venv_sh`, so a
+  WSL-shared checkout can't cross-clobber interpreters.
+- `run_server.cmd` sets `PYTHONUTF8=1` on purpose: the Linux sandbox guest reads host-written
+  files as UTF-8 while Windows defaults to cp1252, so without it a non-ASCII context fails to
+  write.
+- The skill is linked as a **directory junction**. If a real (non-link) folder already exists at
+  `%USERPROFILE%\.claude\skills\rlm-large-context`, the installer leaves it alone — delete it and
+  re-run to get the link.
+- OAuth reuses your Claude Code login from the **Windows credential store** — no keychain, no
+  `setup-token`, nothing to configure.
+- Paths with spaces are fine, but keep the quotes in the `claude mcp add` command above.
+- **Run `claude mcp add` from PowerShell, not Git Bash.** Git Bash rewrites the `/c` in `cmd /c`
+  into a Windows path (`C:/`), so the server registers with a mangled command and never starts.
+- `-Register` is safe to re-run: an existing `rlm` is reported with the remove/re-add pair instead
+  of aborting the install.
 
 ---
 
@@ -93,10 +296,12 @@ manifest sets, anything where "search it, don't read it" is the right instinct.
 
 ## Install a skill so Claude reaches for it on its own
 
-`install.sh` installs a user skill, **`rlm-large-context`**, symlinked into `~/.claude/skills/` and
-shared by the CLI and desktop app. Its description triggers on oversized-input intents ("what's in
-/ find X across / summarize this huge log|dump|dataset"), so Claude routes to the `rlm` tools
-without being told. Restart the session after install; `/rlm-large-context` invokes it manually.
+Both installers add a user skill, **`rlm-large-context`** — `install.sh` symlinks it into
+`~/.claude/skills/`, `install.ps1` junctions it into `%USERPROFILE%\.claude\skills` — shared by the
+CLI and desktop app. It is linked rather than copied, so editing `skills/<name>/SKILL.md` takes
+effect with no reinstall. Its description triggers on oversized-input intents ("what's in / find X
+across / summarize this huge log|dump|dataset"), so Claude routes to the `rlm` tools without being
+told. Restart the session after install; `/rlm-large-context` invokes it manually.
 
 Prefer an explicit rule as well? Add to `~/.claude/CLAUDE.md`:
 
@@ -234,6 +439,8 @@ figure you can't fully trust is worse than no figure.
 ## Configuration
 
 - **`mode`** (`config.yaml`, or `RLM_MODE` which wins) — `auto` (default) | `claude-cli` | `api`.
+- **`sandbox`** (`config.yaml`, or `RLM_SANDBOX` which wins) — `docker` (default) | `local`.
+  Invalid values are rejected rather than degraded to host exec.
 - `.env` — usually **empty**. Optional `CLAUDE_CODE_OAUTH_TOKEN` (headless, no keychain) or
   `ANTHROPIC_API_KEY` (for `mode: api`). Credentials stay host-side.
 - `config.yaml` — `mode`, `provider`, models, `max_depth`/`max_iterations`, `sandbox`
@@ -261,6 +468,7 @@ registration without editing files, add `-e RLM_MODE=claude-cli` (or `api`) to `
 | Sonnet/Opus `429` on OAuth (historical) | The old **HTTP-OAuth** failure: subscription tokens gated premium models to Claude-Code-shaped requests. The current transport drives the `claude` CLI, which is inherently Claude-Code-shaped, so the gate no longer applies (verified in both `--system-prompt` and `--append-system-prompt` modes). |
 | OAuth rate/usage limit | Your Claude subscription quota is saturated — often because an interactive session is using the same subscription. Run when that session is idle, or use `ANTHROPIC_API_KEY`. |
 | `Failed to start container` / docker errors | Start Docker Desktop; run `./install.sh` to build `rlm-sandbox`; or set `sandbox: local`. |
+| `Access to the path '.venv_windows' is denied` | A running server holds the interpreter. Stop Claude Code (or the MCP server) and re-run — `install.ps1` rebuilds the venv from scratch each time. |
 | `Unknown backend: litellm` | You're on the unpatched upstream — this fork uses `anthropic`. |
 | No 3.14 wheels | Create the venv with Python 3.12 or 3.13. |
 | `rlm_query` slow on OAuth | Each engine turn spawns a fresh `claude` CLI (~3–4 s cold start), so multi-turn queries are slower than the SDK path — the deliberate speed-for-stability trade, plus a one-time container start. Use `ANTHROPIC_API_KEY` if latency matters more than reusing your subscription. |

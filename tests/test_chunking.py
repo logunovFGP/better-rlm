@@ -31,6 +31,28 @@ def test_functions_strategy_splits_on_defs():
     assert _reconstructs(text, chunks)
 
 
+def test_lines_strategy_honors_chunk_chars_on_long_lines():
+    # 20 lines x ~500 chars: chunk_lines alone would emit ONE 10 KB chunk. A JSON-per-line
+    # log scaled up this way blows past the sub-model's window, so chunk_chars must bound it.
+    text = "".join(f"{'x' * 499}\n" for _ in range(20))
+    chunks = chunk_text(text, "lines", chunk_lines=2000, chunk_chars=1000, overlap=0)
+    assert len(chunks) > 1
+    assert all(c.n_chars <= 1000 for c in chunks)
+    assert _reconstructs(text, chunks)
+
+
+def test_files_strategy_honors_chunk_chars_and_keeps_label():
+    big = "B" * 2500
+    text = f"\n\n===== FILE: big.txt (2500 bytes) =====\n{big}"
+    chunks = chunk_text(text, "files", chunk_lines=2000, chunk_chars=1000, overlap=0)
+    assert len(chunks) > 1                              # one oversized file -> several chunks
+    assert all(c.n_chars <= 1000 for c in chunks)
+    assert all(c.label == "big.txt" for c in chunks)    # provenance survives the split
+    # No _reconstructs here: "files" spans start at the first FILE marker by design, so
+    # any preamble before it is intentionally not covered. Assert contiguity instead.
+    assert [c.start for c in chunks[1:]] == [c.end for c in chunks[:-1]]
+
+
 def test_unknown_strategy_raises():
     import pytest
     with pytest.raises(ValueError):

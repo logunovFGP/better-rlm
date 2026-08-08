@@ -203,10 +203,15 @@ def _execute_code(self, code: str):  # noqa: ANN001 — bound as a method
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:  # exists, owned by another user
+    except PermissionError:  # exists, owned by another user — must precede OSError
         return True
+    except OSError:
+        # POSIX raises ProcessLookupError (an OSError subclass) for ESRCH. Windows has no
+        # ESRCH mapping: os.kill(pid, 0) goes through OpenProcess, so an unknown or
+        # out-of-range pid surfaces as a bare OSError (WinError 87). Catching only
+        # ProcessLookupError let that escape and made reap_orphans raise on Windows
+        # instead of sweeping. Either way the process is unreachable — treat it as gone.
+        return False
     return True
 
 

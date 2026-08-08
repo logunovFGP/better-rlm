@@ -61,17 +61,30 @@ def _mk(text: str, starts: list[int], spans: list[tuple[int, int, str]]) -> list
     return chunks
 
 
+def _cap_spans(spans: list[tuple[int, int, str]], max_chars: int) -> list[tuple[int, int, str]]:
+    """Split any span longer than max_chars, preserving its label and order.
+
+    ``chunk_chars`` is the sub-model context ceiling this module's docstring promises.
+    Strategies that derive spans from split *points* get it via
+    ``_split_points_to_spans``; strategies that build spans directly (``lines``,
+    ``files``) must route through here, or one oversized chunk silently exceeds the
+    sub-model's window and every sub-query over it fails with "prompt is too long".
+    Sub-spans stay adjacent, so concatenation still reconstructs the source exactly.
+    """
+    out: list[tuple[int, int, str]] = []
+    for s, e, label in spans:
+        while e - s > max_chars:
+            out.append((s, s + max_chars, label))
+            s += max_chars
+        if e > s:
+            out.append((s, e, label))
+    return out
+
+
 def _split_points_to_spans(text: str, points: list[int], max_chars: int) -> list[tuple[int, int, str]]:
     """Given sorted split offsets, build spans, splitting any span exceeding max_chars."""
     points = sorted(set([0, *points, len(text)]))
-    spans: list[tuple[int, int, str]] = []
-    for s, e in zip(points, points[1:]):
-        while e - s > max_chars:
-            spans.append((s, s + max_chars, ""))
-            s += max_chars
-        if e > s:
-            spans.append((s, e, ""))
-    return spans
+    return _cap_spans([(s, e, "") for s, e in zip(points, points[1:])], max_chars)
 
 
 def chunk_text(text: str, strategy: str, *, chunk_lines: int, chunk_chars: int, overlap: int) -> list[Chunk]:
@@ -89,7 +102,9 @@ def chunk_text(text: str, strategy: str, *, chunk_lines: int, chunk_chars: int, 
             spans.append((s, e, ""))
             if e >= len(text):
                 break
-        return _mk(text, starts, spans)
+        # Long lines (JSON-per-line logs) make chunk_lines alone a poor bound: 2000
+        # lines of 4 KB is 8 MB, far past the sub-model. Cap on chunk_chars too.
+        return _mk(text, starts, _cap_spans(spans, chunk_chars))
 
     # "semantic" is paragraph-boundary splitting with a larger target — NOT
     # embedding-based. Same code path, bigger chunks.
@@ -116,10 +131,11 @@ def chunk_text(text: str, strategy: str, *, chunk_lines: int, chunk_chars: int, 
     # strategy == "files"
     marks = list(_FILE_MARK.finditer(text))
     if not marks:
-        return _mk(text, starts, [(0, len(text), "<single>")])
+        return _mk(text, starts, _cap_spans([(0, len(text), "<single>")], chunk_chars))
     spans = []
     for i, m in enumerate(marks):
         s = m.start()
         e = marks[i + 1].start() if i + 1 < len(marks) else len(text)
         spans.append((s, e, m.group(1)))
-    return _mk(text, starts, spans)
+    # One file can exceed the sub-model on its own; keep its label on each part.
+    return _mk(text, starts, _cap_spans(spans, chunk_chars))

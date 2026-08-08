@@ -116,6 +116,19 @@ _DEFAULTS: dict[str, Any] = {
 }
 
 
+def _sandbox(value: str) -> str:
+    """Validate the sandbox backend. ``use_docker`` is ``sandbox == "docker"``, so an
+    unrecognised value would silently mean *host execution of model-written Python*.
+    Reject it loudly instead of degrading into the unsafe mode."""
+    v = value.strip().lower()
+    if v not in ("docker", "local"):
+        raise ValueError(
+            f"sandbox must be 'docker' or 'local', got {value!r} "
+            "(check config.yaml or the RLM_SANDBOX env var)."
+        )
+    return v
+
+
 def _load_yaml() -> dict[str, Any]:
     path = PKG_ROOT / "config.yaml"
     if not path.exists():
@@ -188,7 +201,10 @@ def load_config() -> Config:
         max_depth=int(m["max_depth"]),
         max_iterations=int(m["max_iterations"]),
         max_output_tokens=int(m["max_output_tokens"]),
-        sandbox=str(m["sandbox"]),
+        # RLM_SANDBOX env wins over config.yaml, same as mode/provider — so a host with
+        # no Docker daemon selects `local` at registration instead of committing an
+        # unsafe default. Validated: a typo must not silently become host exec.
+        sandbox=_sandbox(str(os.getenv("RLM_SANDBOX") or m["sandbox"])),
         sandbox_image=str(m["sandbox_image"]),
         sandbox_timeout_s=int(m["sandbox_timeout_s"]),
         max_concurrent_subcalls=int(m["max_concurrent_subcalls"]),

@@ -65,7 +65,11 @@ def test_corrupt_state_is_reported_not_silently_reset(tmp_path):
 
 def test_reap_removes_dead_owners_and_keeps_live_ones(tmp_path, monkeypatch):
     dead_pid = 999_999_999  # assert it is really absent rather than assume
-    with pytest.raises(ProcessLookupError):
+    # POSIX signals ESRCH -> ProcessLookupError; Windows has no such mapping and
+    # OpenProcess on an out-of-range pid surfaces as OSError (WinError 87). Keep the
+    # narrow assertion where the platform supports it rather than widening both.
+    absent = OSError if sys.platform == "win32" else ProcessLookupError
+    with pytest.raises(absent):
         os.kill(dead_pid, 0)
 
     live = tmp_path / "docker_repl_live"

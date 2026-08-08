@@ -1,3 +1,5 @@
+import pytest
+
 from src.config import (
     MODEL_HAIKU,
     MODEL_SONNET,
@@ -16,6 +18,20 @@ def test_defaults():
     assert c.output_cap_bytes == 4096
     # synthesis answers are bound far more generously than raw-content tool output
     assert c.answer_cap_bytes > c.output_cap_bytes
+
+
+def test_rlm_sandbox_env_overrides_yaml(monkeypatch):
+    monkeypatch.setenv("RLM_SANDBOX", "LOCAL")  # case/space tolerant like mode/provider
+    c = load_config()
+    assert c.sandbox == "local"
+    assert c.use_docker is False
+
+
+def test_rlm_sandbox_rejects_unknown_value(monkeypatch):
+    # A typo must NOT silently degrade to host execution of model-written Python.
+    monkeypatch.setenv("RLM_SANDBOX", "dcoker")
+    with pytest.raises(ValueError, match="docker.*local"):
+        load_config()
 
 
 def test_cost_usd_sonnet():
