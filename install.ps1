@@ -407,7 +407,32 @@ try {
     if (-not $hasClaude) {
         Write-Warning "claude CLI not found on PATH. Once installed, run:`n  $registerCmd"
     } elseif ($reg -like "*$launcher*") {
-        Write-Note "'rlm' already registered to THIS checkout - nothing to do."
+        # Right checkout - but matching the launcher says nothing about the env, and the
+        # sandbox choice only takes effect if the registration carries it. Both directions
+        # matter: a missing RLM_SANDBOX=local silently makes the "local sandbox" choice a
+        # no-op, and a STALE one keeps executing model-written Python on the host long
+        # after Docker works again.
+        $hasLocal = [bool]($reg -match 'RLM_SANDBOX')
+        if ($hasLocal -ne $script:UseLocalSandbox) {
+            $what = if ($script:UseLocalSandbox) { 'add RLM_SANDBOX=local to' } else { 'drop the stale RLM_SANDBOX=local from' }
+            $why = if ($script:UseLocalSandbox) { 'Without it the server still tries to reach Docker.' }
+                   else { 'Until it is dropped, model-written Python keeps running on this host instead of the sandbox.' }
+            # Default is Update: the operator just expressed a sandbox choice, and leaving
+            # the registration contradicting it is the broken outcome.
+            if (0 -eq (Get-Choice -Title "Registration does not match the sandbox choice" `
+                    -Message "Need to $what the 'rlm' registration. $why" `
+                    -Options '&Update registration', '&Leave it' -DefaultChoice 0)) {
+                if ($PSCmdlet.ShouldProcess('rlm', 'claude mcp remove + add')) {
+                    Invoke-Native { & 'claude' 'mcp' 'remove' '-s' 'user' 'rlm' } 'claude mcp remove'
+                    Invoke-Native { & 'claude' @addArgs } 'claude mcp add'
+                    Write-Note "Registration updated ($registerCmd)."
+                }
+            } else {
+                Write-Warning "Registration left as-is - it does not match the sandbox choice."
+            }
+        } else {
+            Write-Note "'rlm' already registered to THIS checkout - nothing to do."
+        }
     } elseif (-not $reg) {
         # Nothing registered: the server cannot load however often Claude Code restarts.
         # -Register pre-answers; default No keeps scripted runs from touching global state.
