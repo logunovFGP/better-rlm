@@ -59,8 +59,13 @@ param(
     [switch] $Register,
 
     # Stop processes holding .venv_windows (the running rlm MCP server) so a rebuild can
-    # proceed. Only consulted when dependencies actually changed.
-    [switch] $Force
+    # proceed. Only consulted when dependencies actually changed. Also pre-answers the
+    # interactive prompt for that case.
+    [switch] $Force,
+
+    # Never prompt; take the documented default for every decision. Set this in CI. The
+    # script also detects a non-interactive host on its own, so this is belt-and-braces.
+    [switch] $NonInteractive
 )
 
 Set-StrictMode -Version Latest
@@ -81,6 +86,35 @@ function Test-DockerRunning {
     $ErrorActionPreference = 'Continue'
     docker info *> $null
     return ($LASTEXITCODE -eq 0)
+}
+
+function Get-Choice {
+    # One prompt for every decision this script used to settle by printing a warning and
+    # moving on. Returns the chosen option index.
+    #
+    # Falls back to $DefaultChoice whenever asking is impossible or wrong: -NonInteractive,
+    # a service/redirected host, CI, or -WhatIf. Each call site sets $DefaultChoice to the
+    # behaviour this script had BEFORE prompting existed, so a scripted or CI run is
+    # unchanged and can never block on a question nobody is there to answer.
+    param(
+        [Parameter(Mandatory)][string] $Title,
+        [Parameter(Mandatory)][string] $Message,
+        [Parameter(Mandatory)][string[]] $Options,   # '&Yes' - & marks the hotkey
+        [int] $DefaultChoice = 0
+    )
+    if (-not $script:CanPrompt) {
+        Write-Note "$Title - assuming '$($Options[$DefaultChoice] -replace '&', '')' (not interactive)."
+        return $DefaultChoice
+    }
+    $descs = @($Options | ForEach-Object {
+        New-Object System.Management.Automation.Host.ChoiceDescription $_, $_
+    })
+    try {
+        return $Host.UI.PromptForChoice($Title, $Message, $descs, $DefaultChoice)
+    } catch {
+        # Host advertises UI but cannot actually prompt - treat as non-interactive.
+        return $DefaultChoice
+    }
 }
 
 function Get-DepHash {
@@ -140,6 +174,20 @@ function Invoke-Native {
 }
 
 # --- setup -----------------------------------------------------------------
+# Can we actually ask a human? A prompt in a service, a redirected pipeline, or CI would
+# hang forever, and -WhatIf must stay side-effect free, so refuse to prompt in all of them.
+# [Environment]::UserInteractive stays $true under a redirected pipeline, where
+# PromptForChoice throws instead of asking, so test the stream itself as well.
+$script:CanPrompt = -not $NonInteractive -and -not $WhatIfPreference -and
+    [Environment]::UserInteractive -and $null -ne $Host.UI -and
+    -not [Console]::IsInputRedirected -and
+    -not $env:CI -and -not $env:TF_BUILD -and -not $env:GITHUB_ACTIONS
+
+# `local` means the sandbox is skipped AND the server must be told at registration time,
+# otherwise rlm_exec/rlm_query try to reach a Docker daemon that was never used here. The
+# Docker prompt can flip this on the fly.
+$script:UseLocalSandbox = ($Sandbox -eq 'local')
+
 Push-Location $PSScriptRoot
 try {
     # Windows-only venv name. This checkout may be shared with WSL/Linux, whose POSIX
@@ -173,21 +221,30 @@ try {
             # instead of killing anything: stopping a live Claude Code session is the
             # operator's call, not an installer's.
             $holders = @(Get-VenvHolder -Venv $venv)
-            if ($holders.Count -and $Force) {
-                foreach ($h in $holders) {
-                    if ($PSCmdlet.ShouldProcess("PID $($h.Id) ($($h.ProcessName))", 'Stop process holding the venv')) {
-                        Stop-Process -Id $h.Id -Force -ErrorAction SilentlyContinue
-                        Write-Note "Stopped PID $($h.Id) ($($h.ProcessName))"
-                    }
-                }
-                Start-Sleep -Milliseconds 750   # let Windows release the file handles
-            } elseif ($holders.Count) {
+            if ($holders.Count) {
                 $list = ($holders | ForEach-Object { "PID $($_.Id) ($($_.ProcessName))" }) -join ', '
-                $msg = ("Dependencies changed, so '$venv' must be rebuilt - but it is in use by: " +
-                    "$list. Stop Claude Code (or disconnect 'rlm' via /mcp) and re-run, or re-run " +
-                    "with -Force to stop those processes automatically.")
-                # -WhatIf must describe, never fail: nothing is being deleted in a dry run.
-                if ($WhatIfPreference) { Write-Warning $msg } else { throw $msg }
+                # -Force pre-answers this; otherwise ask. Default is Cancel, which keeps the
+                # old behaviour for scripted runs: never kill a session nobody approved.
+                $stop = $Force -or 0 -eq (Get-Choice -Title 'Virtual environment is in use' `
+                    -Message ("Dependencies changed, so '$venv' must be rebuilt, but it is held by: $list`n" +
+                        "This is the running rlm MCP server. Stopping it ends the connection until " +
+                        "Claude Code restarts it.") `
+                    -Options '&Stop them and rebuild', '&Cancel' -DefaultChoice 1)
+                if ($stop) {
+                    foreach ($h in $holders) {
+                        if ($PSCmdlet.ShouldProcess("PID $($h.Id) ($($h.ProcessName))", 'Stop process holding the venv')) {
+                            Stop-Process -Id $h.Id -Force -ErrorAction SilentlyContinue
+                            Write-Note "Stopped PID $($h.Id) ($($h.ProcessName))"
+                        }
+                    }
+                    Start-Sleep -Milliseconds 750   # let Windows release the file handles
+                } else {
+                    $msg = ("Dependencies changed, so '$venv' must be rebuilt - but it is in use by: " +
+                        "$list. Stop Claude Code (or disconnect 'rlm' via /mcp) and re-run, or re-run " +
+                        "with -Force to stop those processes automatically.")
+                    # -WhatIf must describe, never fail: nothing is being deleted in a dry run.
+                    if ($WhatIfPreference) { Write-Warning $msg } else { throw $msg }
+                }
             }
             if ($PSCmdlet.ShouldProcess($venv, 'Remove existing virtual environment')) {
                 try {
@@ -216,21 +273,42 @@ try {
     }
 
     # 2) Docker sandbox image ---------------------------------------------
-    if ($SkipDocker -or $Sandbox -eq 'local') {
+    if ($SkipDocker -or $script:UseLocalSandbox) {
         Write-Step "Skipping Docker image (Sandbox=$Sandbox, SkipDocker=$SkipDocker)"
-        Write-Note "Set 'sandbox: local' in config.yaml to run on the host (see README Security)."
+        Write-Note 'Model-written Python will run on the HOST (see README Security).'
     } else {
         Write-Step 'Docker sandbox image (rlm-sandbox)'
-        if (Test-Tool 'docker') {
-            if (Test-DockerRunning) {
-                if ($PSCmdlet.ShouldProcess('rlm-sandbox', 'docker build')) {
-                    Invoke-Native { docker build -t rlm-sandbox -f 'docker/Dockerfile.sandbox' 'docker/' } 'docker build'
-                }
-            } else {
-                Write-Warning 'Docker is installed but not running. Start Docker Desktop and re-run, or use -Sandbox local.'
-            }
-        } else {
+        if (-not (Test-Tool 'docker')) {
             Write-Warning 'docker not found on PATH. Install Docker Desktop, or use -Sandbox local.'
+        } else {
+            # Retry in place rather than making the operator re-run the whole installer just
+            # because Docker Desktop was still starting.
+            $asking = $true
+            while ($asking) {
+                $asking = $false
+                if (Test-DockerRunning) {
+                    if ($PSCmdlet.ShouldProcess('rlm-sandbox', 'docker build')) {
+                        Invoke-Native { docker build -t rlm-sandbox -f 'docker/Dockerfile.sandbox' 'docker/' } 'docker build'
+                    }
+                } else {
+                    switch (Get-Choice -Title 'Docker is installed but not running' `
+                        -Message ("The sandbox image cannot be built. Start Docker Desktop and retry, " +
+                            "or run without a sandbox - which executes model-written Python on this host.") `
+                        -Options '&Retry (I started Docker)', 'Run with &local sandbox', '&Skip the image build' `
+                        -DefaultChoice 2) {
+                        0 { $asking = $true }
+                        1 {
+                            $script:UseLocalSandbox = $true
+                            Write-Note 'Using the local sandbox: registration will set RLM_SANDBOX=local.'
+                            Write-Warning 'Local sandbox runs model-written Python on this host - trusted inputs only.'
+                        }
+                        default {
+                            Write-Warning ('No rlm-sandbox image: rlm_exec/rlm_query will fail until Docker ' +
+                                'is running and install.ps1 is re-run, or RLM_SANDBOX=local is set.')
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -262,9 +340,23 @@ try {
             if (@($existing.Target) -contains $target) {
                 Write-Note 'Skill link already present (this checkout).'
             } else {
-                Write-Warning ("Skill link points at $(@($existing.Target)[0]) - NOT this " +
-                    "checkout, so a stale skill is being served. To switch:`n" +
-                    "  cmd /c rmdir `"$link`"`n  then re-run install.ps1")
+                $other = @($existing.Target)[0]
+                # Default Leave = the old behaviour, so scripted runs never silently
+                # steal a link another checkout owns.
+                if (0 -eq (Get-Choice -Title 'Skill link points at another checkout' `
+                        -Message ("It targets $other, so Claude is served that checkout's SKILL.md, " +
+                            "not this one.") `
+                        -Options '&Re-point it here', '&Leave it' -DefaultChoice 1)) {
+                    if ($PSCmdlet.ShouldProcess($link, 'Re-point junction to this checkout')) {
+                        # Delete the reparse point only. Remove-Item -Recurse on a junction
+                        # can follow it and delete the OTHER checkout's files.
+                        [System.IO.Directory]::Delete($link)
+                        $null = New-Item -ItemType Junction -Path $link -Target $target
+                        Write-Note "Re-pointed $link -> $target"
+                    }
+                } else {
+                    Write-Warning "Skill link left at $other - a stale skill is being served."
+                }
             }
         } elseif ($PSCmdlet.ShouldProcess($link, 'Create junction to repo skill')) {
             $null = New-Item -ItemType Junction -Path $link -Target $target
@@ -289,35 +381,48 @@ try {
     # 6) Register with Claude Code ----------------------------------------
     Write-Step 'Register with Claude Code'
     $launcher = Join-Path $PSScriptRoot 'run_server.cmd'
-    $registerCmd = "claude mcp add -s user rlm -- cmd /c `"$launcher`""
+    # A local sandbox is useless unless the server is told at launch, so carry the choice
+    # made above (or -Sandbox local) into the registration itself.
+    $envArgs = if ($script:UseLocalSandbox) { @('-e', 'RLM_SANDBOX=local') } else { @() }
+    $registerCmd = 'claude mcp add -s user rlm ' +
+        (($envArgs -join ' ') + ' ').TrimStart() + "-- cmd /c `"$launcher`""
+    $addArgs = @('mcp', 'add', '-s', 'user', 'rlm') + $envArgs + @('--', 'cmd', '/c', $launcher)
+
     $hasClaude = Test-Tool 'claude'
     $reg = if ($hasClaude) { Get-McpRegistration 'rlm' } else { $null }
-    if ($Register) {
-        if (-not $hasClaude) {
-            Write-Warning "claude CLI not found on PATH - cannot auto-register. Run manually:`n  $registerCmd"
-        } elseif ($reg) {
-            # Keep -Register re-runnable: an existing 'rlm' is reported, not re-added.
-            # It may point at a DIFFERENT checkout, so re-pointing is the user's call.
-            Write-Note "'rlm' is already registered - left as-is. To point it at THIS checkout:"
-            Write-Host "  claude mcp remove -s user rlm" -ForegroundColor Green
-            Write-Host "  $registerCmd" -ForegroundColor Green
-        } elseif ($PSCmdlet.ShouldProcess('rlm', 'claude mcp add')) {
-            Invoke-Native { & 'claude' 'mcp' 'add' '-s' 'user' 'rlm' '--' 'cmd' '/c' $launcher } 'claude mcp add'
-            Write-Note 'Registered. Restart Claude Code to load the server and skill.'
-        }
-    } elseif (-not $hasClaude) {
-        Write-Note 'Run this once the claude CLI is on PATH:'
-        Write-Host "  $registerCmd" -ForegroundColor Green
-    } elseif (-not $reg) {
-        # The case that reads as routine but is not: nothing is registered, so the server
-        # will not load no matter how many times Claude Code restarts. Warn, don't note.
-        Write-Warning ("'rlm' is NOT registered - the server will not load. Run:`n" +
-            "  $registerCmd`n  (or re-run install.ps1 with -Register)")
+
+    if (-not $hasClaude) {
+        Write-Warning "claude CLI not found on PATH. Once installed, run:`n  $registerCmd"
     } elseif ($reg -like "*$launcher*") {
         Write-Note "'rlm' already registered to THIS checkout - nothing to do."
+    } elseif (-not $reg) {
+        # Nothing registered: the server cannot load however often Claude Code restarts.
+        # -Register pre-answers; default No keeps scripted runs from touching global state.
+        if ($Register -or 0 -eq (Get-Choice -Title "'rlm' is not registered" `
+                -Message "Without it the server never loads. Register this checkout now?`n  $registerCmd" `
+                -Options '&Register now', '&Not now' -DefaultChoice 1)) {
+            if ($PSCmdlet.ShouldProcess('rlm', 'claude mcp add')) {
+                Invoke-Native { & 'claude' @addArgs } 'claude mcp add'
+                Write-Note 'Registered.'
+            }
+        } else {
+            Write-Warning "'rlm' is NOT registered - the server will not load. Run:`n  $registerCmd"
+        }
     } else {
-        Write-Warning ("'rlm' is registered to a DIFFERENT checkout - this one will not be " +
-            "used. To switch:`n  claude mcp remove -s user rlm`n  $registerCmd")
+        # Registered, but to another checkout - this one will not be used. Default Leave,
+        # so a scripted run never hijacks a registration it does not own.
+        if (0 -eq (Get-Choice -Title "'rlm' points at a different checkout" `
+                -Message "This checkout will not be used. Re-point 'rlm' here?" `
+                -Options '&Re-point here', '&Leave it' -DefaultChoice 1)) {
+            if ($PSCmdlet.ShouldProcess('rlm', 'claude mcp remove + add')) {
+                Invoke-Native { & 'claude' 'mcp' 'remove' '-s' 'user' 'rlm' } 'claude mcp remove'
+                Invoke-Native { & 'claude' @addArgs } 'claude mcp add'
+                Write-Note 'Re-pointed to this checkout.'
+            }
+        } else {
+            Write-Warning ("'rlm' stays registered to a DIFFERENT checkout - this one will not " +
+                "be used. To switch:`n  claude mcp remove -s user rlm`n  $registerCmd")
+        }
     }
     Write-Note "Restart Claude Code so the 'rlm' server and 'rlm-large-context' skill load."
 

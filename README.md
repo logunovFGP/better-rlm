@@ -236,8 +236,25 @@ you:
 .\install.ps1 -Force
 ```
 
-Other flags: `-Sandbox local` (skip the Docker image build entirely) · `-SkipDocker` ·
-`-SkipSkill` · `-WhatIf` (dry run) · `-Verbose`.
+**It asks rather than gives up.** When something needs a decision, the installer prompts instead of
+printing a warning and moving on:
+
+| Situation | Choices |
+|---|---|
+| Docker installed but not running | Retry (after you start it) · run with local sandbox · skip the image build |
+| Venv held by a running `rlm` server, deps changed | Stop those processes and rebuild · cancel |
+| `rlm` not registered | Register now · not now |
+| `rlm` registered to another checkout | Re-point here · leave it |
+| Skill link points at another checkout | Re-point here · leave it |
+
+Choosing "local sandbox" also registers with `RLM_SANDBOX=local`, so the server actually honours it.
+
+Flags pre-answer prompts for unattended use — `-Force` (stop venv holders), `-Register`,
+`-Sandbox local`, `-SkipDocker`, `-SkipSkill` — and **`-NonInteractive`** takes the safe default for
+every question (never registers, never kills, never re-points). Prompting is skipped automatically
+under `-WhatIf`, a redirected pipeline, or CI, so nothing can hang waiting on a question.
+
+Other flags: `-WhatIf` (dry run) · `-Verbose` · `-PythonVersion 3.12`.
 
 **3. Register the server** — skip if you used `-Register`
 
