@@ -223,12 +223,21 @@ cd better-rlm
 (empty — only needed for `mode: api`), and links the `rlm-large-context` skill into
 `%USERPROFILE%\.claude\skills`. If Docker isn't running it warns and continues; jump to step 5.
 
-> **Close any running Claude Code session first.** The script deletes and rebuilds `.venv_windows`
-> from scratch; a running server holds the interpreter open and the delete fails with
-> `Access to the path '.venv_windows' is denied`.
+Re-running is cheap and safe: the venv is only rebuilt when `pyproject.toml`, `uv.lock`, or
+`-PythonVersion` actually change (fingerprinted in `.venv_windows\.rlm-deps-sha256`). Otherwise it
+reports `Dependencies unchanged` and leaves the venv alone — so a running `rlm` server, which holds
+the interpreter open, is not in the way.
+
+When dependencies *have* changed and a server is running, the rebuild cannot delete the venv. The
+script names the processes holding it and stops there; add **`-Force`** to have it stop them for
+you:
+
+```powershell
+.\install.ps1 -Force
+```
 
 Other flags: `-Sandbox local` (skip the Docker image build entirely) · `-SkipDocker` ·
-`-SkipSkill` · `-Verbose`.
+`-SkipSkill` · `-WhatIf` (dry run) · `-Verbose`.
 
 **3. Register the server** — skip if you used `-Register`
 
@@ -468,7 +477,7 @@ registration without editing files, add `-e RLM_MODE=claude-cli` (or `api`) to `
 | Sonnet/Opus `429` on OAuth (historical) | The old **HTTP-OAuth** failure: subscription tokens gated premium models to Claude-Code-shaped requests. The current transport drives the `claude` CLI, which is inherently Claude-Code-shaped, so the gate no longer applies (verified in both `--system-prompt` and `--append-system-prompt` modes). |
 | OAuth rate/usage limit | Your Claude subscription quota is saturated — often because an interactive session is using the same subscription. Run when that session is idle, or use `ANTHROPIC_API_KEY`. |
 | `Failed to start container` / docker errors | Start Docker Desktop; run `./install.sh` to build `rlm-sandbox`; or set `sandbox: local`. |
-| `Access to the path '.venv_windows' is denied` | A running server holds the interpreter. Stop Claude Code (or the MCP server) and re-run — `install.ps1` rebuilds the venv from scratch each time. |
+| `'.venv_windows' must be rebuilt - but it is in use by: PID ...` | Dependencies changed and a running `rlm` server holds the interpreter. Stop Claude Code (or disconnect `rlm` via `/mcp`) and re-run, or run `.\install.ps1 -Force` to stop those processes automatically. Unchanged dependencies never hit this — the venv is reused. |
 | `Unknown backend: litellm` | You're on the unpatched upstream — this fork uses `anthropic`. |
 | No 3.14 wheels | Create the venv with Python 3.12 or 3.13. |
 | `rlm_query` slow on OAuth | Each engine turn spawns a fresh `claude` CLI (~3–4 s cold start), so multi-turn queries are slower than the SDK path — the deliberate speed-for-stability trade, plus a one-time container start. Use `ANTHROPIC_API_KEY` if latency matters more than reusing your subscription. |
