@@ -88,6 +88,18 @@ if [ "$REGISTER" -eq 1 ]; then
   fi
 fi
 
+echo "==> Verify gate (git pre-push hook)"
+# A hook in .git/hooks is untracked and never reaches a clone, which is why the
+# "enforced by .git/hooks/pre-push" claim was false for every fresh checkout.
+# Point git at the version-controlled directory instead.
+if git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  chmod +x "$DIR/scripts/githooks/pre-push" 2>/dev/null || true
+  git -C "$DIR" config core.hooksPath scripts/githooks
+  echo "  core.hooksPath -> scripts/githooks ('git push' now runs the verify gate)"
+else
+  echo "  not a git checkout - skipped"
+fi
+
 if [ "$REGISTER" -eq 0 ]; then
   # A bare run must not look identical whether 'rlm' is registered, missing, or bound to
   # another checkout. "Not registered" reads as routine but means the server never loads.
