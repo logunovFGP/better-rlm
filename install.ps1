@@ -56,7 +56,11 @@ param(
 
     [switch] $SkipDocker,
     [switch] $SkipSkill,
-    [switch] $Register
+    [switch] $Register,
+
+    # Stop processes holding .venv_windows (the running rlm MCP server) so a rebuild can
+    # proceed. Only consulted when dependencies actually changed.
+    [switch] $Force
 )
 
 Set-StrictMode -Version Latest
@@ -77,6 +81,37 @@ function Test-DockerRunning {
     $ErrorActionPreference = 'Continue'
     docker info *> $null
     return ($LASTEXITCODE -eq 0)
+}
+
+function Get-DepHash {
+    # Fingerprint of everything that decides what ends up in the venv. Stored inside the
+    # venv so a re-run with unchanged dependencies skips the rebuild entirely - which is
+    # what keeps a running server from turning `install.ps1` into a hard failure.
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $PyVersion
+    )
+    $parts = @($PyVersion)
+    foreach ($f in 'pyproject.toml', 'uv.lock') {
+        $p = Join-Path $Root $f
+        if (Test-Path $p) { $parts += (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash }
+    }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($parts -join "`n"))
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '') }
+    finally { $sha.Dispose() }
+}
+
+function Get-VenvHolder {
+    # Processes running an executable from inside $Venv - in practice the rlm MCP server's
+    # python.exe, which is what holds Lib\site-packages\*.pyd open.
+    # ponytail: Path-match only. .Path is empty for processes we cannot open, but a holder
+    # we cannot see is also one we could not stop; use Sysinternals handle.exe if a
+    # non-python holder ever matters.
+    param([Parameter(Mandatory)][string] $Venv)
+    $prefix = $Venv.TrimEnd('\') + '\'
+    Get-Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -and $_.Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) }
 }
 
 function Get-McpRegistration {
@@ -121,29 +156,62 @@ try {
         throw "Neither 'uv' nor Python found on PATH. Install uv (https://docs.astral.sh/uv/) or Python $PythonVersion."
     }
 
-    # Always rebuild the venv fresh. Reusing an existing venv proved flaky on this
-    # WSL-shared checkout; a clean create is reliable and deterministic.
-    if (Test-Path $venv) {
-        if ($PSCmdlet.ShouldProcess($venv, 'Remove existing virtual environment')) {
-            try {
-                Remove-Item -Recurse -Force $venv
-            } catch {
-                throw ("Could not remove '$venv' - it is likely in use by the running rlm MCP " +
-                    "server. Stop Claude Code (or disconnect 'rlm' via /mcp), then re-run. " +
-                    "Details: $($_.Exception.Message)")
+    # Rebuild only when the inputs that decide venv contents actually changed. The old
+    # unconditional rebuild deleted a venv it usually did not need to, which failed
+    # outright whenever the registered rlm MCP server held the interpreter open - the
+    # common case, since installing is exactly when a server is already running.
+    $stamp = Join-Path $venv '.rlm-deps-sha256'
+    $wantHash = Get-DepHash -Root $PSScriptRoot -PyVersion $PythonVersion
+    $haveHash = if (Test-Path $stamp) { (Get-Content $stamp -Raw).Trim() } else { $null }
+
+    if ((Test-Path $python) -and $haveHash -eq $wantHash) {
+        Write-Note 'Dependencies unchanged (deps hash matches) - venv reused, nothing to rebuild.'
+    } else {
+        if (Test-Path $venv) {
+            # Free the interpreter first when asked, so a running server is a handled
+            # condition rather than a hard stop. Without -Force this reports the holders
+            # instead of killing anything: stopping a live Claude Code session is the
+            # operator's call, not an installer's.
+            $holders = @(Get-VenvHolder -Venv $venv)
+            if ($holders.Count -and $Force) {
+                foreach ($h in $holders) {
+                    if ($PSCmdlet.ShouldProcess("PID $($h.Id) ($($h.ProcessName))", 'Stop process holding the venv')) {
+                        Stop-Process -Id $h.Id -Force -ErrorAction SilentlyContinue
+                        Write-Note "Stopped PID $($h.Id) ($($h.ProcessName))"
+                    }
+                }
+                Start-Sleep -Milliseconds 750   # let Windows release the file handles
+            } elseif ($holders.Count) {
+                $list = ($holders | ForEach-Object { "PID $($_.Id) ($($_.ProcessName))" }) -join ', '
+                $msg = ("Dependencies changed, so '$venv' must be rebuilt - but it is in use by: " +
+                    "$list. Stop Claude Code (or disconnect 'rlm' via /mcp) and re-run, or re-run " +
+                    "with -Force to stop those processes automatically.")
+                # -WhatIf must describe, never fail: nothing is being deleted in a dry run.
+                if ($WhatIfPreference) { Write-Warning $msg } else { throw $msg }
+            }
+            if ($PSCmdlet.ShouldProcess($venv, 'Remove existing virtual environment')) {
+                try {
+                    Remove-Item -Recurse -Force $venv
+                } catch {
+                    throw ("Could not remove '$venv' - something still holds a file in it. Stop " +
+                        "Claude Code (or disconnect 'rlm' via /mcp), then re-run; -Force stops the " +
+                        "processes this script can see. Details: $($_.Exception.Message)")
+                }
             }
         }
-    }
-    if ($PSCmdlet.ShouldProcess($venv, "Create Python $PythonVersion virtual environment")) {
-        if ($hasUv) { Invoke-Native { uv venv --python $PythonVersion $venv } 'uv venv' }
-        else { Invoke-Native { & 'py' "-$PythonVersion" -m venv $venv } "py -$PythonVersion -m venv" }
-    }
-    if ($PSCmdlet.ShouldProcess('dependencies', 'Install (editable)')) {
-        if ($hasUv) {
-            Invoke-Native { uv pip install --python $python -e '.[dev,pdf]' } 'uv pip install'
-        } else {
-            Invoke-Native { & $python -m pip install --upgrade pip } 'pip upgrade'
-            Invoke-Native { & $python -m pip install -e '.[dev,pdf]' } 'pip install'
+        if ($PSCmdlet.ShouldProcess($venv, "Create Python $PythonVersion virtual environment")) {
+            if ($hasUv) { Invoke-Native { uv venv --python $PythonVersion $venv } 'uv venv' }
+            else { Invoke-Native { & 'py' "-$PythonVersion" -m venv $venv } "py -$PythonVersion -m venv" }
+        }
+        if ($PSCmdlet.ShouldProcess('dependencies', 'Install (editable)')) {
+            if ($hasUv) {
+                Invoke-Native { uv pip install --python $python -e '.[dev,pdf]' } 'uv pip install'
+            } else {
+                Invoke-Native { & $python -m pip install --upgrade pip } 'pip upgrade'
+                Invoke-Native { & $python -m pip install -e '.[dev,pdf]' } 'pip install'
+            }
+            # Written last: a stamp only means anything if the install above succeeded.
+            Set-Content -LiteralPath $stamp -Value $wantHash -Encoding ASCII
         }
     }
 
