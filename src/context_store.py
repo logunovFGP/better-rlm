@@ -143,7 +143,11 @@ class ContextStore:
         ctx_id = self._new_id()
         content_path = self._dir(ctx_id) / "content.txt"
         content_path.parent.mkdir(parents=True, exist_ok=True)
-        content_path.write_text(text, encoding="utf-8")
+        # newline="" disables newline translation. Without it Windows rewrites every
+        # "\n" as "\r\n", which inflates the bytes/est_tokens that _stat_path measures
+        # from the raw file, diverges sha256 from POSIX for identical input, and hands
+        # the Linux sandbox guest CRLF it never saw on the host.
+        content_path.write_text(text, encoding="utf-8", newline="")
         meta = ContextMeta(
             ctx_id=ctx_id, source=source, source_type="text", data_type="text",
             content_path=str(content_path), bytes=0, lines=0, est_tokens=0, sha256="",
@@ -159,7 +163,8 @@ class ContextStore:
         if data_type == "pdf":
             content_path = self._dir(ctx_id) / "content.txt"
             content_path.parent.mkdir(parents=True, exist_ok=True)
-            content_path.write_text(_extract_pdf(src), encoding="utf-8")
+            # newline="": see load_text — no CRLF translation on the stored copy.
+            content_path.write_text(_extract_pdf(src), encoding="utf-8", newline="")
             cp = content_path
         else:
             # Reference the original in place — no copy, so multi-GB logs cost no disk.
@@ -180,7 +185,9 @@ class ContextStore:
         content_path = self._dir(ctx_id) / "content.txt"
         content_path.parent.mkdir(parents=True, exist_ok=True)
         files: list[str] = []
-        with open(content_path, "w", encoding="utf-8") as out:
+        # newline="": see load_text — the concatenated dump must keep the newlines the
+        # source files actually had, not the host's.
+        with open(content_path, "w", encoding="utf-8", newline="") as out:
             for fp in sorted(root.glob("**/*")):
                 if not fp.is_file():
                     continue
