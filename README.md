@@ -114,6 +114,17 @@ claude mcp remove -s user rlm
 claude mcp add -s user rlm -e RLM_SANDBOX=local -- bash "$(pwd)/run_server.sh"
 ```
 
+To go back once Docker is healthy, drop the env var — re-running `./install.sh` will tell you the
+registration no longer matches the sandbox and print exactly this:
+
+```bash
+claude mcp remove -s user rlm
+claude mcp add -s user rlm -- bash "$(pwd)/run_server.sh"
+```
+
+Either way, restart Claude Code afterwards: the mode is read once at server start, so there is no
+per-call override, and `rlm_status` shows which mode is actually live.
+
 **This executes model-written Python directly on your Mac**, with your environment in scope. Use it
 for trusted inputs only — see [Security](#security).
 
@@ -179,6 +190,17 @@ Only `rlm_exec` and `rlm_query` need the sandbox; the other eleven tools — inc
 claude mcp remove -s user rlm
 claude mcp add -s user rlm -e RLM_SANDBOX=local -- bash "$(pwd)/run_server.sh"
 ```
+
+To go back once Docker is healthy, drop the env var — re-running `./install.sh` will tell you the
+registration no longer matches the sandbox and print exactly this:
+
+```bash
+claude mcp remove -s user rlm
+claude mcp add -s user rlm -- bash "$(pwd)/run_server.sh"
+```
+
+Either way, restart Claude Code afterwards: the mode is read once at server start, so there is no
+per-call override, and `rlm_status` shows which mode is actually live.
 
 **This executes model-written Python directly on your host**, with your environment in scope. Use it
 for trusted inputs only — see [Security](#security).
@@ -285,6 +307,18 @@ claude mcp remove -s user rlm
 claude mcp add -s user rlm -e RLM_SANDBOX=local -- cmd /c "C:\path\to\better-rlm\run_server.cmd"
 ```
 
+To go back once Docker is healthy, just re-run `.\install.ps1` and choose **`[R]` Retry** at the
+Docker prompt — it notices the registration still carries `RLM_SANDBOX=local` and offers to drop it.
+Manually, that is:
+
+```powershell
+claude mcp remove -s user rlm
+claude mcp add -s user rlm -- cmd /c "C:\path\to\better-rlm\run_server.cmd"
+```
+
+Either way, restart Claude Code afterwards: the mode is read once at server start, so there is no
+per-call override, and `rlm_status` shows which mode is actually live.
+
 **This executes model-written Python directly on your PC**, with your environment in scope. Use it
 for trusted inputs only — see [Security](#security).
 
@@ -346,8 +380,12 @@ only findings come back.
 **Load & inspect** — `rlm_load_context` · `rlm_load_file` · `rlm_inspect_context` · `rlm_chunk_context`
 **Deterministic retrieval — free, no model call** — `rlm_grep` · `rlm_read_chunk`
 **Lifecycle** — `rlm_list_contexts` · `rlm_drop_context`
-**Model-backed** — `rlm_query` (full recursive: Sonnet root + Haiku sub in Docker) · `rlm_sub_query` · `rlm_sub_query_batch` (Haiku map-reduce)
+**Model-backed** — `rlm_query` (full recursive: Sonnet root + Haiku sub, model-written Python in the sandbox) · `rlm_sub_query` · `rlm_sub_query_batch` (Haiku map-reduce)
 **Sandbox & status** — `rlm_exec` (Python in the sandbox) · `rlm_status`
+
+Only `rlm_exec` and `rlm_query` execute code, so only those two depend on the sandbox — the other
+eleven behave identically whether it is Docker or `local`. Both tools state which mode they are in,
+and `rlm_status` is authoritative: **`sandbox: local` means that code runs on your host, unisolated.**
 
 Two of those cost nothing. `rlm_grep` and `rlm_read_chunk` are pure retrieval with no model call,
 so narrowing a 2 GB file down to the interesting 40 KB is free — you only pay once you ask a
