@@ -88,13 +88,31 @@ if [ "$REGISTER" -eq 1 ]; then
   fi
 fi
 
+if [ "$REGISTER" -eq 0 ]; then
+  # A bare run must not look identical whether 'rlm' is registered, missing, or bound to
+  # another checkout. "Not registered" reads as routine but means the server never loads.
+  echo "==> Register with Claude Code (CLI + desktop share ~/.claude, so one"
+  echo "    user-scoped registration surfaces in both)"
+  REG=""
+  if command -v claude >/dev/null 2>&1; then REG="$(claude mcp get rlm 2>/dev/null)" || REG=""; fi
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "  Run this once the claude CLI is on PATH:"
+    echo "    claude mcp add -s user rlm -- bash \"$DIR/run_server.sh\""
+  elif [ -z "$REG" ]; then
+    echo "  WARNING: 'rlm' is NOT registered — the server will not load. Run:"
+    echo "    claude mcp add -s user rlm -- bash \"$DIR/run_server.sh\""
+    echo "           (or re-run ./install.sh --register)"
+  elif printf '%s' "$REG" | grep -qF "$DIR/run_server.sh"; then
+    echo "  'rlm' already registered to THIS checkout — nothing to do."
+  else
+    echo "  WARNING: 'rlm' is registered to a DIFFERENT checkout — this one will not be"
+    echo "           used. To switch:"
+    echo "    claude mcp remove -s user rlm"
+    echo "    claude mcp add -s user rlm -- bash \"$DIR/run_server.sh\""
+  fi
+fi
+
 cat <<MSG
-
-==> Register with Claude Code (CLI + desktop share ~/.claude, so one user-scoped
-    registration surfaces in both). Skip if you used --register:
-
-  claude mcp add -s user rlm -- bash "$DIR/run_server.sh"
-  claude mcp list            # confirm 'rlm' is listed
 
 Auth: mode=auto reuses your Claude Code login via the \`claude\` CLI — no API key needed.
       (SDK path instead: put ANTHROPIC_API_KEY in $DIR/.env and set mode: api, or
