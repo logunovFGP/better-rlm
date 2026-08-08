@@ -212,7 +212,20 @@ try {
     $wantHash = Get-DepHash -Root $PSScriptRoot -PyVersion $PythonVersion
     $haveHash = if (Test-Path $stamp) { (Get-Content $stamp -Raw).Trim() } else { $null }
 
+    # A matching hash says the INPUTS are unchanged; it does not prove the venv still works.
+    # Observed in the wild: an older unconditional rebuild deleted part of site-packages and
+    # then threw on a locked .pyd, leaving a venv that looks present but cannot import.
+    # Importing the real entry point is the cheapest honest check.
+    $venvUsable = $false
     if ((Test-Path $python) -and $haveHash -eq $wantHash) {
+        & $python -c 'import src.server' *> $null
+        $venvUsable = ($LASTEXITCODE -eq 0)
+        if (-not $venvUsable) {
+            Write-Warning 'Deps hash matches but the venv cannot import src.server - rebuilding.'
+        }
+    }
+
+    if ($venvUsable) {
         Write-Note 'Dependencies unchanged (deps hash matches) - venv reused, nothing to rebuild.'
     } else {
         if (Test-Path $venv) {
