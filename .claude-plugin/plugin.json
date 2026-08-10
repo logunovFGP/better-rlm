@@ -1,0 +1,30 @@
+{
+  "name": "better-rlm",
+  "version": "0.1.0",
+  "description": "Recursive Language Models over oversized contexts — load multi-MB logs, dumps and datasets into an external store, then grep/exec/query them without spending context.",
+  "author": {
+    "name": "Alexander Logunov"
+  },
+  "homepage": "https://github.com/logunovFGP/better-rlm",
+  "repository": "https://github.com/logunovFGP/better-rlm",
+  "license": "MIT",
+  "keywords": ["mcp", "rlm", "large-context", "logs", "analysis"],
+  "mcpServers": {
+    "rlm": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "--extra",
+        "pdf",
+        "python",
+        "-m",
+        "src.server"
+      ],
+      "env": {
+        "PYTHONUTF8": "1"
+      }
+    }
+  }
+}

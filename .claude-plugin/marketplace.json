@@ -1,0 +1,14 @@
+{
+  "name": "better-rlm",
+  "owner": {
+    "name": "Alexander Logunov"
+  },
+  "repository": "https://github.com/logunovFGP/better-rlm",
+  "plugins": [
+    {
+      "name": "better-rlm",
+      "source": "./",
+      "description": "MCP server exposing Recursive Language Models over oversized contexts, plus the rlm-large-context skill."
+    }
+  ]
+}

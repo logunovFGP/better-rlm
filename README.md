@@ -55,6 +55,53 @@ If you're logged into `claude`, installation is finished when `install.sh` exits
 
 ## Getting Started
 
+Two ways in:
+
+- **[As a Claude Code plugin](#install-as-a-claude-code-plugin)** — two commands, same on every OS.
+  No cloning, no venv to manage, and the skill comes with it.
+- **From a checkout** — the platform installers below. Choose this if you want to *edit* better-rlm,
+  or you'd rather not depend on `uv`.
+
+Both end up running the same server. The plugin is the shorter path; the checkout is the one the
+rest of this README's paths (`config.yaml`, `.env`, `install.ps1`) assume.
+
+---
+
+### Install as a Claude Code plugin
+
+**Prerequisite:** [`uv`](https://docs.astral.sh/uv/) on `PATH` — it builds and caches the Python
+environment on first launch, so nothing else needs installing. Plus `claude`, logged in.
+
+```bash
+/plugin marketplace add logunovFGP/better-rlm
+/plugin install better-rlm@better-rlm
+```
+
+Restart Claude Code. You get the `rlm` MCP server and the `rlm-large-context` skill together —
+`/plugin` owns both, so **don't also run `install.sh`/`install.ps1`**; two copies of the same skill
+name and two `rlm` registrations only compete with each other.
+
+**One more step for the default sandbox.** The plugin does not build the Docker image, and
+`sandbox: docker` is the default — so `rlm_exec` and `rlm_query` fail until the image exists. Build
+it once from the plugin directory (`/plugin` shows the path; it is the `${CLAUDE_PLUGIN_ROOT}` the
+server is launched with):
+
+```bash
+docker build -t rlm-sandbox -f docker/Dockerfile.sandbox docker/
+```
+
+Everything else — grep, chunking, loading, inspection — works without it. If you accept
+[the documented risk](#security) of running model-written Python on your host, set
+`RLM_SANDBOX=local` in the plugin's MCP server env instead of building the image.
+
+To configure it, edit `config.yaml` **inside the plugin directory**; it is read relative to the
+server's own root, not your project. Updating the plugin replaces that directory, so keep durable
+settings in your own notes.
+
+---
+
+### Install from a checkout
+
 Pick **your** platform and follow it top to bottom. Each section is complete and self-contained —
 there is nothing to cross-reference from the other two.
 
@@ -356,7 +403,9 @@ manifest sets, anything where "search it, don't read it" is the right instinct.
 
 ## Install a skill so Claude reaches for it on its own
 
-Both installers add a user skill, **`rlm-large-context`** — `install.sh` symlinks it into
+Installed as a plugin, the skill ships inside it — `/plugin` loads `skills/rlm-large-context`
+directly and there is nothing to link. From a checkout, both installers add it as a *user* skill —
+`install.sh` symlinks it into
 `~/.claude/skills/`, `install.ps1` junctions it into `%USERPROFILE%\.claude\skills` — shared by the
 CLI and desktop app. It is linked rather than copied, so editing `skills/<name>/SKILL.md` takes
 effect with no reinstall. Its description triggers on oversized-input intents ("what's in / find X
