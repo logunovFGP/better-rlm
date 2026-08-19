@@ -209,7 +209,7 @@ def resolve(src: Source, params: dict[str, str] | None = None) -> list[str]:
     the template's own placeholder text and return plausible data about nothing.
 
     Also refuses an unset ``${VAR}``. ``os.path.expandvars`` leaves an unknown name as
-    the LITERAL text ``${SIGNOZ_TOKEN}``, so without this the command cheerfully sends
+    the LITERAL text ``${METRICS_TOKEN}``, so without this the command cheerfully sends
     that string to a remote service as if it were a token and the failure surfaces as a
     confusing 403 from the far end instead of a fixable message here.
     """

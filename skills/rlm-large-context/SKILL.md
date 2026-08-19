@@ -107,10 +107,10 @@ Once loaded it is an ordinary context:
 - *"Which services' error bursts line up with each other?"* → `rlm_query`.
 
 **A partial load is worse than no load.** `rlm_load_source` labels a context
-*WITH WARNINGS* when the command exited non-zero, timed out, hit its size cap, **or returned
-zero bytes**. A truncated log answers "does X appear?" with a confident, wrong **no** — so
-narrow the window, raise the cap, or state plainly that the answer covers only part of the
-range. Same trap as the HTTP-200 sign-in page above.
+*WITH WARNINGS* when the command exited non-zero, timed out, or hit its size cap. A
+truncated log answers "does X appear?" with a confident, wrong **no** — so narrow the
+window, raise the cap, or state plainly that the answer covers only part of the range.
+Same trap as the HTTP-200 sign-in page above.
 
 **Zero bytes is never a negative answer.** The warning spells out why, and its first cause is
 the one nobody guesses: many programs write their logs to **stderr**, which is not captured
