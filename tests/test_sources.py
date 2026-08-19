@@ -136,6 +136,41 @@ def test_load_command_kills_a_command_that_overruns_its_timeout(cfg):
     assert run.timed_out and not run.ok
 
 
+# --- the rlm_load_source tool contract -------------------------------------
+def _server(monkeypatch, cfg, tmp_path, body):
+    import src.server as S
+    monkeypatch.setattr(S, "CFG", dataclasses.replace(cfg, sources_file=_registry(tmp_path, body)))
+    monkeypatch.setattr(S, "STORE", ContextStore(S.CFG))
+    return S
+
+
+def test_tool_reports_a_clean_load_without_warnings(monkeypatch, cfg, tmp_path):
+    S = _server(monkeypatch, cfg, tmp_path, f"s:\n  command: {PY} -c \"print('data')\"\n")
+    out = S.rlm_load_source("s")
+    assert "## Source loaded\n" in out and "WARNING" not in out
+
+
+def test_tool_flags_an_empty_success(monkeypatch, cfg, tmp_path):
+    # A dead tunnel, a lapsed session and a wrong selector all exit 0 with no output and
+    # look exactly like "nothing matched" — the most dangerous success there is.
+    S = _server(monkeypatch, cfg, tmp_path, f"s:\n  command: {PY} -c pass\n")
+    out = S.rlm_load_source("s")
+    assert "WITH WARNINGS" in out and "EMPTY output" in out
+
+
+def test_tool_errors_when_a_failed_command_produced_nothing(monkeypatch, cfg, tmp_path):
+    S = _server(monkeypatch, cfg, tmp_path,
+                f"s:\n  command: {PY} -c \"import sys; sys.exit(4)\"\n")
+    out = S.rlm_load_source("s")
+    assert out.startswith("ERROR:") and "exit code 4" in out
+    assert S.STORE.list_ids() == []   # no empty context left behind to query later
+
+
+def test_tool_rejects_an_undeclared_source(monkeypatch, cfg, tmp_path):
+    S = _server(monkeypatch, cfg, tmp_path, f"s:\n  command: {PY} -c pass\n")
+    assert S.rlm_load_source("../../etc/passwd").startswith("ERROR: unknown source")
+
+
 def test_config_exposes_a_sources_file_path(cfg, tmp_path):
     # The registry lives outside the repo so a site's infrastructure never lands in a diff.
     assert dataclasses.replace(cfg, sources_file=tmp_path / "s.yaml").sources_file.name \

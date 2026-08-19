@@ -540,7 +540,9 @@ deliberately re-opens the shell you were being protected from.
 **Partial results are labelled, not hidden.** A source that exits non-zero, overruns `timeout_s`,
 or hits `max_bytes` still returns its `ctx_id`, but marked *WITH WARNINGS* — a truncated log
 answers "does X appear?" with a confident, wrong **no**. A command that fails *and* produces
-nothing is an error, not an empty context. Both bounds kill the process, so a `--follow` source
+nothing is an error, not an empty context. **Exit 0 with no output is flagged too**: a dead
+tunnel, a lapsed session and a wrong selector all look identical to "nothing matched", and that
+ambiguity is how an empty result gets reported as a finding. Both bounds kill the process, so a `--follow` source
 terminates instead of running forever or filling the disk.
 
 The registry is re-read on every call, so adding a source needs no server reconnect. `rlm_status`
