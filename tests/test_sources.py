@@ -85,6 +85,72 @@ def test_env_expands_in_template_but_never_in_a_param(tmp_path, monkeypatch):
     assert argv[-1] == "$RLM_TEST_TOKEN"       # a parameter value may not
 
 
+def test_unset_env_reference_is_refused_before_the_command_runs(tmp_path, monkeypatch):
+    # expandvars leaves an unknown name as the LITERAL "${X}", so without this check the
+    # server sends that string to the far end and the failure looks like a remote 403.
+    monkeypatch.delenv("RLM_TEST_ABSENT", raising=False)
+    src = load_sources(_registry(
+        tmp_path, 's:\n  command: mycli --auth "Bearer ${RLM_TEST_ABSENT}"\n'))["s"]
+    with pytest.raises(ValueError, match="RLM_TEST_ABSENT"):
+        resolve(src)
+    monkeypatch.setenv("RLM_TEST_ABSENT", "x")
+    assert resolve(src) == ["mycli", "--auth", "Bearer x"]
+
+
+def test_bare_dollar_is_not_treated_as_an_env_reference(tmp_path):
+    # `awk '{print $1}'` and `grep 'x$'` must stay usable; only ${BRACED} is checked.
+    src = load_sources(_registry(tmp_path, "s:\n  command: awk {print $1}\n"))["s"]
+    resolve(src)   # must not raise
+
+
+# --- credential handoff ----------------------------------------------------
+def test_missing_credential_file_tells_the_user_to_supply_one(tmp_path):
+    src = load_sources(_registry(tmp_path, f"""
+s:
+  description: 'curl -K config, one line: header = "Authorization: Bearer <PAT>"'
+  command: curl -K {tmp_path}/cred.conf https://example.invalid
+  credential_file: {tmp_path}/cred.conf
+  credential_max_age_h: 4
+"""))["s"]
+    with pytest.raises(ValueError) as exc:
+        resolve(src)
+    msg = str(exc.value)
+    assert "ASK THE USER" in msg and "cred.conf" in msg
+    assert "Max age 4h" in msg
+    assert "Authorization: Bearer" in msg   # the format, so the user knows what to write
+
+
+def test_stale_credential_is_refused_and_the_file_is_never_read(tmp_path):
+    import os
+    import time
+    cred = tmp_path / "cred.conf"
+    cred.write_text('header = "Authorization: Bearer SECRETVALUE"\n')
+    body = f"""
+s:
+  command: curl -K {cred} https://example.invalid
+  credential_file: {cred}
+  credential_max_age_h: 4
+"""
+    src = load_sources(_registry(tmp_path, body))["s"]
+    assert resolve(src)[-1] == "https://example.invalid"   # fresh file: allowed
+
+    old = time.time() - 5 * 3600                           # 5h > the 4h limit
+    os.utime(cred, (old, old))
+    with pytest.raises(ValueError) as exc:
+        resolve(src)
+    msg = str(exc.value)
+    assert "5.0h old" in msg and "ASK THE USER" in msg
+    # The whole point: the server stats the file, never opens it, so a token cannot leak
+    # into an error string, a tool result or a log.
+    assert "SECRETVALUE" not in msg
+
+
+def test_no_credential_declared_means_no_check(tmp_path):
+    src = load_sources(_registry(tmp_path, "s:\n  command: echo hi\n"))["s"]
+    assert src.credential_file == "" and src.credential_max_age_h == 0
+    assert resolve(src) == ["echo", "hi"]
+
+
 # --- running a source ------------------------------------------------------
 def test_load_command_streams_stdout_into_a_context(cfg):
     store = ContextStore(cfg)
@@ -180,7 +246,25 @@ def test_tool_flags_an_empty_success(monkeypatch, cfg, tmp_path):
     # look exactly like "nothing matched" — the most dangerous success there is.
     S = _server(monkeypatch, cfg, tmp_path, f"s:\n  command: {PY} -c pass\n")
     out = S.rlm_load_source("s")
-    assert "WITH WARNINGS" in out and "EMPTY output" in out
+    assert "WITH WARNINGS" in out and "ZERO BYTES CAPTURED" in out
+
+
+def test_zero_bytes_advice_names_stderr_and_its_fix(monkeypatch, cfg, tmp_path):
+    # The static advice must name the cause an operator cannot guess: output on stderr,
+    # captured nowhere. This is the exact shape of a `docker logs` on a postgres container.
+    code = "import sys; sys.stderr.write('the actual logs\\n')"
+    S = _server(monkeypatch, cfg, tmp_path, f's:\n  command: {PY} -c "{code}"\n')
+    out = S.rlm_load_source("s")
+    assert "ZERO BYTES CAPTURED" in out
+    assert "STDERR" in out and "merge_stderr: true" in out and "(currently OFF)" in out
+    assert "redirected" in out
+    assert "do NOT read this as 'nothing happened'" in out
+
+    # With the flag on there is content, so no zero-byte advice at all.
+    S2 = _server(monkeypatch, cfg, tmp_path,
+                 f's:\n  command: {PY} -c "{code}"\n  merge_stderr: true\n')
+    out2 = S2.rlm_load_source("s")
+    assert "ZERO BYTES" not in out2 and "## Source loaded\n" in out2
 
 
 def test_tool_errors_when_a_failed_command_produced_nothing(monkeypatch, cfg, tmp_path):
