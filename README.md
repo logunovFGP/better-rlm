@@ -513,12 +513,44 @@ every line on stderr and the context loads **empty**. The usual answer, `2>&1`, 
 syntax that does not exist here by design, so it is a per-source flag instead. With it on
 there is no separate tail — a failure message arrives interleaved with the data.
 
+**Credentials: a file the server never opens.** A source needing a token declares
+`credential_file` instead of expecting an exported variable, with an optional
+`credential_max_age_h`:
+
+```yaml
+metrics-range:
+  command: curl -sS --fail-with-body -K ${HOME}/.rlm/secrets/metrics.curlrc
+           "${METRICS_URL}/api/v1/query_range?query={query}"
+  credential_file: ~/.rlm/secrets/metrics.curlrc
+  credential_max_age_h: 4
+```
+
+Only `exists()` and `st_mtime` are consulted — the file is **never read**, so a token cannot
+reach the conversation, a log, or a tool result through this server. `curl -K` reads it
+itself at request time, so rotating the file rotates the credential with no restart. A
+missing or stale file refuses the call and returns an instruction aimed at the *user*, who
+is the only party that should be minting tokens. Because the age limit is enforced locally
+it holds whatever expiry the upstream service is willing to issue: a backend that only hands
+out 30-day tokens still gets a 4-hour one here. `rlm_list_sources` reports each declared
+credential as `ready` or `MISSING or STALE`, so the gap surfaces before a call is attempted
+rather than as a puzzling 403 afterwards.
+
+An unset `${VAR}` in a template is refused for the same reason. `os.path.expandvars` leaves
+an unknown name as the *literal* text `${METRICS_TOKEN}`, which would otherwise be sent to
+the far end as if it were a token — a local misconfiguration surfacing as a remote auth
+error. Only the braced form is checked, so `awk '{print $1}'` and `grep 'x$'` stay usable.
+
 **Partial results are labelled, not hidden.** A source that exits non-zero, overruns `timeout_s`,
 or hits `max_bytes` still returns its `ctx_id`, but marked *WITH WARNINGS* — a truncated log
 answers "does X appear?" with a confident, wrong **no**. A command that fails *and* produces
-nothing is an error, not an empty context. **Exit 0 with no output is flagged too**: a dead
-tunnel, a lapsed session and a wrong selector all look identical to "nothing matched", and that
-ambiguity is how an empty result gets reported as a finding. Both bounds kill the process, so a `--follow` source
+nothing is an error, not an empty context.
+
+**Zero bytes always carries static advice**, whatever the exit code, because it is the result
+most likely to be misread as a finding. The note names the causes in likelihood order —
+output on stderr and therefore captured nowhere (with `merge_stderr` and its current state
+called out), output redirected or paged away inside the command, then a dead tunnel, lapsed
+session or wrong selector/namespace/window — and says to co-verify with a query that must
+return data before reporting any negative conclusion. Both bounds kill the process, so a `--follow` source
 terminates instead of running forever or filling the disk.
 
 The registry is re-read on every call, so adding a source needs no server reconnect. `rlm_status`
