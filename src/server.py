@@ -235,6 +235,11 @@ def rlm_load_source(name: str, params: dict[str, str] | None = None) -> str:
         notes.append(f"exit code {run.returncode}")
     if run.stderr_tail:
         notes.append(f"stderr tail: {run.stderr_tail[:400]}")
+    if run.ok and run.meta.bytes == 0:
+        # Exit 0 with no output is the most dangerous success there is: a dead tunnel,
+        # an expired session or a wrong selector all look exactly like "nothing matched".
+        notes.append("EMPTY output despite exit 0 — verify the source really has "
+                     "nothing to return before reading this as a negative answer")
     if not run.ok and run.meta.bytes == 0:
         # Nothing came back and the command failed: that is an error, not an empty
         # context someone will later query and get confident nonsense from.
