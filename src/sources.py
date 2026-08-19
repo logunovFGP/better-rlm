@@ -33,6 +33,13 @@ parameter value can never introduce a shell metacharacter, a pipe, or a second c
 the file, and not in the conversation. Parameter values are never expanded, so a value
 containing ``$HOME`` cannot read the environment back out.
 
+``merge_stderr: true`` folds the command's stderr into the loaded content instead of
+keeping it as a diagnostic tail. Needed more often than it looks: plenty of programs write
+their *logs* to stderr by convention (postgres does, so ``docker logs`` on a postgres
+container puts every line there), and the usual fix — ``2>&1`` — is shell syntax that does
+not exist here by design. Off by default, because for a well-behaved command stderr is the
+error channel and merging it would bury a failure message inside the data.
+
 ``{name}`` is a parameter, ``${VAR}`` is an environment reference — the two do not
 collide. A template that needs a *literal* brace expression (a PromQL selector, a JSON
 body) should take it as a parameter instead: parameter values are substituted verbatim
@@ -72,6 +79,7 @@ class Source:
     description: str
     timeout_s: int
     max_bytes: int
+    merge_stderr: bool
 
     @property
     def params(self) -> list[str]:
@@ -110,6 +118,7 @@ def _parse_one(name: str, raw: object) -> Source:
         description=str(raw.get("description", "")).strip(),
         timeout_s=timeout_s,
         max_bytes=max_bytes,
+        merge_stderr=bool(raw.get("merge_stderr", False)),
     )
 
 

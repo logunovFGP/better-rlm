@@ -108,6 +108,31 @@ def test_load_command_surfaces_failure_and_keeps_partial_output(cfg):
     assert "partial" in store.read_text(run.meta.ctx_id)
 
 
+def test_merge_stderr_defaults_off_so_a_failure_message_stays_out_of_the_data(tmp_path):
+    assert load_sources(_registry(tmp_path, "s:\n  command: echo hi\n"))["s"].merge_stderr is False
+
+
+def test_merge_stderr_puts_stderr_logs_into_the_context(cfg, tmp_path):
+    # postgres (and so `docker logs` on one) writes its LOGS to stderr, and the shell
+    # answer 2>&1 does not exist here. Without this the store gets nothing at all.
+    code = "import sys; sys.stderr.write('log line\\n'); sys.stdout.write('out line\\n')"
+    store = ContextStore(cfg)
+
+    split = store.load_command([PY, "-c", code], source="source:t",
+                               timeout_s=30, max_bytes=1 << 20)
+    assert store.read_text(split.meta.ctx_id) == "out line\n"
+    assert "log line" in split.stderr_tail          # diagnostic tail, not content
+
+    merged = store.load_command([PY, "-c", code], source="source:t",
+                                timeout_s=30, max_bytes=1 << 20, merge_stderr=True)
+    body = store.read_text(merged.meta.ctx_id)
+    assert "log line" in body and "out line" in body
+    assert merged.stderr_tail == ""                 # nothing left to tail
+
+    on = load_sources(_registry(tmp_path, "s:\n  command: x\n  merge_stderr: true\n"))["s"]
+    assert on.merge_stderr is True
+
+
 def test_load_command_does_not_deadlock_on_large_stderr(cfg):
     # stderr on a pipe would fill its buffer while we drain only stdout, wedging both.
     store = ContextStore(cfg)
