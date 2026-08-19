@@ -40,6 +40,14 @@ container puts every line there), and the usual fix — ``2>&1`` — is shell sy
 not exist here by design. Off by default, because for a well-behaved command stderr is the
 error channel and merging it would bury a failure message inside the data.
 
+A source needing a credential should declare ``credential_file`` (plus an optional
+``credential_max_age_h``) rather than expecting an exported variable. The server only
+stats that path — it never opens it — so the token cannot reach the conversation, a log
+or a tool result through this server. A missing or stale file produces an error telling
+the *user* to supply a fresh short-lived token, which is the only party that should. The
+age limit is enforced here, so it holds regardless of the shortest expiry the upstream
+service is willing to issue.
+
 ``{name}`` is a parameter, ``${VAR}`` is an environment reference — the two do not
 collide. A template that needs a *literal* brace expression (a PromQL selector, a JSON
 body) should take it as a parameter instead: parameter values are substituted verbatim
@@ -55,6 +63,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -69,6 +78,9 @@ DEFAULT_MAX_BYTES = 256 * 1024 * 1024
 # environment reference in a template is parsed as a required parameter and the source
 # becomes uncallable.
 _PLACEHOLDER = re.compile(r"(?<!\$)\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# Braced form ONLY. Bare "$VAR" is left to expandvars unchecked on purpose: `awk '{print $1}'`
+# and `grep 'x$'` would otherwise be misread as environment references and rejected.
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -80,6 +92,8 @@ class Source:
     timeout_s: int
     max_bytes: int
     merge_stderr: bool
+    credential_file: str         # "" = none required
+    credential_max_age_h: float  # 0 = no expiry check
 
     @property
     def params(self) -> list[str]:
@@ -119,6 +133,8 @@ def _parse_one(name: str, raw: object) -> Source:
         timeout_s=timeout_s,
         max_bytes=max_bytes,
         merge_stderr=bool(raw.get("merge_stderr", False)),
+        credential_file=str(raw.get("credential_file", "")).strip(),
+        credential_max_age_h=float(raw.get("credential_max_age_h", 0) or 0),
     )
 
 
@@ -151,13 +167,62 @@ def _render(token: str, params: dict[str, str]) -> str:
     return "".join(out)
 
 
+def check_credential(src: Source) -> None:
+    """Pre-flight the source's declared credential file. Raises ValueError with an
+    instruction aimed at the USER, because supplying a token is their job, never the
+    agent's.
+
+    Only ``exists()`` and ``st_mtime`` are consulted — the server never opens the file,
+    so a credential cannot reach the conversation, the logs or a tool result through it.
+    The age limit is enforced locally and so holds whatever expiry the upstream service
+    happens to offer: a backend that only issues 30-day tokens still gets a 4-hour one
+    here, as long as the operator refreshes the file.
+    """
+    if not src.credential_file:
+        return
+    path = Path(os.path.expandvars(src.credential_file)).expanduser()
+    if not path.exists():
+        raise ValueError(
+            f"source {src.name!r} needs a credential file that does not exist:\n"
+            f"  {path}\n"
+            f"ASK THE USER to create it with a short-lived token — do not create, fill or "
+            f"invent one, and do not read it back into the conversation."
+            + (f" Max age {src.credential_max_age_h:g}h."
+               if src.credential_max_age_h else "")
+            + (f"\nFormat: {src.description}" if src.description else "")
+        )
+    age_h = (time.time() - path.stat().st_mtime) / 3600
+    if src.credential_max_age_h and age_h > src.credential_max_age_h:
+        raise ValueError(
+            f"source {src.name!r}: credential {path} is {age_h:.1f}h old, past its "
+            f"{src.credential_max_age_h:g}h limit. ASK THE USER for a fresh short-lived "
+            f"token and to revoke the old one. Refusing to use it — an expired token "
+            f"returns an auth page that reads like data."
+        )
+
+
 def resolve(src: Source, params: dict[str, str] | None = None) -> list[str]:
     """Substitute ``params`` into the source template and return the argv to run.
 
     Rejects missing AND unknown parameters. Unknown is not a harmless extra: it is
     almost always a typo for a declared one, which would otherwise run the command with
     the template's own placeholder text and return plausible data about nothing.
+
+    Also refuses an unset ``${VAR}``. ``os.path.expandvars`` leaves an unknown name as
+    the LITERAL text ``${SIGNOZ_TOKEN}``, so without this the command cheerfully sends
+    that string to a remote service as if it were a token and the failure surfaces as a
+    confusing 403 from the far end instead of a fixable message here.
     """
+    check_credential(src)
+    unset = sorted({m.group(1) for tok in src.command for m in _ENV_REF.finditer(tok)
+                    if m.group(1) not in os.environ})
+    if unset:
+        raise ValueError(
+            f"source {src.name!r} references environment variable(s) that are not set: "
+            f"{unset}. The server would otherwise send the literal text "
+            f"'${{{unset[0]}}}' to the far end. Set them where the MCP server is "
+            f"launched, or switch the source to a credential_file."
+        )
     given = {str(k): str(v) for k, v in (params or {}).items()}
     declared = set(src.params)
     missing = sorted(declared - set(given))

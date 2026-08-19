@@ -107,13 +107,25 @@ Once loaded it is an ordinary context:
 - *"Which services' error bursts line up with each other?"* → `rlm_query`.
 
 **A partial load is worse than no load.** `rlm_load_source` labels a context
-*WITH WARNINGS* when the command exited non-zero, timed out, hit its size cap, **or exited
-0 with no output at all**. A truncated log answers "does X appear?" with a confident, wrong
-**no** — so narrow the window, raise the cap, or state plainly that the answer covers only
-part of the range. And an empty success is not a negative answer: a dead tunnel, a lapsed
-session and a wrong selector all look exactly like "nothing matched". Co-verify with a query
-that *must* return something before you report a zero. Same trap as the HTTP-200 sign-in
-page above.
+*WITH WARNINGS* when the command exited non-zero, timed out, hit its size cap, **or returned
+zero bytes**. A truncated log answers "does X appear?" with a confident, wrong **no** — so
+narrow the window, raise the cap, or state plainly that the answer covers only part of the
+range. Same trap as the HTTP-200 sign-in page above.
+
+**Zero bytes is never a negative answer.** The warning spells out why, and its first cause is
+the one nobody guesses: many programs write their logs to **stderr**, which is not captured
+unless the source sets `merge_stderr: true` — a postgres container's entire log lands there,
+so `docker logs` on one loads as empty. Then: output redirected or paged away inside the
+command; then a dead tunnel, lapsed session, or wrong selector / namespace / time window.
+Read the warning, fix the cause, and co-verify with a query that *must* return data before
+reporting any zero as a finding.
+
+**If a source needs a credential, ask the user — never mint one yourself.** Sources declare a
+`credential_file`; `rlm_list_sources` shows each as `ready` or `MISSING or STALE`, and a call
+against a missing or expired one is refused with the exact path and format needed. Relay that
+to the user and ask them for a **short-lived** token — the source's `credential_max_age_h`
+says how short, and the server refuses the file once it is older than that. Do not create,
+fill, guess or echo the file's contents, and do not read it back into this conversation.
 
 ## What it is *not* for
 

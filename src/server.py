@@ -188,6 +188,18 @@ def rlm_list_sources() -> str:
         lines.append(f"  - params: {', '.join(s.params) or 'none'}"
                      f"  |  timeout {s.timeout_s}s, cap {s.max_bytes:,} B"
                      + ("  |  stderr merged into content" if s.merge_stderr else ""))
+        # Surface a missing/stale credential HERE, so the user can be asked before a call
+        # is attempted rather than after it fails.
+        if s.credential_file:
+            try:
+                sources.check_credential(s)
+                state = "ready"
+            except ValueError:
+                state = "MISSING or STALE — ask the user for a fresh short-lived token"
+            lines.append(f"  - credential: {s.credential_file}"
+                         + (f" (max age {s.credential_max_age_h:g}h)"
+                            if s.credential_max_age_h else "")
+                         + f" — {state}")
     return _bound("\n".join(lines))
 
 
@@ -237,11 +249,21 @@ def rlm_load_source(name: str, params: dict[str, str] | None = None) -> str:
         notes.append(f"exit code {run.returncode}")
     if run.stderr_tail:
         notes.append(f"stderr tail: {run.stderr_tail[:400]}")
-    if run.ok and run.meta.bytes == 0:
-        # Exit 0 with no output is the most dangerous success there is: a dead tunnel,
-        # an expired session or a wrong selector all look exactly like "nothing matched".
-        notes.append("EMPTY output despite exit 0 — verify the source really has "
-                     "nothing to return before reading this as a negative answer")
+    if run.meta.bytes == 0:
+        # Zero bytes is the most dangerous result there is: a dead tunnel, an expired
+        # session, a wrong selector and a program that logs to stderr all look exactly
+        # like "nothing matched". The stderr cause is the one an operator cannot guess,
+        # so name it and its fix rather than only advising suspicion.
+        notes.append(
+            "ZERO BYTES CAPTURED — do NOT read this as 'nothing happened'. Likely causes, "
+            "in order: (1) the command writes its output to STDERR, not stdout, so none of "
+            "it was saved — set `merge_stderr: true` on this source"
+            + ("" if src.merge_stderr else " (currently OFF)")
+            + "; (2) the output was redirected or paged away inside the command itself; "
+              "(3) a dead tunnel, expired session, or wrong selector / namespace / time "
+              "window. Co-verify with a query that MUST return data before reporting any "
+              "negative finding from this context"
+        )
     if not run.ok and run.meta.bytes == 0:
         # Nothing came back and the command failed: that is an error, not an empty
         # context someone will later query and get confident nonsense from.
