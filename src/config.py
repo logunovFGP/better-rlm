@@ -113,6 +113,11 @@ _DEFAULTS: dict[str, Any] = {
     "log_sweep_cooldown_s": 60,          # skip the sweep if it ran within this window
     "log_dir": "~/.rlm/logs",
     "store_dir": "~/.rlm/contexts",
+    # Registry of named external sources (see sources.py) — commands an operator declares
+    # that the server may run and load. Outside the repo on purpose: a site's clusters,
+    # endpoints and tooling stay out of the checkout and out of every diff. Absent file =
+    # no sources; this server ships none.
+    "sources_file": "~/.rlm/sources.yaml",
 }
 
 
@@ -185,6 +190,7 @@ class Config:
     log_sweep_cooldown_s: int
     log_dir: Path
     store_dir: Path
+    sources_file: Path
 
     @property
     def use_docker(self) -> bool:
@@ -243,6 +249,7 @@ def load_config() -> Config:
         log_sweep_cooldown_s=int(m["log_sweep_cooldown_s"]),
         log_dir=Path(os.path.expanduser(str(m["log_dir"]))),
         store_dir=Path(os.path.expanduser(str(m["store_dir"]))),
+        sources_file=Path(os.path.expanduser(str(m["sources_file"]))),
     )
 
 
