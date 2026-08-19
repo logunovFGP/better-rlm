@@ -107,10 +107,13 @@ Once loaded it is an ordinary context:
 - *"Which services' error bursts line up with each other?"* → `rlm_query`.
 
 **A partial load is worse than no load.** `rlm_load_source` labels a context
-*WITH WARNINGS* when the command exited non-zero, timed out, or hit its size cap. A
-truncated log answers "does X appear?" with a confident, wrong **no** — so narrow the
-window, raise the cap, or state plainly that the answer covers only part of the range.
-Same trap as the HTTP-200 sign-in page above.
+*WITH WARNINGS* when the command exited non-zero, timed out, hit its size cap, **or exited
+0 with no output at all**. A truncated log answers "does X appear?" with a confident, wrong
+**no** — so narrow the window, raise the cap, or state plainly that the answer covers only
+part of the range. And an empty success is not a negative answer: a dead tunnel, a lapsed
+session and a wrong selector all look exactly like "nothing matched". Co-verify with a query
+that *must* return something before you report a zero. Same trap as the HTTP-200 sign-in
+page above.
 
 ## What it is *not* for
 
