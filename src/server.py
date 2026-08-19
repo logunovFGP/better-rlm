@@ -186,7 +186,8 @@ def rlm_list_sources() -> str:
     for s in reg.values():
         lines.append(f"- `{s.name}` — {s.description or '(no description)'}")
         lines.append(f"  - params: {', '.join(s.params) or 'none'}"
-                     f"  |  timeout {s.timeout_s}s, cap {s.max_bytes:,} B")
+                     f"  |  timeout {s.timeout_s}s, cap {s.max_bytes:,} B"
+                     + ("  |  stderr merged into content" if s.merge_stderr else ""))
     return _bound("\n".join(lines))
 
 
@@ -219,7 +220,8 @@ def rlm_load_source(name: str, params: dict[str, str] | None = None) -> str:
         return _bound(f"ERROR: {exc}")
     try:
         run = STORE.load_command(argv, source=f"source:{name}",
-                                 timeout_s=src.timeout_s, max_bytes=src.max_bytes)
+                                 timeout_s=src.timeout_s, max_bytes=src.max_bytes,
+                                 merge_stderr=src.merge_stderr)
     except OSError as exc:
         return _bound(f"ERROR: could not run source '{name}': {exc}  (argv[0]={argv[0]!r})")
     # argv[0] only, never the rendered argv: a template may expand ${TOKEN} into it.

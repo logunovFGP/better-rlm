@@ -236,7 +236,7 @@ class ContextStore:
         return self._finalize(meta)
 
     def load_command(self, argv: list[str], *, source: str, timeout_s: int,
-                     max_bytes: int) -> "CommandRun":
+                     max_bytes: int, merge_stderr: bool = False) -> "CommandRun":
         """Run ``argv`` (never through a shell) and stream its stdout into a new context.
 
         Streaming, not capturing: the whole point is inputs bigger than memory, so stdout
@@ -247,6 +247,12 @@ class ContextStore:
         stderr goes to a temporary FILE, not a pipe. With both on pipes, a command that
         writes more than the pipe buffer to stderr while we drain only stdout deadlocks
         both sides forever.
+
+        ``merge_stderr`` sends stderr down the same pipe instead, so it lands *in* the
+        context. Some programs log to stderr by convention (postgres does, hence
+        ``docker logs`` on one), and the shell answer ``2>&1`` is unavailable here by
+        design. There is then no separate ``stderr_tail`` — a failure message arrives
+        interleaved with the data.
 
         Returns the run outcome rather than raising on a non-zero exit: a command can fail
         *after* emitting the output worth analysing. The caller decides what a partial
@@ -259,7 +265,9 @@ class ContextStore:
         truncated = False
         written = 0
         with tempfile.TemporaryFile() as errf:
-            proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=errf)
+            proc = subprocess.Popen(
+                argv, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT if merge_stderr else errf)
 
             def _on_timeout() -> None:
                 if proc.poll() is None:   # don't flag a process that already finished

@@ -512,6 +512,11 @@ metrics-range:
 boot-journal:
   description: This host's journal since last boot
   command: journalctl -b --no-pager -o short-iso
+
+container-logs:
+  description: One container's logs
+  command: docker logs --timestamps --since {since} {container}
+  merge_stderr: true       # see below — without this a postgres container loads as empty
 ```
 
 Then, from the agent:
@@ -536,6 +541,14 @@ expanded, so a value containing `$HOME` cannot read the environment back out. `{
 parameter and `${VAR}` is an environment reference; they do not collide. A command needing a pipe
 should be a wrapper script you register instead — and note that registering `sh -c "…{param}…"`
 deliberately re-opens the shell you were being protected from.
+
+**`merge_stderr` when the program logs to stderr.** By default stderr is kept as a
+diagnostic tail, not loaded — for a well-behaved command it is the error channel, and
+merging it would bury a failure message inside the data. But plenty of programs write their
+*logs* there by convention: postgres does, so `docker logs` on a postgres container puts
+every line on stderr and the context loads **empty**. The usual answer, `2>&1`, is shell
+syntax that does not exist here by design, so it is a per-source flag instead. With it on
+there is no separate tail — a failure message arrives interleaved with the data.
 
 **Partial results are labelled, not hidden.** A source that exits non-zero, overruns `timeout_s`,
 or hits `max_bytes` still returns its `ctx_id`, but marked *WITH WARNINGS* — a truncated log
