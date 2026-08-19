@@ -275,6 +275,22 @@ def test_tool_errors_when_a_failed_command_produced_nothing(monkeypatch, cfg, tm
     assert S.STORE.list_ids() == []   # no empty context left behind to query later
 
 
+def test_listing_is_not_truncated_by_the_raw_content_cap(monkeypatch, cfg, tmp_path):
+    # A truncated listing hides sources from the one tool whose job is to reveal them.
+    # 15 real sources with useful descriptions already exceed the 4 KB raw cap.
+    body = "".join(
+        f"src-{i:02d}:\n"
+        f"  description: {'d' * 200}\n"
+        f"  command: {PY} -c pass\n"
+        for i in range(20)
+    )
+    S = _server(monkeypatch, cfg, tmp_path, body)
+    out = S.rlm_list_sources()
+    assert len(out) > cfg.output_cap_bytes           # would have been cut before
+    assert out.count("- `src-") == 20                # every source survived
+    assert "withheld" not in out
+
+
 def test_tool_rejects_an_undeclared_source(monkeypatch, cfg, tmp_path):
     S = _server(monkeypatch, cfg, tmp_path, f"s:\n  command: {PY} -c pass\n")
     assert S.rlm_load_source("../../etc/passwd").startswith("ERROR: unknown source")
