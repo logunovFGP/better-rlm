@@ -200,7 +200,11 @@ def rlm_list_sources() -> str:
                          + (f" (max age {s.credential_max_age_h:g}h)"
                             if s.credential_max_age_h else "")
                          + f" — {state}")
-    return _bound("\n".join(lines))
+    # _answer, not _bound: this is an ENUMERATION, not file content. The 4 KB raw cap
+    # exists so a giant log cannot flood the root context, but truncating the list of
+    # what you may call hides sources from the one tool whose job is to reveal them —
+    # measured: 15 sources with useful descriptions already exceed 4 KB.
+    return _answer("\n".join(lines))
 
 
 @mcp.tool()
