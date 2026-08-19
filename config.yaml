@@ -37,3 +37,9 @@ chunk_chars: 120000                    # ~< Haiku 200K-token ceiling
 chunk_overlap: 0
 log_dir: ~/.rlm/logs
 store_dir: ~/.rlm/contexts
+sources_file: ~/.rlm/sources.yaml      # registry of named external sources (see src/sources.py):
+                                       # commands an operator declares that rlm_load_source may run
+                                       # — pod logs, a metrics/trace backend, a journal, an audit API.
+                                       # OUTSIDE the repo on purpose, so a site's clusters, endpoints
+                                       # and tooling stay out of the checkout and out of every diff.
+                                       # Ships absent: no file = no sources, and none are built in.
