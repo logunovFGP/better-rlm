@@ -28,6 +28,11 @@
 .PARAMETER SkipSkill
     Do not create the rlm-large-context skill link.
 
+.PARAMETER Auth
+    Run `claude setup-token` when the `claude` CLI is not logged in. The token prints
+    once, to your terminal, and is never captured by this script - paste it into .env as
+    CLAUDE_CODE_OAUTH_TOKEN=<token>. Being signed in to Claude Code does NOT sign in the CLI.
+
 .PARAMETER Register
     Run `claude mcp add -s user rlm ...` after setup (requires the claude CLI on PATH).
 
@@ -57,6 +62,9 @@ param(
     [switch] $SkipDocker,
     [switch] $SkipSkill,
     [switch] $Register,
+
+    # Mirrors install.sh --auth: run `claude setup-token` when the CLI has no login.
+    [switch] $Auth,
 
     # Stop processes holding .venv_windows (the running rlm MCP server) so a rebuild can
     # proceed. Only consulted when dependencies actually changed. Also pre-answers the
@@ -332,6 +340,43 @@ try {
     } elseif ($PSCmdlet.ShouldProcess('.env', 'Create from .env.example')) {
         Copy-Item '.env.example' '.env'
         Write-Note 'Created .env (only needed for mode: api - add ANTHROPIC_API_KEY there).'
+    }
+
+    # 3b) Claude CLI login -------------------------------------------------
+    # Being signed in to Claude Code does NOT sign in the `claude` CLI: the host session
+    # holds its own credential and a nested `claude -p` cannot borrow it. Check the CLI
+    # itself here, rather than letting the first rlm_query discover it.
+    #
+    # This step never handles the token. `claude setup-token` prints it once, uncaptured -
+    # piping it anywhere would put a year-long credential into the installer log.
+    Write-Step 'Claude CLI login (the credential every model-backed tool uses)'
+    $envHasToken = (Test-Path '.env') -and
+                   ((Get-Content '.env' -Raw) -match '(?m)^CLAUDE_CODE_OAUTH_TOKEN=.+')
+    if (-not (Test-Tool 'claude')) {
+        Write-Warning 'The `claude` CLI is not on PATH. Install Claude Code: https://claude.com/download'
+        Write-Note "Or set 'cli_path' in config.yaml, or use mode: api with ANTHROPIC_API_KEY."
+    } elseif ($envHasToken) {
+        Write-Note 'CLAUDE_CODE_OAUTH_TOKEN is set in .env - the server will use it.'
+    } else {
+        $loggedIn = $false
+        try { $loggedIn = ((claude auth status --json 2>$null) | ConvertFrom-Json).loggedIn } catch { }
+        if ($loggedIn) {
+            Write-Note '`claude` CLI is logged in - nothing to do.'
+            Write-Note 'TIP: for a server left running prefer a long-lived token (-Auth):'
+            Write-Note '     an interactive login expires and a background refresh cannot renew it.'
+        } elseif ($Auth) {
+            Write-Note 'Not logged in. Running `claude setup-token` - complete it in the browser.'
+            Write-Note "The token prints ONCE below. Copy it into $PSScriptRoot\.env as:"
+            Write-Note '    CLAUDE_CODE_OAUTH_TOKEN=<token>'
+            claude setup-token
+        } else {
+            Write-Warning 'The `claude` CLI is NOT logged in - every model-backed tool will fail.'
+            Write-Note 'Being signed in to Claude Code is NOT the same thing. Fix with ONE of:'
+            Write-Note '  .\install.ps1 -Auth   - long-lived token, best for a running server'
+            Write-Note '  claude auth login     - interactive; expires, cannot self-refresh'
+            Write-Note '  ANTHROPIC_API_KEY in .env + mode: api'
+            Write-Note 'rlm_grep / rlm_exec need no login and keep working.'
+        }
     }
 
     # 4) Skill link --------------------------------------------------------
