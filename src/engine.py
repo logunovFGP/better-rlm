@@ -14,6 +14,13 @@ import logging
 from typing import Optional
 
 from rlm.core.rlm import RLM
+from rlm.utils.exceptions import (
+    BudgetExceededError,
+    CancellationError,
+    ErrorThresholdExceededError,
+    TimeoutExceededError,
+    TokenLimitExceededError,
+)
 from rlm.environments import docker_repl as _dr_probe
 from rlm.environments import get_environment
 
@@ -58,6 +65,14 @@ _SYSTEM_PROMPT = _GROUNDING + RLM_SYSTEM_PROMPT
 # Placeholder satisfies the engine's required api_key field; the patched
 # AnthropicClient ignores it and produces completions via the selected transport
 # (claude CLI on OAuth, Anthropic SDK on API key — see auth.patch_engine / transport).
+_ENGINE_LIMITS = (
+    TimeoutExceededError,
+    TokenLimitExceededError,
+    BudgetExceededError,
+    ErrorThresholdExceededError,
+    CancellationError,
+)
+
 _PLACEHOLDER_KEY = "rlm-mcp-oauth"
 
 
@@ -85,6 +100,14 @@ def build_rlm(cfg: Config, root_model: str, sub_model: str) -> RLM:
         # Was never passed: the engine fell back to its own default of 4, silently
         # ignoring the configured value.
         max_concurrent_subcalls=cfg.max_concurrent_subcalls,
+        # The engine already enforces these and returns the best partial answer;
+        # nothing here re-implements them. 0 in config means "no limit".
+        max_timeout=float(cfg.query_timeout_s) or None,
+        max_errors=cfg.query_max_errors or None,
+        # rlm_query was a black box: tens of seconds, one log line at the end. The
+        # engine wraps every callback in try/except, so these cannot break a run.
+        on_iteration_complete=_log_iteration,
+        on_subcall_complete=_log_subcall,
         other_backends=[cfg.provider],
         other_backend_kwargs=[{
             "model_name": sub_model,
@@ -117,11 +140,40 @@ def usage_breakdown(usage_summary, report_cost: bool = False) -> tuple[list[dict
     return rows, (round(total, 6) if report_cost else None)
 
 
+def _log_iteration(depth: int, iteration: int, duration: float) -> None:
+    """on_iteration_complete(depth, iteration_num, duration)."""
+    log_event(_LOG, "rlm_iter", depth=depth, iter=iteration, dur_s=round(duration, 2))
+
+
+def _log_subcall(depth: int, model: str, duration: float, error: str | None) -> None:
+    """on_subcall_complete(depth, model, duration, error_or_none)."""
+    log_event(_LOG, "rlm_subcall", depth=depth, model=model,
+              dur_s=round(duration, 2), err=error)
+
+
 def run_query(cfg: Config, context_text: str, question: str,
               root_model: str, sub_model: str) -> dict:
     """Run a full recursive RLM query; return the final answer + routing/usage."""
     rlm = build_rlm(cfg, root_model, sub_model)
-    result = rlm.completion(prompt=context_text, root_prompt=question)
+    try:
+        result = rlm.completion(prompt=context_text, root_prompt=question)
+    except _ENGINE_LIMITS as exc:
+        # A limit firing is not a crash: the engine stops deliberately and several of
+        # these carry the best answer found so far. Losing that work and surfacing a
+        # traceback instead was the old behaviour -- nothing in src/ caught them.
+        partial = str(getattr(exc, "partial_answer", "") or "")
+        log_event(_LOG, "rlm_query", root=root_model, sub=sub_model,
+                  limit=type(exc).__name__, err=str(exc), partial_bytes=len(partial))
+        return {
+            "answer": partial,
+            "limit": type(exc).__name__,
+            "limit_detail": str(exc),
+            "execution_time": 0.0,
+            "root_model": root_model,
+            "sub_model": sub_model,
+            "usage": [],
+            "cost_usd": None,
+        }
     rows, total = usage_breakdown(result.usage_summary, cfg.report_cost)
     answer = result.response or ""
     # turns ~= number of root-model calls (one per orchestrator iteration).
