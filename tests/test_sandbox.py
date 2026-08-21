@@ -139,6 +139,32 @@ def test_reap_removes_dead_owners_and_keeps_live_ones(tmp_path, monkeypatch):
     assert calls == [["docker", "rm", "-f", "no-such-container"]]
 
 
+def test_windows_liveness_never_routes_through_os_kill(monkeypatch):
+    """Runs everywhere, including the Linux CI leg.
+
+    The guard below can only assert anything on Windows, so on Linux nothing noticed if
+    the signal-free path disappeared. This forces the Windows branch by name instead:
+    _pid_alive must dispatch to it, and that implementation must not reach os.kill —
+    where signal 0 is CTRL_C_EVENT and the "probe" becomes a console interrupt.
+    """
+    assert hasattr(reap, "_pid_alive_windows"), "the signal-free Windows path is gone"
+
+    # Parsed, not grepped: the function's own docstring explains why os.kill is wrong
+    # here, so a substring check matches its prose and fails on a correct implementation.
+    import ast
+    import textwrap
+
+    src = inspect.getsource(reap._pid_alive_windows)     # before any stub replaces it
+    called = {ast.unparse(n.func) for n in ast.walk(ast.parse(textwrap.dedent(src)))
+              if isinstance(n, ast.Call)}
+    assert "os.kill" not in called, "the Windows probe calls os.kill again"
+    assert {"k32.OpenProcess", "k32.WaitForSingleObject"} <= called
+
+    monkeypatch.setattr(reap.os, "name", "nt")
+    monkeypatch.setattr(reap, "_pid_alive_windows", lambda pid: "dispatched")
+    assert reap._pid_alive(1234) == "dispatched", "_pid_alive stopped honouring os.name"
+
+
 def test_liveness_probe_never_signals_the_process_it_asks_about(monkeypatch):
     """os.kill(pid, 0) is a liveness probe on POSIX and a console Ctrl+C on Windows,
     where signal.CTRL_C_EVENT == 0. reap_orphans calls the probe once per owner marker
@@ -206,6 +232,10 @@ def test_stale_rlms_install_is_refused_loudly(monkeypatch):
 
     from rlm.environments import docker_repl
 
+    # Imported BEFORE the sentinel is removed, and imported here rather than relying on
+    # an earlier test file having done it: without this, delitem raises KeyError and
+    # `pytest tests/test_sandbox.py` alone fails on a test unrelated to the work at hand.
+    importlib.import_module("src.engine")
     monkeypatch.delattr(docker_repl, "RLM_RESULT_SENTINEL")
     monkeypatch.delitem(sys.modules, "src.engine")
     try:

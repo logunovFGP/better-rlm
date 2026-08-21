@@ -69,6 +69,41 @@ def test_retry_after_header_is_honored(monkeypatch):
     assert rl._retry_after_seconds(exc) == 42.0
 
 
+def test_waits_falls_back_when_the_transport_cannot_be_resolved(monkeypatch):
+    """Picking a backoff schedule must not be able to fail the call it wraps.
+
+    _waits() resolves the auth mode to choose between the oauth and apikey schedules,
+    and resolution raises when there is no usable transport. That made every call
+    through the decorator below die with "No transport available" raised out of the
+    retry machinery, on any machine without the claude CLI and without a key - nine
+    tests on the first CI run, before the wrapped call could report anything itself.
+    """
+    import src.auth as auth
+
+    def no_transport(cfg):
+        raise RuntimeError("No transport available.")
+
+    monkeypatch.setattr(auth, "resolve_auth_mode", no_transport)
+    assert rl._waits() == list(rl._CFG.apikey_retry_waits)
+
+    @rl.retry_and_queue_retries
+    def f():
+        return "ran anyway"
+
+    assert f() == "ran anyway", "the retry wrapper failed a call it only had to schedule"
+
+
+def test_the_schedule_still_follows_the_resolved_transport(monkeypatch):
+    # The fallback above must not flatten the distinction it falls back from: OAuth
+    # carries the longer waits because subscription limits are tighter.
+    import src.auth as auth
+
+    monkeypatch.setattr(auth, "resolve_auth_mode", lambda cfg: "oauth")
+    assert rl._waits() == list(rl._CFG.oauth_retry_waits)
+    monkeypatch.setattr(auth, "resolve_auth_mode", lambda cfg: "apikey")
+    assert rl._waits() == list(rl._CFG.apikey_retry_waits)
+
+
 def test_cli_rate_limit_marker_is_retried():
     # The CLI transport raises errors flagged is_rate_limit=True (CliRateLimitError);
     # the decorator must treat those as retryable, like a 429.

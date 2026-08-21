@@ -34,3 +34,8 @@ build-backend = "setuptools.build_meta"
 # `rlm*` picks up the vendored engine and its subpackages (rlm.core, rlm.clients,
 # rlm.environments, rlm.logger, rlm.utils) without enumerating them by hand.
 include = ["src*", "rlm*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "docker: needs a running Docker daemon; excluded from the daemon-free guarantee",
+]
