@@ -14,11 +14,11 @@ from contextlib import contextmanager
 from typing import Any
 
 from rlm.core.comms_utils import LMRequest, send_lm_request, send_lm_request_batched
+from rlm.utils.exceptions import aborts_batch
 from rlm.core.types import REPLResult, RLMChatCompletion
 from rlm.environments.base_env import (
     NonIsolatedEnv,
     RESERVED_TOOL_NAMES,
-    aborts_batch,
     extract_tool_value,
     validate_custom_tools,
 )
