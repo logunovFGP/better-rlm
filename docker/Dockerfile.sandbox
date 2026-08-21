@@ -2,6 +2,8 @@
 # The engine pip-installs `dill` + `requests` into the container at startup;
 # prebaking them avoids runtime PyPI access and lets you lock down egress.
 # Build:  docker build -t rlm-sandbox -f docker/Dockerfile.sandbox docker/
-FROM python:3.11-slim
+# 3.12+ for PEP 701: model-written f-strings containing backslashes are a real,
+# observed failure on 3.11 (SyntaxError, whole rlm_exec call lost).
+FROM python:3.13-slim
 RUN pip install --no-cache-dir dill requests
 WORKDIR /workspace

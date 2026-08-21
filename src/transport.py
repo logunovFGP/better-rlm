@@ -66,6 +66,20 @@ class CliRateLimitError(RuntimeError):
     is_rate_limit = True
 
 
+class CliAuthError(CliCompletionError):
+    """CLI could not authenticate — the login is dead, so every other call fails
+    identically.
+
+    ``is_fatal_subcall`` is the engine's duck-typed contract
+    (``rlm.environments.base_env.FATAL_SUBCALL_ATTR``): any batched fan-out, ours
+    in subquery.py or the engine's own, aborts on it instead of repeating one
+    global failure once per prompt. One attribute, both layers, no import across
+    the boundary.
+    """
+
+    is_fatal_subcall = True
+
+
 # --------------------------------------------------------------------------- #
 # Message helpers
 # --------------------------------------------------------------------------- #
@@ -130,6 +144,24 @@ def flatten_messages(messages: list[dict]) -> str:
 def _looks_rate_limited(text: str | None) -> bool:
     low = (text or "").lower()
     return any(marker in low for marker in _RATE_LIMIT_MARKERS)
+
+
+# ponytail: substring match on the CLI's own message — the only signal it gives.
+# If these ever stop matching we degrade to the previous behaviour (one doomed
+# call per chunk), never to something worse, so this stays best-effort by design.
+_AUTH_FAIL_MARKERS = (
+    "failed to authenticate",
+    "oauth session expired",
+    "oauth token has expired",
+    "invalid api key",
+    "authentication_error",
+    "please run /login",
+)
+
+
+def _looks_auth_failed(text: str | None) -> bool:
+    low = (text or "").lower()
+    return any(marker in low for marker in _AUTH_FAIL_MARKERS)
 
 
 def _spawn_err(stderr: str | None, stdout: str | None) -> str:
@@ -348,6 +380,8 @@ def _parse_cli_output(returncode: int, stdout: str, stderr: str,
         msg = (stderr or stdout or "no output").strip()[:500]
         if _looks_rate_limited(msg):
             raise CliRateLimitError(f"claude CLI rate limited: {msg}")
+        if _looks_auth_failed(msg):
+            raise CliAuthError(f"claude CLI auth failed: {msg}")
         raise CliCompletionError(f"claude CLI failed (exit {returncode}): {msg}")
 
     is_error = bool(data.get("is_error")) or data.get("subtype") not in (None, "success")
@@ -355,6 +389,8 @@ def _parse_cli_output(returncode: int, stdout: str, stderr: str,
         msg = str(data.get("result") or data.get("error") or stderr or "error").strip()[:500]
         if _looks_rate_limited(msg) or _looks_rate_limited(str(data.get("subtype"))):
             raise CliRateLimitError(f"claude CLI rate limited: {msg}")
+        if _looks_auth_failed(msg):
+            raise CliAuthError(f"claude CLI auth failed: {msg}")
         raise CliCompletionError(
             f"claude CLI error (subtype={data.get('subtype')}): {msg}")
 
