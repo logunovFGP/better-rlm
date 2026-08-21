@@ -27,6 +27,20 @@ _AUTH_PAYLOAD = json.dumps({
 })
 
 
+@pytest.fixture(autouse=True)
+def _pin_auth_discovery(monkeypatch):
+    """models.select() resolves the auth mode to map each role onto a subscription
+    sibling, so on a machine with neither the claude CLI nor a usable key it raises
+    before any stub inside a test can matter - that is every CI runner, and every
+    contributor without Claude Code installed. These tests are about probe and batch
+    REPORTING, so both are pinned to the oauth path they describe.
+    """
+    import src.server as srv
+
+    monkeypatch.setattr(srv, "resolve_auth_mode_safe", lambda: "oauth")
+    monkeypatch.setattr(srv.models, "select", lambda cfg, role: "claude-haiku-4-5")
+
+
 def test_auth_failure_parses_to_its_own_error_type():
     with pytest.raises(CliAuthError):
         _parse_cli_output(0, _AUTH_PAYLOAD, "", "claude-haiku-4-5")

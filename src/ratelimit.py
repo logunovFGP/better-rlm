@@ -70,9 +70,20 @@ def _retry_after_seconds(exc: BaseException) -> float:
 
 
 def _waits() -> list[float]:
-    """Backoff schedule for the active transport (claude CLI gets the longer waits)."""
+    """Backoff schedule for the active transport (claude CLI gets the longer waits).
+
+    Never raises. resolve_auth_mode needs a usable transport and raises when there is
+    none, but picking a wait schedule is the wrong place to discover that: it turned
+    every wrapped call on a machine with no CLI and no usable key into "No transport
+    available" raised out of the retry decorator, before the wrapped call itself could
+    report the real problem. Unresolvable auth falls back to the shorter apikey waits.
+    """
     from .auth import resolve_auth_mode  # lazy import to avoid a cycle
-    sched = _CFG.oauth_retry_waits if resolve_auth_mode(_CFG) == "oauth" else _CFG.apikey_retry_waits
+    try:
+        oauth = resolve_auth_mode(_CFG) == "oauth"
+    except Exception:                # noqa: BLE001 - schedule choice must not fail the call
+        oauth = False
+    sched = _CFG.oauth_retry_waits if oauth else _CFG.apikey_retry_waits
     return list(sched)
 
 
