@@ -246,3 +246,25 @@ def test_stale_rlms_install_is_refused_loudly(monkeypatch):
         monkeypatch.undo()
         sys.modules.pop("src.engine", None)
         importlib.import_module("src.engine")
+
+
+def test_unserialisable_vars_are_named_not_silently_dropped(tmp_path):
+    """save_state keeps only what serialises. Dropping the rest silently means a
+    variable the user just created raises NameError next call with no explanation --
+    the same class of silent loss as the corrupt-state case above.
+
+    A generator is the right probe: refused by BOTH pickle and dill, so this holds
+    whichever the harness imported. (Measured against dill 0.4.1 in the sandbox
+    image, which DOES serialise threading.Lock, lambdas, open files and Thread
+    objects -- an earlier version of this test used a Lock and proved nothing.)
+    """
+    state = tmp_path / "state.dill"
+    data = _run("kept = 1\ngen = (i for i in range(3))\nprint('ok')", state, tmp_path)
+    assert data["stdout"] == "ok\n"
+    assert "not persisted" in data["stderr"], data["stderr"]
+    assert "gen" in data["stderr"]
+    assert "kept" not in data["stderr"], "named a variable that WAS persisted"
+
+    # and the serialisable one really did survive
+    again = _run("print(kept)", state, tmp_path)
+    assert again["stdout"] == "1\n"

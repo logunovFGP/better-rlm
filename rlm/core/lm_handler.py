@@ -12,6 +12,7 @@ from threading import Thread
 from rlm.clients.base_lm import BaseLM
 from rlm.core.comms_utils import LMRequest, LMResponse, socket_recv, socket_send
 from rlm.core.types import RLMChatCompletion, UsageSummary
+from rlm.utils.exceptions import aborts_batch
 
 
 class LMRequestHandler(StreamRequestHandler):
@@ -86,10 +87,24 @@ class LMRequestHandler(StreamRequestHandler):
         start_time = time.perf_counter()
 
         sem = asyncio.Semaphore(handler.batch_max_concurrent)
+        # better-rlm: a session-fatal failure - dead login, exhausted quota - is not
+        # about this prompt. Without this, every prompt still spawns its own doomed
+        # call, up to batch_max_concurrent (16) of them concurrently. Checked both
+        # before and after acquiring the semaphore: the queued majority never starts.
+        fatal: list[str] = []
 
         async def run_one(prompt: str):
+            if fatal:
+                raise RuntimeError(f"skipped - {fatal[0]}")
             async with sem:
-                return await client.acompletion(prompt)
+                if fatal:
+                    raise RuntimeError(f"skipped - {fatal[0]}")
+                try:
+                    return await client.acompletion(prompt)
+                except Exception as exc:
+                    if aborts_batch(exc):
+                        fatal.append(str(exc))
+                    raise
 
         async def run_all():
             tasks = [run_one(prompt) for prompt in request.prompts]

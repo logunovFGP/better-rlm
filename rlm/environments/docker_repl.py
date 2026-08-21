@@ -36,10 +36,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from rlm.core.comms_utils import LMRequest, send_lm_request, send_lm_request_batched
+from rlm.utils.exceptions import aborts_batch
 from rlm.core.types import REPLResult, RLMChatCompletion
 from rlm.environments.base_env import (
     NonIsolatedEnv,
-    aborts_batch,
     extract_tool_value,
     validate_custom_tools,
 )
@@ -363,6 +363,7 @@ def load_state():
 
 def save_state(s):
     clean = {{}}
+    dropped = []
     for k, v in s.items():
         if k.startswith("_"):
             continue
@@ -370,7 +371,12 @@ def save_state(s):
             dill.dumps(v)
             clean[k] = v
         except Exception:
-            pass
+            dropped.append(k)
+    if dropped:
+        globals()["_DROPPED_VARS"] = (
+            "WARNING: not persisted (unserialisable), gone next call: %s\\n"
+            % ", ".join(sorted(dropped))
+        )
     _tmp = STATE + ".tmp"
     with open(_tmp, "wb") as f:
         dill.dump(clean, f)
@@ -432,7 +438,7 @@ if _ans is not None and _ans.get("ready"):
     _final = str(_ans.get("content", ""))
 print("{RLM_RESULT_SENTINEL}" + json.dumps({{
     "stdout": stdout_buf.getvalue(),
-    "stderr": globals().get("_STATE_LOAD_ERR", "") + stderr_buf.getvalue(),
+    "stderr": globals().get("_STATE_LOAD_ERR", "") + globals().get("_DROPPED_VARS", "")\n              + stderr_buf.getvalue(),
     "locals": {{k: repr(v)[:{LOCALS_REPR_CAP}] for k, v in _locals.items() if not k.startswith("_")}},
     "final_answer": _final,
 }}, ensure_ascii=False))

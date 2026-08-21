@@ -187,6 +187,37 @@ AUTH_REMEDIATION = (
 )
 
 
+_AUTH_LABEL: str | None = None
+
+
+def auth_label(cfg) -> str:
+    """How the calls are actually authenticated, e.g. ``oauth (oauth_token)``.
+
+    Cached for the process: it costs a ~215 ms subprocess and cannot change
+    without a restart, because config.yaml and .env are read once at import.
+    """
+    global _AUTH_LABEL
+    if _AUTH_LABEL is not None:
+        return _AUTH_LABEL
+    from .auth import resolve_auth_mode          # lazy: auth imports this module
+    try:
+        mode = resolve_auth_mode(cfg)
+    except Exception as exc:                     # noqa: BLE001 - report, never raise
+        _AUTH_LABEL = f"UNRESOLVED ({type(exc).__name__})"
+        return _AUTH_LABEL
+    if mode != "oauth":
+        _AUTH_LABEL = "apikey (anthropic SDK)"
+        return _AUTH_LABEL
+    st = cli_auth_status(cfg)
+    if st is None:
+        _AUTH_LABEL = "oauth (claude CLI, status unknown)"
+    elif st.get("loggedIn"):
+        _AUTH_LABEL = f"oauth (claude CLI, {st.get('authMethod', '?')})"
+    else:
+        _AUTH_LABEL = "oauth (claude CLI, NOT LOGGED IN)"
+    return _AUTH_LABEL
+
+
 def cli_auth_status(cfg) -> dict | None:
     """`claude auth status --json` — is the CLI actually logged in? FREE: no model
     call, ~215 ms measured. Returns the parsed dict, or None if the CLI could not be

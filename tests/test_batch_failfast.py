@@ -171,10 +171,76 @@ def test_engine_and_wrapper_share_one_fatal_attribute():
     If these ever drift, rlm_query silently goes back to spawning N doomed
     sub-calls while rlm_sub_query_batch correctly stops at one.
     """
-    from rlm.environments.base_env import FATAL_SUBCALL_ATTR, aborts_batch
+    from rlm.utils.exceptions import FATAL_SUBCALL_ATTR, aborts_batch
 
     assert FATAL_SUBCALL_ATTR == "is_fatal_subcall"
     assert getattr(CliAuthError, FATAL_SUBCALL_ATTR, False) is True
     assert aborts_batch(CliAuthError("dead login"))
     assert not aborts_batch(CliCompletionError("just this prompt"))
     assert not aborts_batch(CliRateLimitError("429"))
+
+
+def test_lm_handler_batch_stops_on_a_session_fatal_failure():
+    """core/lm_handler.py fans out llm_query_batched with concurrency 16.
+
+    This is the fourth copy of the fan-out and the one with the highest concurrency;
+    without the guard a dead login produced N identical doomed calls, 16 at a time.
+    """
+    from rlm.core.comms_utils import LMRequest
+    from rlm.core.lm_handler import LMRequestHandler
+
+    calls = []
+
+    class _Client:
+        model_name = "m"
+
+        async def acompletion(self, prompt):
+            calls.append(prompt)
+            raise CliAuthError("OAuth session expired")
+
+        def get_last_usage(self):
+            return {}
+
+    class _Handler:
+        batch_max_concurrent = 16
+
+        def get_client(self, model=None, depth=0):
+            return _Client()
+
+    req = LMRequest(prompts=[f"p{i}" for i in range(40)])
+    # bound method off the class: the handler never touches socket state here
+    res = LMRequestHandler._handle_batched(None, req, _Handler())
+
+    assert len(calls) <= 16, f"fanned out {len(calls)} doomed calls, expected <= 16"
+    assert len(calls) < 40, "no abort happened at all"
+    comps = res.chat_completions
+    assert len(comps) == 40, "every prompt must still get a result slot"
+    assert any("skipped" in (c.error or "") for c in comps), "skips not surfaced"
+
+
+def test_lm_handler_batch_does_not_abort_on_a_local_failure():
+    """A prompt-specific failure must not discard the prompts that would succeed."""
+    from rlm.core.comms_utils import LMRequest
+    from rlm.core.lm_handler import LMRequestHandler
+
+    calls = []
+
+    class _Client:
+        model_name = "m"
+
+        async def acompletion(self, prompt):
+            calls.append(prompt)
+            raise CliCompletionError("just this prompt")
+
+        def get_last_usage(self):
+            return {}
+
+    class _Handler:
+        batch_max_concurrent = 16
+
+        def get_client(self, model=None, depth=0):
+            return _Client()
+
+    req = LMRequest(prompts=[f"p{i}" for i in range(20)])
+    LMRequestHandler._handle_batched(None, req, _Handler())
+    assert len(calls) == 20, "a chunk-local failure aborted the batch"
