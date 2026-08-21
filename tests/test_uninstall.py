@@ -151,3 +151,36 @@ def test_installer_stores_the_token_without_leaking_it(tmp_path):
     assert f"CLAUDE_CODE_OAUTH_TOKEN={secret}" in body
     assert "# keep me" in body, "clobbered the rest of .env"
     assert env_file.stat().st_mode & 0o777 == 0o600, ".env left readable by others"
+
+
+# --- installer parity: a capability on one platform must exist on both ---------
+@pytest.mark.parametrize("capability,sh_token,ps1_token", [
+    ("auth opt-in flag",        "--auth",              "$Auth"),
+    ("token writer",            "rlm_write_token",     "Write-RlmToken"),
+    ("free login check",        "claude auth status",  "claude auth status"),
+    ("adopts an exported token", "CLAUDE_CODE_OAUTH_TOKEN:-", "$env:CLAUDE_CODE_OAUTH_TOKEN"),
+    ("hidden prompt",           "read -rs",            "-AsSecureString"),
+])
+def test_installers_stay_in_step(capability, sh_token, ps1_token):
+    """install.sh and install.ps1 are maintained as a pair (--register / -Register).
+    A credential flow that exists on only one platform is how that pair rots.
+    """
+    sh = (ROOT / "install.sh").read_text(encoding="utf-8")
+    ps1 = (ROOT / "install.ps1").read_text(encoding="utf-8")
+    assert sh_token in sh, f"install.sh lost {capability!r} ({sh_token})"
+    assert ps1_token in ps1, f"install.ps1 lost {capability!r} ({ps1_token})"
+
+
+def test_powershell_writer_avoids_the_bom_trap():
+    """Set-Content -Encoding utf8 emits a BOM on PowerShell 5.1 (this script's floor).
+    A BOM becomes part of the first key python-dotenv parses."""
+    ps1 = (ROOT / "install.ps1").read_text(encoding="utf-8")
+    assert "UTF8Encoding" in ps1 and "WriteAllText" in ps1
+    writer = ps1[ps1.index("function Write-RlmToken"):]
+    writer = writer[:writer.index("\n}")]
+    # Drop the <# .. #> doc block first: it names Set-Content precisely to say
+    # "not this", and a naive negative match reads that as the defect.
+    code = re.sub(r"<#.*?#>", "", writer, flags=re.S)
+    assert "Set-Content" not in code, "BOM risk: use WriteAllText + UTF8Encoding($false)"
+    assert "WriteAllText" in code and "UTF8Encoding" in code
+    assert "$tok.Length" in code, "must report the length, not the token"
