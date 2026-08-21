@@ -63,16 +63,25 @@ def test_ordinary_failure_does_not_discard_the_other_chunks(monkeypatch):
 
 
 # --- rlm_status(probe=True): the line that separates "configured" from "working" ---
-def test_probe_reports_failure_instead_of_raising(monkeypatch):
+def _login_ok(monkeypatch):
+    """Pin the free login check to 'logged in' so these tests exercise the probe
+    itself, not whatever auth state the machine running them happens to be in."""
     import src.server as srv
 
+    monkeypatch.setattr(srv.transport, "cli_auth_status",
+                        lambda cfg: {"loggedIn": True, "authMethod": "oauth"})
+    return srv
+
+
+def test_probe_reports_failure_instead_of_raising(monkeypatch):
+    srv = _login_ok(monkeypatch)
     monkeypatch.setattr(srv, "sub_query",
                         lambda *a, **k: sq.SubResult(0, "", 0, 0, error="OAuth session expired"))
     assert "FAILED — OAuth session expired" in srv._auth_probe_line()
 
 
 def test_probe_survives_a_transport_that_explodes(monkeypatch):
-    import src.server as srv
+    srv = _login_ok(monkeypatch)
 
     def boom(*a, **k):
         raise RuntimeError("socket closed")
@@ -83,10 +92,38 @@ def test_probe_survives_a_transport_that_explodes(monkeypatch):
 
 
 def test_probe_reports_ok_on_a_live_transport(monkeypatch):
-    import src.server as srv
-
+    srv = _login_ok(monkeypatch)
     monkeypatch.setattr(srv, "sub_query", lambda *a, **k: sq.SubResult(0, "ok", 1, 1))
     assert "auth probe: ok" in srv._auth_probe_line()
+
+
+def test_probe_is_skipped_when_the_free_check_already_knows_it_is_dead(monkeypatch):
+    """Paying for a call whose answer is already known is the same waste the batch
+    fail-fast exists to stop."""
+    import src.server as srv
+
+    monkeypatch.setattr(srv.transport, "cli_auth_status", lambda cfg: {"loggedIn": False})
+    called = []
+    monkeypatch.setattr(srv, "sub_query", lambda *a, **k: called.append(1))
+    assert "SKIPPED" in srv._auth_probe_line()
+    assert called == [], "spent a model call it already knew would fail"
+
+
+def test_status_names_the_fix_when_the_cli_is_not_logged_in(monkeypatch):
+    import src.server as srv
+
+    monkeypatch.setattr(srv, "resolve_auth_mode_safe", lambda: "oauth")
+    monkeypatch.setattr(srv.transport, "cli_auth_status", lambda cfg: {"loggedIn": False})
+    line = srv._cli_login_line()
+    assert "NOT LOGGED IN" in line
+    assert "claude auth login" in line and "claude setup-token" in line
+
+
+def test_status_says_nothing_about_cli_login_on_the_sdk_path(monkeypatch):
+    import src.server as srv
+
+    monkeypatch.setattr(srv, "resolve_auth_mode_safe", lambda: "apikey")
+    assert srv._cli_login_line() == "", "no CLI is involved on the API-key path"
 
 
 def test_all_chunks_failing_is_reported_as_a_failed_tool_call(monkeypatch):

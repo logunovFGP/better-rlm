@@ -172,3 +172,43 @@ def test_cli_rate_limit_is_recognized_by_ratelimit():
     import src.ratelimit as rl
     assert rl._is_rate_limit(CliRateLimitError("rate limited"))
     assert not rl._is_rate_limit(CliCompletionError("some other failure"))
+
+
+class _CfgStub:
+    cli_path = "claude"
+
+
+_CFG_STUB = _CfgStub()
+
+# --- CLI login diagnosis (free: no model call) --------------------------------
+def test_auth_status_parses_the_cli_json(monkeypatch, tmp_path):
+    import types as _t
+    monkeypatch.setattr(tp.shutil, "which", lambda p: "/usr/local/bin/claude")
+    monkeypatch.setattr(tp.subprocess, "run", lambda *a, **k: _t.SimpleNamespace(
+        stdout='{"loggedIn": true, "authMethod": "oauth", "apiProvider": "firstParty"}',
+        stderr="", returncode=0))
+    st = tp.cli_auth_status(_CFG_STUB)
+    assert st["loggedIn"] is True and st["authMethod"] == "oauth"
+
+
+def test_auth_status_is_none_when_the_cli_cannot_be_asked(monkeypatch):
+    monkeypatch.setattr(tp.shutil, "which", lambda p: None)
+    assert tp.cli_auth_status(_CFG_STUB) is None
+
+    monkeypatch.setattr(tp.shutil, "which", lambda p: "/usr/local/bin/claude")
+    monkeypatch.setattr(tp.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
+    assert tp.cli_auth_status(_CFG_STUB) is None
+
+
+def test_auth_failure_carries_the_remediation():
+    """The error a user actually sees must say what to do about it. Being signed in
+    to Claude Code does not sign in the CLI, and nothing else surfaces that."""
+    payload = json.dumps({"subtype": "success", "is_error": True,
+                          "result": "Failed to authenticate: OAuth session expired"})
+    with pytest.raises(tp.CliAuthError) as e:
+        tp._parse_cli_output(0, payload, "", "m")
+    msg = str(e.value)
+    assert "claude auth login" in msg
+    assert "claude setup-token" in msg
+    assert "does NOT sign in the CLI" in msg
