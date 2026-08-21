@@ -101,8 +101,13 @@ def test_host_writes_the_guest_reads_are_utf8():
     assert 'open(_tmp, "wb")' in script and 'open(STATE, "rb")' in script
 
 
-def test_exec_timeout_is_configurable_and_defaults():
+def test_exec_timeout_is_configurable_and_defaults(monkeypatch):
     # config.yaml documented sandbox_timeout_s long before anything enforced it.
+    # __init__ assigns timeout_s and then calls setup(), which starts a real container:
+    # without stubbing it, this assertion about attribute wiring fails with "failed to
+    # connect to the docker API" wherever the daemon is not running, taking the repo's
+    # whole verify command — and so the pre-push hook — down with it.
+    monkeypatch.setattr(dr.DockerREPL, "setup", lambda self: None)
     assert DockerREPL(timeout_s=7).timeout_s == 7
     assert DockerREPL().timeout_s == dr.DEFAULT_EXEC_TIMEOUT_S
 

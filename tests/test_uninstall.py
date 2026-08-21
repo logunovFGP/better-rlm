@@ -59,8 +59,15 @@ def test_both_uninstallers_exist():
 
 def test_posix_uninstaller_is_executable():
     # install.sh ships 0755 and is invoked as ./install.sh; a 0644 uninstall.sh would fail
-    # the same way for anyone following the README.
-    assert (ROOT / "uninstall.sh").stat().st_mode & 0o111, "uninstall.sh is not executable"
+    # the same way for anyone following the README. Ask git, not the filesystem: Windows
+    # cannot represent the exec bit, so os.stat reports 0o666 even for install.sh, which is
+    # committed 100755 — a stat() check is red on every Windows checkout no matter what
+    # actually landed in the tree. The committed mode is what a cloner gets, so pin that.
+    mode = subprocess.run(
+        ["git", "ls-files", "-s", "--", "uninstall.sh"],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    ).stdout.split()[0]
+    assert mode == "100755", f"uninstall.sh is committed as {mode}, not 100755"
 
 
 @pytest.mark.parametrize("artefact,token", sorted(POSIX_ARTEFACTS.items()))
