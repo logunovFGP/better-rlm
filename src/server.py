@@ -80,29 +80,44 @@ def _cost_note(model: str, itok: int, otok: int) -> str:
     return f"  |  cost: ${cost_usd(model, itok, otok):.4f}"
 
 
-def _skipped_block(meta) -> str:
-    """Loud when a dir load did not ingest everything.
+#: Skips that are the POINT of the skip lists, not a surprise (node_modules, .env).
+_EXPECTED_SKIPS = frozenset({"skip-dir", "skip-name"})
 
-    A partial load that reports success is worse than a failed one: an answer over
-    the remaining files is wrong BY OMISSION, and nothing in the output contradicts
-    it. Observed: 173 of 184 files loaded, the 11 missing ones the exact subject of
-    the question being asked.
+
+def _skipped_block(meta) -> str:
+    """Report what a dir load did not ingest, loudly ONLY when it is surprising.
+
+    A partial load that reports success is worse than a failure: an answer over the
+    remaining files is wrong BY OMISSION and nothing contradicts it. Observed: 173 of
+    184 files loaded, the 11 missing ones the exact subject of the question.
+
+    But node_modules being skipped is the intent, not an incident. Screaming INCOMPLETE
+    on every JS project trains the reader to skip the line -- and then it is not there
+    when 11 source files really do vanish. So policy exclusions get one quiet count and
+    the surprising ones get the alarm.
     """
-    skipped = getattr(meta, "skipped", None) or []
-    if not skipped:
+    counts = dict(getattr(meta, "skipped_counts", None) or {})
+    if not counts:
         return ""
-    reasons: dict[str, int] = {}
-    for entry in skipped:
-        reasons[entry.split(":", 1)[0]] = reasons.get(entry.split(":", 1)[0], 0) + 1
-    total = meta.file_count + len(skipped)
-    head = (f"\n- ⚠ **INCOMPLETE — {len(skipped)} of {total} file(s) were NOT loaded** "
-            f"({', '.join(f'{k} x{v}' for k, v in sorted(reasons.items()))}).\n"
-            "  Any answer from this context is wrong by omission if it needed one of them:\n")
-    shown = skipped[:20]
-    body = "".join(f"    {e}\n" for e in shown)
-    if len(skipped) > len(shown):
-        body += f"    … and {len(skipped) - len(shown)} more\n"
-    return head + body.rstrip("\n")
+    expected = {k: v for k, v in counts.items() if k in _EXPECTED_SKIPS}
+    surprising = {k: v for k, v in counts.items() if k not in _EXPECTED_SKIPS}
+    out = ""
+    if expected:
+        detail = ", ".join(f"{k} x{v:,}" for k, v in sorted(expected.items()))
+        out += f"\n- excluded by policy: {sum(expected.values()):,} ({detail})"
+    if surprising:
+        n = sum(surprising.values())
+        total = meta.file_count + sum(counts.values())
+        detail = ", ".join(f"{k} x{v:,}" for k, v in sorted(surprising.items()))
+        out += (f"\n- ⚠ **INCOMPLETE — {n:,} readable file(s) were NOT loaded** "
+                f"(of {total:,} found; {detail}).\n"
+                "  Any answer from this context is wrong by omission if it needed one:\n")
+        sample = [e for e in (getattr(meta, "skipped", None) or [])
+                  if e.split(":", 1)[0] not in _EXPECTED_SKIPS][:20]
+        out += "".join(f"    {e}\n" for e in sample).rstrip("\n")
+        if n > len(sample):
+            out += f"\n    … and {n - len(sample):,} more"
+    return out
 
 
 def _meta_block(meta) -> str:
@@ -688,7 +703,12 @@ def rlm_status(probe: bool = False) -> str:
 
 
 def _container_status() -> str:
-    """Image freshness of the live sandbox. Never creates a container just to look."""
+    """Image freshness of the live sandbox. Never creates a container just to look.
+
+    Deliberately NOT cached: the defect is the IMAGE moving under an UNCHANGED
+    container, so a cache keyed on the container id would never notice the very thing
+    this reports. Two docker calls (~200 ms) on a status tool is the right trade.
+    """
     if not CFG.use_docker:
         return "n/a (sandbox: local runs on the host)"
     try:

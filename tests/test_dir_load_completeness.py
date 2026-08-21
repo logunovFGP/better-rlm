@@ -64,25 +64,71 @@ def test_load_dir_records_every_skip_with_its_reason(tmp_path):
     assert meta.file_count == 2, f"expected keep.ts + tenancy.ts, got {meta.files}"
     assert "tenancy.ts" in meta.files, "the straddling file must now load"
 
+    assert meta.skipped_counts == {"skip-dir": 1, "skip-name": 1, "binary": 1}, \
+        meta.skipped_counts
     reasons = {e.split(":", 1)[0] for e in meta.skipped}
     assert reasons == {"skip-dir", "skip-name", "binary"}, meta.skipped
     assert any("logo.png" in e for e in meta.skipped)
     assert any(".env" in e for e in meta.skipped)
 
 
-def test_the_load_output_shouts_when_the_context_is_incomplete():
-    class _Meta:
-        ctx_id, source, source_type, data_type = "ctx_x", "/s", "dir", "dir"
-        bytes, lines, est_tokens, sha256 = 1, 1, 1, "a" * 64
-        file_count = 173
-        files: list = []
-        skipped = [f"binary: f{i}.ts" for i in range(11)]
+class _Meta:
+    ctx_id, source, source_type, data_type = "ctx_x", "/s", "dir", "dir"
+    bytes, lines, est_tokens, sha256 = 1, 1, 1, "a" * 64
+    file_count = 173
+    files: list = []
+    skipped_counts: dict = {}
+    skipped: list = []
 
-    out = srv._meta_block(_Meta())
+
+def test_the_load_output_shouts_when_the_context_is_incomplete():
+    m = _Meta()
+    m.skipped_counts = {"binary": 11}
+    m.skipped = [f"binary: f{i}.ts" for i in range(11)]
+
+    out = srv._meta_block(m)
     assert "INCOMPLETE" in out
-    assert "11 of 184" in out, "must state how many of how many"
+    assert "of 184 found" in out, "must state how many of how many"
     assert "wrong by omission" in out
     assert "binary x11" in out
+
+
+def test_intentional_exclusions_do_not_raise_the_alarm():
+    """node_modules being skipped is the POINT of _SKIP_DIRS. An alarm that fires on
+    every JS project is one nobody reads -- and then it is missing when 11 source
+    files really do vanish."""
+    m = _Meta()
+    m.skipped_counts = {"skip-dir": 3000}
+    m.skipped = ["skip-dir: node_modules/x.js"]
+
+    out = srv._meta_block(m)
+    assert "INCOMPLETE" not in out, "an intentional exclusion must not cry wolf"
+    assert "excluded by policy: 3,000" in out, "but it must still be stated"
+
+
+def test_a_surprising_skip_is_still_loud_among_intentional_ones():
+    m = _Meta()
+    m.skipped_counts = {"skip-dir": 3000, "binary": 1}
+    m.skipped = ["binary: src/tenancy.ts", "skip-dir: node_modules/x.js"]
+
+    out = srv._meta_block(m)
+    assert "excluded by policy: 3,000" in out
+    assert "INCOMPLETE" in out and "binary x1" in out
+    assert "src/tenancy.ts" in out, "the surprising path must be named"
+
+
+def test_the_skip_sample_is_bounded_so_meta_json_cannot_balloon(tmp_path):
+    """Unbounded, a node_modules tree wrote 3,000 entries / 128 KB of meta.json for a
+    context holding one 20-byte file -- and list_metas() parses every meta.json."""
+    (tmp_path / "keep.ts").write_text("x")
+    nm = tmp_path / "node_modules" / "pkg"
+    nm.mkdir(parents=True)
+    for i in range(300):
+        (nm / f"f{i}.js").write_text("x")
+
+    meta = _store().load_dir(str(tmp_path))
+    assert meta.skipped_counts == {"skip-dir": 300}, "the COUNT must stay exact"
+    assert len(meta.skipped) <= 50, "the stored sample must be bounded"
 
 
 def test_a_complete_load_says_nothing_extra():
