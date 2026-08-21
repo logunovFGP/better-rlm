@@ -56,6 +56,10 @@ fi
 
 echo "==> .env (optional — mode=auto reuses your Claude Code login, no key needed)"
 [ -f .env ] || { cp .env.example .env; echo "  created .env (only needed for mode: api — add ANTHROPIC_API_KEY there)"; }
+# .env holds CLAUDE_CODE_OAUTH_TOKEN (valid a year) or ANTHROPIC_API_KEY. `cp` inherits
+# the umask, which on a default macOS/Linux account leaves it world-readable (-rw-r--r--
+# observed). Tighten every run, not just on create.
+chmod 600 .env 2>/dev/null || true
 
 echo "==> Claude CLI login (the credential every model-backed tool uses)"
 # Being signed in to Claude Code does NOT sign in the `claude` CLI: the host session
