@@ -1,6 +1,6 @@
 ---
 name: rlm-large-context
-description: Reason over an input too large to read directly — multi-MB/GB logs, big JSON/CSV/data exports, PDFs, repo or directory dumps, k8s manifest sets, document corpora — by routing it through the `rlm` MCP tools (load into the external store, then grep/exec/query) instead of reading it inline and blowing the context window. Use when a file is larger than ~200 KB or ~5,000 lines, when a Read/cat would be truncated, and ESPECIALLY for questions whose work grows with the input: "count/label/classify EVERY entry", "aggregate across the whole log", "which pairs contradict each other", "cross-reference all N records", "what's the overall picture across these 1000 documents", "summarize this whole directory or repo". Also for "find X across this huge <log|dump|dataset|dir>". NOT for small files (read those directly) or for locating one symbol or definition in a code repo (grep/git grep is faster and free).
+description: Reason over an input too large to read directly — multi-MB/GB logs, big JSON/CSV/data exports, PDFs, repo or directory dumps, k8s manifest sets, document corpora — by routing it through the `rlm` MCP tools (load into the external store, then grep/exec/query) instead of reading it inline and blowing the context window. Use when a file is larger than ~200 KB or ~5,000 lines, when a Read/cat would be truncated, and ESPECIALLY for questions whose work grows with the input: "count/label/classify EVERY entry", "aggregate across the whole log", "which pairs contradict each other", "cross-reference all N records", "what's the overall picture across these 1000 documents", "summarize this whole directory or repo". Also for "find X across this huge <log|dump|dataset|dir>", and for LIVE system output — an hour of pod/container logs, a metrics or trace export, a journal, an audit feed — via `rlm_list_sources` / `rlm_load_source` wherever the deployment declares one. NOT for small files (read those directly) or for locating one symbol or definition in a code repo (grep/git grep is faster and free).
 ---
 
 # RLM — reason over oversized contexts
@@ -75,6 +75,58 @@ characters of visible text** and 41% inline JS. If you need the rendered DOM, re
 with a browser tool and save the result to a file, then load *that*. Do not try to make
 this server scrape an SPA.
 
+## Live sources — a running system, not a file
+
+The biggest inputs usually are not files. They are what a system is emitting *right now*:
+an hour of pod logs across a namespace, a metrics range query, a trace export, a journal,
+an audit feed. All far past what fits in this conversation, and all exactly what the
+routing table above is for.
+
+`rlm_list_sources` shows what **this** deployment can pull in. The server ships none of its
+own: an operator declares them in a registry outside the repo, so the list is site-specific
+and already carries that host's tooling, endpoints and credentials.
+
+```
+1. rlm_list_sources()                                    # free — what exists here?
+2. rlm_load_source("<name>", {"namespace": "...", ...})  # -> ctx_id; output stays on disk
+3. route by the table above: rlm_grep / rlm_exec / chunk+batch / rlm_query
+```
+
+**Check `rlm_list_sources` before assuming you have to shell out.** When a source is
+declared, prefer it: the output never passes through this conversation, the timeout and
+byte cap are already set, and nothing is left behind in `/tmp`. When none is declared, the
+ordinary route still works — run the command yourself with stdout **redirected to a file**,
+then `rlm_load_file` that file. Never let a multi-MB log print into this conversation on
+the way to the store.
+
+Once loaded it is an ordinary context:
+
+- *"Which errors dominate this window, and when did they start?"* → `rlm_exec` — free.
+- *"Does OOMKilled appear anywhere today?"* → `rlm_grep` — free.
+- *"Classify every 5xx in this window by root cause, then total them."* → `rlm_chunk_context` + `rlm_sub_query_batch`.
+- *"Which services' error bursts line up with each other?"* → `rlm_query`.
+
+**A partial load is worse than no load.** `rlm_load_source` labels a context
+*WITH WARNINGS* when the command exited non-zero, timed out, or hit its size cap. A
+truncated log answers "does X appear?" with a confident, wrong **no** — so narrow the
+window, raise the cap, or state plainly that the answer covers only part of the range.
+Same trap as the HTTP-200 sign-in page above.
+
+**Zero bytes is never a negative answer.** The warning spells out why, and its first cause is
+the one nobody guesses: many programs write their logs to **stderr**, which is not captured
+unless the source sets `merge_stderr: true` — a postgres container's entire log lands there,
+so `docker logs` on one loads as empty. Then: output redirected or paged away inside the
+command; then a dead tunnel, lapsed session, or wrong selector / namespace / time window.
+Read the warning, fix the cause, and co-verify with a query that *must* return data before
+reporting any zero as a finding.
+
+**If a source needs a credential, ask the user — never mint one yourself.** Sources declare a
+`credential_file`; `rlm_list_sources` shows each as `ready` or `MISSING or STALE`, and a call
+against a missing or expired one is refused with the exact path and format needed. Relay that
+to the user and ask them for a **short-lived** token — the source's `credential_max_age_h`
+says how short, and the server refuses the file once it is older than that. Do not create,
+fill, guess or echo the file's contents, and do not read it back into this conversation.
+
 ## What it is *not* for
 
 - Small files — just `Read` them.
@@ -88,9 +140,10 @@ this server scrape an SPA.
 
 ## Workflow
 
-1. **Load** — `rlm_load_file(path, data_type=text|log|pdf)` for one file, or
+1. **Load** — `rlm_load_file(path, data_type=text|log|pdf)` for one file,
    `rlm_load_context(source, source_type=auto|text|file|dir)` for inline text, a file, or a
-   whole directory. Returns a `ctx_id`; the content stays on disk.
+   whole directory, or `rlm_load_source(name, params)` for a live system (see above; list
+   them first with `rlm_list_sources`). Returns a `ctx_id`; the content stays on disk.
 2. **Sanity-check** (optional) — `rlm_inspect_context(ctx_id)` for metadata plus a head preview.
 3. **Route** — pick from the table above.
 4. **Housekeeping** — `rlm_list_contexts` to see what is loaded, `rlm_drop_context(ctx_id)`

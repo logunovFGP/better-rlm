@@ -24,7 +24,7 @@ from itertools import islice
 
 from mcp.server.fastmcp import FastMCP
 
-from . import auth, models
+from . import auth, models, sources
 from .chunking import STRATEGIES, chunk_text
 from .config import (
     PROVIDER_KEY_ENV,
@@ -157,6 +157,130 @@ def rlm_load_file(path: str, data_type: str = "text") -> str:
     place (no copy). Returns a ctx_id; then call rlm_query / rlm_sub_query / rlm_exec."""
     meta = STORE.load_file(path, data_type=data_type)
     return _bound("## File loaded\n" + _meta_block(meta))
+
+
+def _sources() -> dict[str, sources.Source]:
+    """Re-read the registry on every call: a running server holds its own copy of src/,
+    and this file is the one thing operators edit routinely (see sources.py)."""
+    return sources.load_sources(CFG.sources_file)
+
+
+@mcp.tool()
+@logged_tool
+def rlm_list_sources() -> str:
+    """List the named external sources THIS deployment declares — live inputs (cluster
+    logs, a metrics or trace backend, a journal, an audit API) that rlm_load_source can
+    pull into the store. FREE, no model call. Call this FIRST when the question is about
+    a RUNNING SYSTEM rather than a file on disk: the server ships no sources of its own,
+    so what exists here is entirely whatever the operator declared."""
+    reg = _sources()
+    if not reg:
+        return _bound(
+            "No sources declared — this server ships none by design.\n"
+            f"Declare them in `{CFG.sources_file}`: a mapping of name -> "
+            "{description, command, timeout_s, max_bytes}, where `command` may contain "
+            "`{placeholder}` parameters and `${ENV_VAR}` references. "
+            "See README → 'Live sources'."
+        )
+    lines = [f"## Declared sources ({len(reg)}) — from {CFG.sources_file}", ""]
+    for s in reg.values():
+        lines.append(f"- `{s.name}` — {s.description or '(no description)'}")
+        lines.append(f"  - params: {', '.join(s.params) or 'none'}"
+                     f"  |  timeout {s.timeout_s}s, cap {s.max_bytes:,} B"
+                     + ("  |  stderr merged into content" if s.merge_stderr else ""))
+        # Surface a missing/stale credential HERE, so the user can be asked before a call
+        # is attempted rather than after it fails.
+        if s.credential_file:
+            try:
+                sources.check_credential(s)
+                state = "ready"
+            except ValueError:
+                state = "MISSING or STALE — ask the user for a fresh short-lived token"
+            lines.append(f"  - credential: {s.credential_file}"
+                         + (f" (max age {s.credential_max_age_h:g}h)"
+                            if s.credential_max_age_h else "")
+                         + f" — {state}")
+    # _answer, not _bound: this is an ENUMERATION, not file content. The 4 KB raw cap
+    # exists so a giant log cannot flood the root context, but truncating the list of
+    # what you may call hides sources from the one tool whose job is to reveal them —
+    # measured: 15 sources with useful descriptions already exceed 4 KB.
+    return _answer("\n".join(lines))
+
+
+@mcp.tool()
+@logged_tool
+def rlm_load_source(name: str, params: dict[str, str] | None = None) -> str:
+    """Run a declared external source (see rlm_list_sources) and load its output into the
+    store. Use this INSTEAD of shelling out and reading the result: a live log stream or a
+    metrics/trace export is exactly the oversized input this server exists for, and its
+    content never enters this conversation — only a ctx_id comes back. Then grep / exec /
+    chunk / query it like any other context.
+
+    name: a key from rlm_list_sources.
+    params: values for that source's placeholders. They are substituted as literal argv
+    tokens and the command never goes through a shell, so a value cannot inject a second
+    command. Missing or unrecognised parameter names are rejected rather than guessed.
+
+    A partial result (non-zero exit, timeout, size cap) still returns a ctx_id but is
+    labelled WITH WARNINGS — a truncated log answers "does X appear?" with a false no."""
+    reg = _sources()
+    src = reg.get(name)
+    if src is None:
+        return _bound(
+            f"ERROR: unknown source '{name}'. Declared here: {', '.join(reg) or 'none'} "
+            f"(registry: {CFG.sources_file}). Call rlm_list_sources."
+        )
+    try:
+        argv = sources.resolve(src, params)
+    except ValueError as exc:
+        return _bound(f"ERROR: {exc}")
+    try:
+        run = STORE.load_command(argv, source=f"source:{name}",
+                                 timeout_s=src.timeout_s, max_bytes=src.max_bytes,
+                                 merge_stderr=src.merge_stderr)
+    except OSError as exc:
+        return _bound(f"ERROR: could not run source '{name}': {exc}  (argv[0]={argv[0]!r})")
+    # argv[0] only, never the rendered argv: a template may expand ${TOKEN} into it.
+    log_event(LOG, "source_run", source=name, argv0=argv[0], rc=run.returncode,
+              bytes=run.meta.bytes, truncated=run.truncated, timed_out=run.timed_out)
+
+    notes = []
+    if run.timed_out:
+        notes.append(f"TIMED OUT after {src.timeout_s}s")
+    if run.truncated:
+        notes.append(f"TRUNCATED at the {src.max_bytes:,}-byte cap")
+    if run.returncode != 0:
+        notes.append(f"exit code {run.returncode}")
+    if run.stderr_tail:
+        notes.append(f"stderr tail: {run.stderr_tail[:400]}")
+    if run.meta.bytes == 0:
+        # Zero bytes is the most dangerous result there is: a dead tunnel, an expired
+        # session, a wrong selector and a program that logs to stderr all look exactly
+        # like "nothing matched". The stderr cause is the one an operator cannot guess,
+        # so name it and its fix rather than only advising suspicion.
+        notes.append(
+            "ZERO BYTES CAPTURED — do NOT read this as 'nothing happened'. Likely causes, "
+            "in order: (1) the command writes its output to STDERR, not stdout, so none of "
+            "it was saved — set `merge_stderr: true` on this source"
+            + ("" if src.merge_stderr else " (currently OFF)")
+            + "; (2) the output was redirected or paged away inside the command itself; "
+              "(3) a dead tunnel, expired session, or wrong selector / namespace / time "
+              "window. Co-verify with a query that MUST return data before reporting any "
+              "negative finding from this context"
+        )
+    if not run.ok and run.meta.bytes == 0:
+        # Nothing came back and the command failed: that is an error, not an empty
+        # context someone will later query and get confident nonsense from.
+        STORE.drop(run.meta.ctx_id)
+        return _bound(f"ERROR: source '{name}' produced no output — " + "; ".join(notes))
+    # Header keys off `notes`, not `run.ok`: hitting the size cap exits 0 but still
+    # yields a partial context, and that must not read as a clean load.
+    body = ("## Source loaded — WITH WARNINGS\n" if notes else "## Source loaded\n") \
+        + _meta_block(run.meta)
+    if notes:
+        body += "\n\n**This context is INCOMPLETE — say so in any answer drawn from it:** " \
+                + "; ".join(notes)
+    return _bound(body)
 
 
 @mcp.tool()
@@ -472,6 +596,10 @@ def rlm_status() -> str:
         for r in (models.Role.ROOT, models.Role.OVERRIDE, models.Role.SUB)
     )
     ids = STORE.list_ids()
+    try:
+        src_line = f"{len(_sources())} declared"
+    except Exception as exc:   # a broken registry must show HERE, not only on first use
+        src_line = f"UNREADABLE — {type(exc).__name__}: {exc}"
     return _bound(
         "## RLM MCP status\n"
         f"- provider: {CFG.provider}   (anthropic needs no key — it uses the claude CLI login; "
@@ -491,7 +619,8 @@ def rlm_status() -> str:
         f"sub-query concurrency: {CFG.subquery_concurrency}\n"
         f"- docker CLI available: {docker_ok}\n"
         f"- loaded contexts ({len(ids)}): {', '.join(ids[:20]) or 'none'}\n"
-        f"- store dir: {CFG.store_dir}"
+        f"- store dir: {CFG.store_dir}\n"
+        f"- sources: {src_line}  (registry: {CFG.sources_file})"
     )
 
 

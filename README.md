@@ -153,7 +153,7 @@ and whether Docker was found. Then point it at something enormous.
 
 **5. No Docker? (optional)**
 
-Only `rlm_exec` and `rlm_query` need the sandbox; the other eleven tools — including the free
+Only `rlm_exec` and `rlm_query` need the sandbox; the other thirteen tools — including the free
 `rlm_grep` and `rlm_read_chunk` — never touch it. To run those two without Docker:
 
 ```bash
@@ -230,7 +230,7 @@ and whether Docker was found. Then point it at something enormous.
 
 **5. No Docker? (optional)**
 
-Only `rlm_exec` and `rlm_query` need the sandbox; the other eleven tools — including the free
+Only `rlm_exec` and `rlm_query` need the sandbox; the other thirteen tools — including the free
 `rlm_grep` and `rlm_read_chunk` — never touch it. To run those two without Docker:
 
 ```bash
@@ -346,7 +346,7 @@ and whether Docker was found. Then point it at something enormous.
 
 **5. No Docker? (optional)**
 
-Only `rlm_exec` and `rlm_query` need the sandbox; the other eleven tools — including the free
+Only `rlm_exec` and `rlm_query` need the sandbox; the other thirteen tools — including the free
 `rlm_grep` and `rlm_read_chunk` — never touch it. To run those two without Docker:
 
 ```powershell
@@ -461,22 +461,137 @@ only findings come back.
 
 ---
 
-## The 13 tools
+## The 15 tools
 
-**Load & inspect** — `rlm_load_context` · `rlm_load_file` · `rlm_inspect_context` · `rlm_chunk_context`
-**Deterministic retrieval — free, no model call** — `rlm_grep` · `rlm_read_chunk`
+**Load & inspect** — `rlm_load_context` · `rlm_load_file` · `rlm_load_source` · `rlm_inspect_context` · `rlm_chunk_context`
+**Deterministic retrieval — free, no model call** — `rlm_grep` · `rlm_read_chunk` · `rlm_list_sources`
 **Lifecycle** — `rlm_list_contexts` · `rlm_drop_context`
 **Model-backed** — `rlm_query` (full recursive: Sonnet root + Haiku sub, model-written Python in the sandbox) · `rlm_sub_query` · `rlm_sub_query_batch` (Haiku map-reduce)
 **Sandbox & status** — `rlm_exec` (Python in the sandbox) · `rlm_status`
 
-Only `rlm_exec` and `rlm_query` execute code, so only those two depend on the sandbox — the other
-eleven behave identically whether it is Docker or `local`. Both tools state which mode they are in,
-and `rlm_status` is authoritative: **`sandbox: local` means that code runs on your host, unisolated.**
+Only `rlm_exec` and `rlm_query` execute *model-written* code, so only those two depend on the
+sandbox — the other thirteen behave identically whether it is Docker or `local`. Both tools state
+which mode they are in, and `rlm_status` is authoritative: **`sandbox: local` means that code runs
+on your host, unisolated.** `rlm_load_source` also runs a process on the host, but never
+model-written and never through a shell: only a command an operator declared, with parameters
+substituted as literal argv tokens — see [Live sources](#live-sources) below.
 
 Two of those cost nothing. `rlm_grep` and `rlm_read_chunk` are pure retrieval with no model call,
 so narrowing a 2 GB file down to the interesting 40 KB is free — you only pay once you ask a
 question about it. Sandbox variables are set and read through `rlm_exec` itself
 (`name = value`, `print(repr(name))`); there are no separate variable tools.
+
+---
+
+## Live sources
+
+The biggest inputs usually are not files — they are what a system is emitting right now. An hour
+of pod logs across a namespace, a metrics range query, a trace export, a journal, an audit feed:
+all far past a context window, and all exactly what this server is for. Before this existed the
+only route was "shell out, redirect to a temp file, load the file", which leaves an unbounded
+uncleaned intermediate on disk and gives the agent nothing to discover.
+
+**This server ships no sources.** It has no vendor knowledge, no endpoints, no credentials and no
+built-in registry, and it stays inert until an operator opts in. What your infrastructure is stays
+yours: the registry lives at `sources_file` (default `~/.rlm/sources.yaml`), **outside the repo**,
+so a site's clusters and endpoints never land in a checkout or a diff.
+
+```yaml
+# ~/.rlm/sources.yaml — every value below is an example, nothing here is built in
+workload-logs:
+  description: Logs for one workload in the current cluster
+  command: kubectl logs -n {namespace} -l app={app} --since={since} --tail=-1
+  timeout_s: 120
+  max_bytes: 268435456
+
+metrics-range:
+  description: Range query against the metrics backend
+  command: curl -sS -H "Authorization: Bearer ${METRICS_TOKEN}"
+           "${METRICS_URL}/api/v1/query_range?query={query}&start={start}&end={end}"
+
+boot-journal:
+  description: This host's journal since last boot
+  command: journalctl -b --no-pager -o short-iso
+
+container-logs:
+  description: One container's logs
+  command: docker logs --timestamps --since {since} {container}
+  merge_stderr: true       # see below — without this a postgres container loads as empty
+```
+
+Then, from the agent:
+
+```
+rlm_list_sources()                                         # free — what exists here?
+rlm_load_source("workload-logs",
+                {"namespace": "prod", "app": "api", "since": "1h"})   # -> ctx_id
+rlm_grep(ctx_id, "OOMKilled")                              # free
+```
+
+The output never passes through the conversation — only a `ctx_id` comes back, and from there it
+is an ordinary context: `rlm_grep`, `rlm_exec`, `rlm_chunk_context` + `rlm_sub_query_batch`,
+`rlm_query`.
+
+**How a template is executed.** `command` is split with `shlex` once, at load time, and always run
+with `shell=False`. Parameters are substituted into the already-split argv tokens, so a value can
+never introduce a shell metacharacter, a pipe or a second command — `app: "web; rm -rf /"` becomes
+one literal argv token. `${VAR}` in the *template* expands from the server's environment, which is
+where a token belongs: not in the file and not in the conversation. Parameter values are never
+expanded, so a value containing `$HOME` cannot read the environment back out. `{name}` is a
+parameter and `${VAR}` is an environment reference; they do not collide. A command needing a pipe
+should be a wrapper script you register instead — and note that registering `sh -c "…{param}…"`
+deliberately re-opens the shell you were being protected from.
+
+**`merge_stderr` when the program logs to stderr.** By default stderr is kept as a
+diagnostic tail, not loaded — for a well-behaved command it is the error channel, and
+merging it would bury a failure message inside the data. But plenty of programs write their
+*logs* there by convention: postgres does, so `docker logs` on a postgres container puts
+every line on stderr and the context loads **empty**. The usual answer, `2>&1`, is shell
+syntax that does not exist here by design, so it is a per-source flag instead. With it on
+there is no separate tail — a failure message arrives interleaved with the data.
+
+**Credentials: a file the server never opens.** A source needing a token declares
+`credential_file` instead of expecting an exported variable, with an optional
+`credential_max_age_h`:
+
+```yaml
+metrics-range:
+  command: curl -sS --fail-with-body -K ${HOME}/.rlm/secrets/metrics.curlrc
+           "${METRICS_URL}/api/v1/query_range?query={query}"
+  credential_file: ~/.rlm/secrets/metrics.curlrc
+  credential_max_age_h: 4
+```
+
+Only `exists()` and `st_mtime` are consulted — the file is **never read**, so a token cannot
+reach the conversation, a log, or a tool result through this server. `curl -K` reads it
+itself at request time, so rotating the file rotates the credential with no restart. A
+missing or stale file refuses the call and returns an instruction aimed at the *user*, who
+is the only party that should be minting tokens. Because the age limit is enforced locally
+it holds whatever expiry the upstream service is willing to issue: a backend that only hands
+out 30-day tokens still gets a 4-hour one here. `rlm_list_sources` reports each declared
+credential as `ready` or `MISSING or STALE`, so the gap surfaces before a call is attempted
+rather than as a puzzling 403 afterwards.
+
+An unset `${VAR}` in a template is refused for the same reason. `os.path.expandvars` leaves
+an unknown name as the *literal* text `${METRICS_TOKEN}`, which would otherwise be sent to
+the far end as if it were a token — a local misconfiguration surfacing as a remote auth
+error. Only the braced form is checked, so `awk '{print $1}'` and `grep 'x$'` stay usable.
+
+**Partial results are labelled, not hidden.** A source that exits non-zero, overruns `timeout_s`,
+or hits `max_bytes` still returns its `ctx_id`, but marked *WITH WARNINGS* — a truncated log
+answers "does X appear?" with a confident, wrong **no**. A command that fails *and* produces
+nothing is an error, not an empty context.
+
+**Zero bytes always carries static advice**, whatever the exit code, because it is the result
+most likely to be misread as a finding. The note names the causes in likelihood order —
+output on stderr and therefore captured nowhere (with `merge_stderr` and its current state
+called out), output redirected or paged away inside the command, then a dead tunnel, lapsed
+session or wrong selector/namespace/window — and says to co-verify with a query that must
+return data before reporting any negative conclusion. Both bounds kill the process, so a `--follow` source
+terminates instead of running forever or filling the disk.
+
+The registry is re-read on every call, so adding a source needs no server reconnect. `rlm_status`
+reports how many are declared and surfaces a malformed file there rather than on first use.
 
 ---
 
@@ -575,6 +690,11 @@ figure you can't fully trust is worse than no figure.
   CLAUDE.md, no skills, no MCP — it can't recurse into this server) and `--tools ""` (text-only;
   RLM runs its own sandbox), in a neutral empty cwd, with `ANTHROPIC_API_KEY` scrubbed from its env
   so the subscription path is used. The token never enters the container.
+- **Named sources run on the host, and only what an operator wrote.** `rlm_load_source` executes a
+  command from `~/.rlm/sources.yaml` with `shell=False`; parameters land as literal argv tokens, so
+  the model cannot inject a second command or reach a source that was never declared. Nothing ships
+  declared, so a fresh install can run nothing. Keep tokens in the environment (`${VAR}` in the
+  template) rather than in the file — only `argv[0]` is logged, never the rendered command.
 - **Don't point `rlm_load_context` at directories containing credentials.** `load_dir` skips
   `.git`, `.env`, common key files, and binaries, but treat that as best-effort, not a guarantee.
 - Loaded context stays local; nothing is sent anywhere except your configured provider.
@@ -591,6 +711,9 @@ figure you can't fully trust is worse than no figure.
 - **`mode`** (`config.yaml`, or `RLM_MODE` which wins) — `auto` (default) | `claude-cli` | `api`.
 - **`sandbox`** (`config.yaml`, or `RLM_SANDBOX` which wins) — `docker` (default) | `local`.
   Invalid values are rejected rather than degraded to host exec.
+- **`sources_file`** (`config.yaml`) — default `~/.rlm/sources.yaml`, the named-source registry.
+  Outside the repo on purpose; absent by default, so no source exists until you declare one. See
+  [Live sources](#live-sources).
 - `.env` — usually **empty**. Optional `CLAUDE_CODE_OAUTH_TOKEN` (headless, no keychain) or
   `ANTHROPIC_API_KEY` (for `mode: api`). Credentials stay host-side.
 - `config.yaml` — `mode`, `provider`, models, `max_depth`/`max_iterations`, `sandbox`

@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
+import subprocess
+import tempfile
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -38,7 +42,7 @@ _MAX_DIR_FILE_BYTES = 25 * 1024 * 1024  # skip individual files larger than this
 class ContextMeta:
     ctx_id: str
     source: str
-    source_type: str   # text | file | dir
+    source_type: str   # text | file | dir | command
     data_type: str     # text | log | pdf | dir
     content_path: str  # abs path to materialized or original UTF-8 text
     bytes: int
@@ -50,6 +54,22 @@ class ContextMeta:
     created: str
     chunk_strategy: Optional[str] = None
     chunks: list[dict] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class CommandRun:
+    """Outcome of ``ContextStore.load_command``: the context plus how the run ended.
+    Kept separate from ContextMeta so a stored context never carries transient run
+    state — and so a caller cannot ignore a non-zero exit by accident."""
+    meta: ContextMeta
+    returncode: int
+    stderr_tail: str
+    truncated: bool     # hit max_bytes
+    timed_out: bool     # hit timeout_s
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0 and not self.timed_out
 
 
 def _stat_path(path: Path) -> tuple[int, int, str]:
@@ -214,6 +234,79 @@ class ContextStore:
             created=datetime.now(timezone.utc).isoformat(),
         )
         return self._finalize(meta)
+
+    def load_command(self, argv: list[str], *, source: str, timeout_s: int,
+                     max_bytes: int, merge_stderr: bool = False) -> "CommandRun":
+        """Run ``argv`` (never through a shell) and stream its stdout into a new context.
+
+        Streaming, not capturing: the whole point is inputs bigger than memory, so stdout
+        goes block-by-block to disk and is bounded by ``max_bytes`` and ``timeout_s``.
+        Both bounds kill the process — a follow/tail command is expected here and must not
+        run forever or fill the disk.
+
+        stderr goes to a temporary FILE, not a pipe. With both on pipes, a command that
+        writes more than the pipe buffer to stderr while we drain only stdout deadlocks
+        both sides forever.
+
+        ``merge_stderr`` sends stderr down the same pipe instead, so it lands *in* the
+        context. Some programs log to stderr by convention (postgres does, hence
+        ``docker logs`` on one), and the shell answer ``2>&1`` is unavailable here by
+        design. There is then no separate ``stderr_tail`` — a failure message arrives
+        interleaved with the data.
+
+        Returns the run outcome rather than raising on a non-zero exit: a command can fail
+        *after* emitting the output worth analysing. The caller decides what a partial
+        result is worth — but it must never be reported as a clean load.
+        """
+        ctx_id = self._new_id()
+        content_path = self._dir(ctx_id) / "content.txt"
+        content_path.parent.mkdir(parents=True, exist_ok=True)
+        timed_out = threading.Event()
+        truncated = False
+        written = 0
+        with tempfile.TemporaryFile() as errf:
+            proc = subprocess.Popen(
+                argv, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT if merge_stderr else errf)
+
+            def _on_timeout() -> None:
+                if proc.poll() is None:   # don't flag a process that already finished
+                    timed_out.set()
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+
+            timer = threading.Timer(timeout_s, _on_timeout)
+            timer.start()
+            try:
+                # "wb": raw bytes, so no newline translation and no decode of a stream
+                # that may not be valid UTF-8. Readers already open with errors="replace".
+                with open(content_path, "wb") as out:
+                    for block in iter(lambda: proc.stdout.read(1 << 16), b""):
+                        if written + len(block) > max_bytes:
+                            out.write(block[:max_bytes - written])
+                            written, truncated = max_bytes, True
+                            proc.kill()
+                            break
+                        out.write(block)
+                        written += len(block)
+            finally:
+                # Cancel AFTER reaping, so the watchdog stays armed if the loop above
+                # raised — otherwise proc.wait() could block on a live process forever.
+                proc.stdout.close()
+                rc = proc.wait()
+                timer.cancel()
+            errf.seek(0, os.SEEK_END)
+            errf.seek(max(0, errf.tell() - 2000))   # tail only: stderr can be huge too
+            stderr_tail = errf.read().decode("utf-8", errors="replace").strip()
+        meta = ContextMeta(
+            ctx_id=ctx_id, source=source, source_type="command", data_type="text",
+            content_path=str(content_path), bytes=0, lines=0, est_tokens=0, sha256="",
+            file_count=1, files=[source], created=datetime.now(timezone.utc).isoformat(),
+        )
+        return CommandRun(self._finalize(meta), rc, stderr_tail, truncated,
+                          timed_out.is_set())
 
     # -- readers -----------------------------------------------------------
     def read_text(self, ctx_id: str) -> str:
