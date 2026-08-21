@@ -645,10 +645,18 @@ token exported in a terminal is invisible to it. It goes in **`.env` at the repo
 `src/config.py` loads at startup and `.gitignore` already covers:
 
 ```bash
-./install.sh --auth        # runs `claude setup-token`, prints the token once
-# then put it in .env:
-CLAUDE_CODE_OAUTH_TOKEN=<token>
+./install.sh --auth        # or: .\install.ps1 -Auth
 ```
+
+That runs `claude setup-token`, then asks for the token at a **hidden prompt** and writes it
+to `.env` itself (0600, replacing any empty slot). The value is never echoed, never passed as
+an argument, and never enters shell history — the installer reports only its byte count. It
+deliberately does *not* capture `setup-token`'s stdout: the browser flow prints there too, so
+capturing it would hide the UI you have to interact with.
+
+If the token is already exported in the shell you run the installer from, it is copied into
+`.env` for you with no prompt and no second `setup-token` — that export alone would never
+have reached the server.
 
 To set it without the value touching your shell history — from the shell where you just
 exported it:

@@ -6,6 +6,9 @@ registration or a dangling skill link on someone else's machine long after they 
 removed this checkout. These assertions tie each installer's artefacts back to its
 uninstaller, and pin the two removals that are actively dangerous to get wrong.
 """
+import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -112,3 +115,39 @@ def test_windows_only_scripts_keep_crlf(name):
         f"{name} has {lf_total - crlf} bare LF line ending(s) — must be CRLF "
         "(see .gitattributes)"
     )
+
+
+# --- install.sh stores the OAuth token itself, and never leaks it -------------
+@pytest.mark.skipif(sys.platform == "win32", reason="install.sh is the POSIX installer")
+def test_installer_stores_the_token_without_leaking_it(tmp_path):
+    """`--auth` reads the token at a hidden prompt and writes it to .env.
+
+    An `export` in the user's shell never reaches the server, so the installer has to
+    persist it. The value must not reach stdout: an installer's output is logged, and a
+    setup-token credential is valid for a year.
+    """
+    m = re.search(r"^rlm_write_token\(\) \{.*?^\}", (ROOT / "install.sh").read_text(),
+                  re.S | re.M)
+    assert m, "rlm_write_token() is gone from install.sh"
+
+    venv = tmp_path / ".venv_sh" / "bin"
+    venv.mkdir(parents=True)
+    (venv / "python").symlink_to(sys.executable)
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("# keep me\nCLAUDE_CODE_OAUTH_TOKEN=\n")   # the empty-slot shape
+    env_file.chmod(0o644)                                            # the loose mode too
+    (tmp_path / "fn.sh").write_text(m.group(0) + '\nrlm_write_token "$1"\n')
+
+    secret = "SEKRIT-TOKEN-abcdef0123456789"
+    r = subprocess.run(["bash", "fn.sh", secret], cwd=tmp_path,
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert secret not in r.stdout + r.stderr, "the installer printed the token"
+    assert f"{len(secret)} bytes" in r.stdout, "should report the length instead"
+
+    body = env_file.read_text()
+    assert body.count("CLAUDE_CODE_OAUTH_TOKEN=") == 1, "left a duplicate/empty slot"
+    assert f"CLAUDE_CODE_OAUTH_TOKEN={secret}" in body
+    assert "# keep me" in body, "clobbered the rest of .env"
+    assert env_file.stat().st_mode & 0o777 == 0o600, ".env left readable by others"
