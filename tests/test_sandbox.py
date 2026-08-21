@@ -153,3 +153,25 @@ def test_owner_marker_records_pid_container_and_host_workspace(tmp_path):
     assert int(pid) == os.getpid()
     assert container == "abc123"
     assert host == str(tmp_path)
+
+
+def test_stale_rlms_install_is_refused_loudly(monkeypatch):
+    """A leftover `rlms` shadowing ./rlm must fail at import, not silently drop
+    every engine fix. pip does not uninstall a dependency merely dropped from
+    pyproject, so this is the state an upgrader lands in.
+    """
+    import importlib
+    import sys
+
+    from rlm.environments import docker_repl
+
+    monkeypatch.delattr(docker_repl, "RLM_RESULT_SENTINEL")
+    monkeypatch.delitem(sys.modules, "src.engine")
+    try:
+        with pytest.raises(ImportError, match="stale `rlms`"):
+            importlib.import_module("src.engine")
+    finally:
+        # leave a working src.engine behind for whatever runs next
+        monkeypatch.undo()
+        sys.modules.pop("src.engine", None)
+        importlib.import_module("src.engine")

@@ -14,7 +14,23 @@ import logging
 from typing import Optional
 
 from rlm.core.rlm import RLM
+from rlm.environments import docker_repl as _dr_probe
 from rlm.environments import get_environment
+
+# The engine is vendored source (./rlm, see rlm/UPSTREAM.md). A leftover `rlms`
+# install from before the vendoring shadows it whenever the process starts outside
+# the repo root — and pip never uninstalls a dependency that was merely dropped
+# from pyproject. Silently, every engine-side fix would stop applying: the hardened
+# exec protocol, the atomic state write, the batch fail-fast. Probe for a symbol
+# only the vendored copy has, so this is about WHICH engine loaded and not about
+# where it sits (a wheel install ships ./rlm into site-packages legitimately).
+if not hasattr(_dr_probe, "RLM_RESULT_SENTINEL"):
+    raise ImportError(
+        f"the RLM engine loaded from {_dr_probe.__file__} is not the vendored copy — "
+        "a stale `rlms` distribution is shadowing ./rlm, so none of the engine fixes "
+        "apply (hardened exec protocol, atomic state write, batch fail-fast). "
+        "Remove it:  uv pip uninstall rlms   (or: pip uninstall rlms)"
+    )
 
 from .auth import patch_engine, provider_key
 from .sandbox_reap import reap_stale_sandboxes
