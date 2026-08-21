@@ -28,22 +28,27 @@ class SubResult:
     input_tokens: int
     output_tokens: int
     error: str | None = None
+    #: Model that actually produced this answer, as reported by the transport --
+    #: not the id we asked for. On OAuth these differ: models.select maps a
+    #: configured id to its closest subscription-supported sibling, so the only
+    #: way to know what ran is to read it back.
+    model: str = ""
 
 
 @retry_and_queue_retries
 def _call(model: str, prompt: str, max_tokens: int,
-          system: str | None) -> tuple[str, int, int]:
+          system: str | None) -> tuple[str, int, int, str]:
     transport = get_transport(resolve_auth_mode(_CFG), _CFG)
     res = transport.complete(
         [{"role": "user", "content": prompt}], system, model, max_tokens)
-    return res.text, res.input_tokens, res.output_tokens
+    return res.text, res.input_tokens, res.output_tokens, res.model
 
 
 def sub_query(prompt: str, model: str, *, max_tokens: int = 4096,
               system: str | None = None) -> SubResult:
     try:
-        text, itok, otok = _call(model, prompt, max_tokens, system)
-        return SubResult(0, text, itok, otok)
+        text, itok, otok, used = _call(model, prompt, max_tokens, system)
+        return SubResult(0, text, itok, otok, model=used)
     except Exception as exc:  # surfaced to caller, not swallowed
         return SubResult(0, "", 0, 0, error=str(exc))
 
@@ -68,8 +73,8 @@ def sub_query_batch(prompts: list[str], model: str, *, concurrency: int,
             return SubResult(idx, "", 0, 0, error=f"skipped — {fatal[0]}")
         with bind_rid(parent_rid):
             try:
-                text, itok, otok = _call(model, prompt, max_tokens, system)
-                return SubResult(idx, text, itok, otok)
+                text, itok, otok, used = _call(model, prompt, max_tokens, system)
+                return SubResult(idx, text, itok, otok, model=used)
             except Exception as exc:
                 if is_fatal_auth(exc):
                     fatal.append(str(exc))

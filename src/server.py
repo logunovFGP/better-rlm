@@ -37,6 +37,7 @@ from .context_store import ContextStore
 from .engine import ReplSession, run_query
 from .logsetup import configure_logging, log_event, logged_tool, note_startup
 from .output import bound_output
+from .sandbox_reap import container_image_status
 from .shutdown import install_shutdown_hooks
 from .subquery import sub_query, sub_query_batch
 
@@ -447,7 +448,8 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
     )
     total = res["cost_usd"]
     return _answer(
-        f"## RLM answer (root: {res['root_model']}, sub: {res['sub_model']})\n\n{res['answer']}\n\n"
+        f"## RLM answer (root: {res['root_model']}, sub: {res['sub_model']}"
+        f" · auth: {transport.auth_label(CFG)})\n\n{res['answer']}\n\n"
         f"---\n**Model routing / usage:**\n{rows}\n"
         + (f"**Total cost:** ${total:.4f}  |  " if total is not None else "")
         + f"**Time:** {res['execution_time']}s"
@@ -477,7 +479,8 @@ def rlm_sub_query(ctx_id: str, prompt: str, chunk_index: int = -1) -> str:
     if res.error:
         return _bound(f"ERROR ({sub_model}): {res.error}")
     return _answer(
-        f"## Sub-query answer ({sub_model})\n\n{res.answer}\n\n---\n"
+        f"## Sub-query answer ({res.model or sub_model}"
+        f" · auth: {transport.auth_label(CFG)})\n\n{res.answer}\n\n---\n"
         f"tokens: {res.input_tokens:,} in / {res.output_tokens:,} out"
     )
 
@@ -509,6 +512,10 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
     itok = sum(r.input_tokens for r in results)
     otok = sum(r.output_tokens for r in results)
     errs = [r for r in results if r.error]
+    # Models as REPORTED BY THE TRANSPORT, not the id we asked for: on OAuth
+    # models.select maps a configured id to its closest subscription sibling.
+    used = sorted({r.model for r in results if r.model}) or [sub_model]
+    used_label = ", ".join(used)
     # Surface partial failures: the tool still returns a success string (so
     # tool_call logs outcome=ok), which would otherwise hide that some chunks
     # errored. Same rid ties this back to the parent tool_call.
@@ -532,7 +539,8 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
     )
 
     def _raw(extra: str = "") -> str:
-        head = (f"## Batch sub-query — map over {len(prompts)} chunks ({sub_model})\n"
+        head = (f"## Batch sub-query — map over {len(prompts)} chunks ({used_label}"
+                f" · auth: {transport.auth_label(CFG)})\n"
                 f"tokens: {itok:,} in / {otok:,} out{_cost_note(sub_model, itok, otok)}"
                 f"{note}{extra}\n\n")
         return _answer(head + per_chunk)
@@ -565,7 +573,8 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
     itok += red.input_tokens
     otok += red.output_tokens
     return _answer(
-        f"## Batch sub-query — map+reduce over {len(prompts)} chunks ({sub_model})\n"
+        f"## Batch sub-query — map+reduce over {len(prompts)} chunks ({used_label}"
+        f" · auth: {transport.auth_label(CFG)})\n"
         f"tokens: {itok:,} in / {otok:,} out{_cost_note(sub_model, itok, otok)}{note}\n\n"
         f"{red.answer.strip()}"
     )
@@ -609,9 +618,11 @@ def rlm_status(probe: bool = False) -> str:
     creds = auth.auth_status()  # which explicit credential exists (display only)
     try:
         resolved = auth.resolve_auth_mode(CFG)      # "oauth" (CLI) | "apikey" (SDK)
-        transport = "cli (claude CLI)" if resolved == "oauth" else "api (Anthropic SDK)"
+        # NB: not `transport` -- that name is the module imported above, and
+        # shadowing it here broke transport.auth_label() at runtime.
+        transport_desc = "cli (claude CLI)" if resolved == "oauth" else "api (Anthropic SDK)"
     except Exception as exc:
-        resolved, transport = None, f"UNRESOLVED — {exc}"
+        resolved, transport_desc = None, f"UNRESOLVED — {exc}"
     mode = resolved or "apikey"
     root, override, sub = (
         models.map_for_mode(mode, models.configured(CFG, r))
@@ -628,7 +639,7 @@ def rlm_status(probe: bool = False) -> str:
         f"any other needs its {PROVIDER_KEY_ENV.get(CFG.provider, '<PROVIDER>_API_KEY')}; "
         "RLM_PROVIDER env overrides)\n"
         f"- mode (configured): {CFG.mode}   (auto | claude-cli | api; RLM_MODE env overrides)\n"
-        f"- transport (resolved): {transport}\n"
+        f"- transport (resolved): {transport_desc}\n"
         f"- claude CLI ({CFG.cli_path}): {'found at ' + claude_cli if claude_cli else 'NOT FOUND on PATH'}"
         f"  | system-prompt mode: {CFG.cli_system_prompt_mode}, safe-mode: {CFG.cli_safe_mode}\n"
         f"- explicit credentials present: {creds}  (claude-cli mode needs NONE — the CLI uses its own login)\n"
@@ -636,6 +647,8 @@ def rlm_status(probe: bool = False) -> str:
         f"- resolved models → root: {root} | override: {override} | sub: {sub}\n"
         f"- configured models → root: {CFG.root_model} | override: {CFG.root_model_override} | sub: {CFG.sub_model}\n"
         f"- sandbox: {CFG.sandbox} (image: {CFG.sandbox_image})\n"
+        f"- sandbox container: {_container_status()}\n"
+        f"- auth (resolved): {transport.auth_label(CFG)}\n"
         f"- max_depth: {CFG.max_depth}, max_iterations: {CFG.max_iterations}\n"
         f"- output cap: {CFG.output_cap_bytes} B (raw content) / {CFG.answer_cap_bytes:,} B (answers), "
         f"sub-query concurrency: {CFG.subquery_concurrency}\n"
@@ -646,6 +659,17 @@ def rlm_status(probe: bool = False) -> str:
         f"{_cli_login_line()}"
         f"{_auth_probe_line() if probe else ''}"
     )
+
+
+def _container_status() -> str:
+    """Image freshness of the live sandbox. Never creates a container just to look."""
+    if not CFG.use_docker:
+        return "n/a (sandbox: local runs on the host)"
+    try:
+        return container_image_status(CFG.sandbox_image,
+                                     _repl.container_id() if _repl else None)
+    except Exception as exc:                      # noqa: BLE001
+        return f"unknown ({type(exc).__name__})"
 
 
 def _cli_login_line() -> str:

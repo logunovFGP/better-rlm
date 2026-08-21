@@ -229,6 +229,11 @@ class ReplSession:
         r = self._ensure().execute_code(code)
         return (r.stdout or ""), (r.stderr or "")
 
+    def container_id(self) -> Optional[str]:
+        """Id of the live sandbox container, or None if none has been created.
+        Deliberately does NOT create one: rlm_status must stay cheap."""
+        return getattr(self._env, "container_id", None) if self._env else None
+
     def close(self) -> None:
         if self._env is not None and hasattr(self._env, "cleanup"):
             self._env.cleanup()
