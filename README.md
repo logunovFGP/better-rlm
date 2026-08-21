@@ -389,6 +389,43 @@ for trusted inputs only — see [Security](#security).
 
 ---
 
+## Uninstall
+
+```bash
+./uninstall.sh --dry-run     # show what would go, change nothing
+./uninstall.sh               # macOS / Linux
+```
+
+```powershell
+.\uninstall.ps1 -WhatIf      # show what would go, change nothing
+.\uninstall.ps1              # Windows
+```
+
+Reverses the installer for **this checkout only**, and is safe to re-run. It removes the `rlm`
+registration, the skill link, `core.hooksPath`, the virtualenv and build artefacts.
+
+Three things it deliberately leaves alone:
+
+- **A registration or skill link owned by another checkout.** Both installers refuse to hijack
+  those, which is what lets several checkouts coexist — so an unguarded `claude mcp remove` here
+  would uninstall whichever checkout currently owns the name. Each one is compared against this
+  directory first and reported instead when it does not match.
+- **`~/.rlm`** — your loaded contexts and logs. Shared by every checkout and the only copy of
+  that data, so it needs `--purge-data` / `-PurgeData`.
+- **The `rlm-sandbox` image**, shared the same way: `--image` / `-Image`.
+
+A `.env` you edited is also kept, because it may hold `CLAUDE_CODE_OAUTH_TOKEN` or an API key;
+an untouched copy (byte-identical to `.env.example`) is removed. On Windows, a running server
+holds `.venv_windows` open — pass `-Force` to stop it, or close Claude Code first.
+
+Other gitignored working state is left to `git clean -xdf`, which does it better than a
+hand-maintained list. To finish, delete the directory.
+
+> If you installed via `/plugin`, uninstall through `/plugin` instead — these scripts only know
+> about a checkout install.
+
+---
+
 ## When to use it
 
 **This is a supplement, not a replacement** for Claude Code's native tools. That honesty is the
