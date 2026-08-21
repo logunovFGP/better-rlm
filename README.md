@@ -827,6 +827,34 @@ registration without editing files, add `-e RLM_MODE=claude-cli` (or `api`) to `
 
 ---
 
+## Releasing
+
+Releases are cut **manually, on request** — `.github/workflows/release.yml` has no push,
+tag or schedule trigger, so a merge to `main` never publishes anything. `tests/test_release.py`
+fails if a trigger is ever added, which is the only way that property stays true.
+
+Two steps, in this order:
+
+1. **Bump the version on `main`.** `pyproject.toml` is the single source of truth; the
+   workflow refuses a release whose input disagrees with it, so the tag and the package
+   can never claim different versions.
+2. **Run the workflow.** In the Actions tab pick *Release* → *Run workflow* and enter the
+   version, or:
+
+   ```bash
+   gh workflow run release.yml -f version=0.2.0
+   gh workflow run release.yml -f version=0.2.0 -f dry_run=true   # verify + build only
+   ```
+
+It runs `uv run --extra dev pytest -q` on **ubuntu and windows** before anything is
+published — the platform split is not ceremony, every defect found while merging #2, #4
+and #5 was Windows-only and green on Linux — then builds the sdist and wheel and creates
+the tag plus a GitHub Release with generated notes and both artifacts attached. It refuses
+a malformed version, a version `pyproject.toml` does not declare, and a version already
+tagged or released. `dry_run: true` does everything except tag and publish.
+
+---
+
 ## Credits
 
 Recursive Language Models are the work of **Alex L. Zhang, Tim Kraska, and Omar Khattab**

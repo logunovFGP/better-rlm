@@ -1,0 +1,87 @@
+name: Release
+
+# Manual only, by request. There is deliberately no push, tag or schedule trigger here:
+# a release that can fire from a merge would tag and publish whatever just landed.
+# tests/test_release.py fails if another trigger is ever added.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 0.2.0 — must equal the version in pyproject.toml'
+        required: true
+        type: string
+      dry_run:
+        description: 'Verify and build only: tag nothing, publish nothing'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # create the tag and the release; nothing else
+
+jobs:
+  verify:
+    # Both platforms on purpose. The three defects found merging #2/#4/#5 were all
+    # Windows-only — an exec bit os.stat cannot see, backslashes eaten by shlex.split,
+    # and a test that needed a live Docker daemon — and every one of them was green on
+    # Linux. A ubuntu-only gate would have signed off on all three.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run --extra dev pytest -q
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    env:
+      # Passed as environment, never interpolated into a shell line: ${{ }} inside a run
+      # block is textual substitution, so a crafted input would run as code.
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # --generate-notes needs the history
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Refuse a malformed version
+        run: |
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::version must look like 1.2.3, got '$VERSION'"; exit 1 ;;
+          esac
+
+      - name: Refuse a version pyproject does not declare
+        run: |
+          declared=$(uv run --no-project python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])")
+          if [ "$declared" != "$VERSION" ]; then
+            echo "::error::pyproject.toml declares $declared, but you asked to release $VERSION. Bump pyproject on main first so the tag and the package agree."
+            exit 1
+          fi
+
+      - name: Refuse a version already released
+        run: |
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "::error::release v$VERSION already exists"; exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::tag v$VERSION already exists"; exit 1
+          fi
+
+      - run: uv build
+
+      - name: Tag and publish
+        if: ${{ !inputs.dry_run }}
+        run: gh release create "v$VERSION" dist/* --title "v$VERSION" --generate-notes
+
+      - name: Dry run summary
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "Dry run: suite green on both platforms, version agrees with pyproject," >> "$GITHUB_STEP_SUMMARY"
+          echo "package builds. Nothing tagged, nothing published." >> "$GITHUB_STEP_SUMMARY"
+          ls -l dist >> "$GITHUB_STEP_SUMMARY"
