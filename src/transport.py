@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import subprocess
 import time
 from abc import ABC, abstractmethod
@@ -64,6 +65,20 @@ class CliRateLimitError(RuntimeError):
     """CLI hit a rate/usage limit. Flagged so ratelimit._is_rate_limit retries it."""
 
     is_rate_limit = True
+
+
+class CliAuthError(CliCompletionError):
+    """CLI could not authenticate — the login is dead, so every other call fails
+    identically.
+
+    ``is_fatal_subcall`` is the engine's duck-typed contract
+    (``rlm.environments.base_env.FATAL_SUBCALL_ATTR``): any batched fan-out, ours
+    in subquery.py or the engine's own, aborts on it instead of repeating one
+    global failure once per prompt. One attribute, both layers, no import across
+    the boundary.
+    """
+
+    is_fatal_subcall = True
 
 
 # --------------------------------------------------------------------------- #
@@ -130,6 +145,68 @@ def flatten_messages(messages: list[dict]) -> str:
 def _looks_rate_limited(text: str | None) -> bool:
     low = (text or "").lower()
     return any(marker in low for marker in _RATE_LIMIT_MARKERS)
+
+
+# ponytail: substring match on the CLI's own message — the only signal it gives.
+# If these ever stop matching we degrade to the previous behaviour (one doomed
+# call per chunk), never to something worse, so this stays best-effort by design.
+_AUTH_FAIL_MARKERS = (
+    "failed to authenticate",
+    "oauth session expired",
+    "oauth token has expired",
+    "invalid api key",
+    "authentication_error",
+    "please run /login",
+)
+
+
+def _looks_auth_failed(text: str | None) -> bool:
+    low = (text or "").lower()
+    return any(marker in low for marker in _AUTH_FAIL_MARKERS)
+
+
+#: What to actually DO about a dead CLI login. Static text, so building it costs
+#: nothing and it is attached to every auth failure. The live check is
+#: cli_auth_status() below, which rlm_status calls.
+#:
+#: The trap this exists for: being signed in to Claude Code (or the desktop app)
+#: does NOT sign in the `claude` CLI. The host session holds its own credential
+#: and a nested `claude -p` cannot borrow it — measured with the delegation env
+#: both stripped AND left intact, identical failure either way. Meanwhile
+#: `claude auth status` reports loggedIn: false, which is the ground truth.
+AUTH_REMEDIATION = (
+    "The `claude` CLI has no usable login of its own. Being signed in to Claude Code "
+    "or the desktop app does NOT sign in the CLI — the host session's credential "
+    "cannot be borrowed by a nested `claude -p`. Check with `claude auth status`, "
+    "then pick ONE:\n"
+    "  1. `claude auth login`            — interactive; refreshes the CLI login\n"
+    "  2. `claude setup-token`           — long-lived token (needs a Claude "
+    "subscription); put it in CLAUDE_CODE_OAUTH_TOKEN. The durable choice for a "
+    "server left running, since a headless refresh cannot complete interactive OAuth\n"
+    "  3. ANTHROPIC_API_KEY + `mode: api` — the SDK path, no CLI involved"
+)
+
+
+def cli_auth_status(cfg) -> dict | None:
+    """`claude auth status --json` — is the CLI actually logged in? FREE: no model
+    call, ~215 ms measured. Returns the parsed dict, or None if the CLI could not be
+    asked (absent, timed out, unexpected output).
+
+    Worth preferring over a probe completion: it answers the question directly
+    instead of inferring it from a failure, and it costs no tokens.
+    """
+    claude = shutil.which(cfg.cli_path)
+    if not claude:
+        return None
+    try:
+        proc = subprocess.run(
+            [claude, "auth", "status", "--json"],
+            capture_output=True, text=True, timeout=30,
+            cwd=None, env=CliTransport._subprocess_env(),
+        )
+        return json.loads(proc.stdout)
+    except Exception:      # absent, timeout, or a shape we do not recognise
+        return None
 
 
 def _spawn_err(stderr: str | None, stdout: str | None) -> str:
@@ -348,6 +425,8 @@ def _parse_cli_output(returncode: int, stdout: str, stderr: str,
         msg = (stderr or stdout or "no output").strip()[:500]
         if _looks_rate_limited(msg):
             raise CliRateLimitError(f"claude CLI rate limited: {msg}")
+        if _looks_auth_failed(msg):
+            raise CliAuthError(f"claude CLI auth failed: {msg}\n{AUTH_REMEDIATION}")
         raise CliCompletionError(f"claude CLI failed (exit {returncode}): {msg}")
 
     is_error = bool(data.get("is_error")) or data.get("subtype") not in (None, "success")
@@ -355,6 +434,8 @@ def _parse_cli_output(returncode: int, stdout: str, stderr: str,
         msg = str(data.get("result") or data.get("error") or stderr or "error").strip()[:500]
         if _looks_rate_limited(msg) or _looks_rate_limited(str(data.get("subtype"))):
             raise CliRateLimitError(f"claude CLI rate limited: {msg}")
+        if _looks_auth_failed(msg):
+            raise CliAuthError(f"claude CLI auth failed: {msg}\n{AUTH_REMEDIATION}")
         raise CliCompletionError(
             f"claude CLI error (subtype={data.get('subtype')}): {msg}")
 

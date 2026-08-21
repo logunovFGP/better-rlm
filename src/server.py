@@ -20,11 +20,12 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import textwrap
 from itertools import islice
 
 from mcp.server.fastmcp import FastMCP
 
-from . import auth, models, sources
+from . import auth, models, sources, transport
 from .chunking import STRATEGIES, chunk_text
 from .config import (
     PROVIDER_KEY_ENV,
@@ -503,6 +504,11 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
     if errs:
         log_event(LOG, "sub_batch", phase="map", chunks=len(prompts),
                   errors=len(errs), err_sample=errs[0].error)
+    # Every chunk failed: that is a failed tool call, not a result with notes.
+    # Returning the usual success string here is exactly how a dead login reads
+    # back as "no findings". The ERROR prefix is what logsetup maps to outcome=error.
+    if errs and len(errs) == len(results):
+        return _bound(f"ERROR: all {len(results)} chunk(s) failed — {errs[0].error}")
 
     note = ""
     if max_chunks > 0 and max_chunks < n:
@@ -579,9 +585,14 @@ def rlm_exec(code: str, ctx_id: str = "") -> str:
 
 @mcp.tool()
 @logged_tool
-def rlm_status() -> str:
+def rlm_status(probe: bool = False) -> str:
     """Report configuration, the active auth + model-selection strategy with the
-    RESOLVED models, loaded contexts, and sandbox/Docker availability."""
+    RESOLVED models, loaded contexts, and sandbox/Docker availability.
+
+    probe=True additionally spends one tiny sub-model call to prove the transport
+    can actually authenticate. Off by default because it costs a call; worth it
+    the moment anything returns an auth error, since every line below can be
+    correct while the login itself is dead."""
     docker_ok = shutil.which("docker") is not None
     claude_cli = shutil.which(CFG.cli_path)
     creds = auth.auth_status()  # which explicit credential exists (display only)
@@ -621,7 +632,53 @@ def rlm_status() -> str:
         f"- loaded contexts ({len(ids)}): {', '.join(ids[:20]) or 'none'}\n"
         f"- store dir: {CFG.store_dir}\n"
         f"- sources: {src_line}  (registry: {CFG.sources_file})"
+        f"{_cli_login_line()}"
+        f"{_auth_probe_line() if probe else ''}"
     )
+
+
+def _cli_login_line() -> str:
+    """Is the `claude` CLI logged in? FREE (no model call, ~215 ms) and it answers the
+    one question every other line here can be right about while the login is dead.
+
+    Always shown, because the failure it catches is invisible otherwise: being signed
+    in to Claude Code does not sign in the CLI, and nothing else in this report says so.
+    """
+    if resolve_auth_mode_safe() != "oauth":
+        return ""                                  # SDK path: no CLI login involved
+    st = transport.cli_auth_status(CFG)
+    if st is None:
+        return "\n- cli login: UNKNOWN — could not run `claude auth status`"
+    if st.get("loggedIn"):
+        return (f"\n- cli login: ok (method: {st.get('authMethod', '?')}, "
+                f"provider: {st.get('apiProvider', '?')})")
+    return ("\n- cli login: NOT LOGGED IN — every model-backed tool will fail.\n"
+            + textwrap.indent(transport.AUTH_REMEDIATION, "    "))
+
+
+def resolve_auth_mode_safe() -> str:
+    try:
+        return auth.resolve_auth_mode(CFG)
+    except Exception:                              # noqa: BLE001
+        return "unknown"
+
+
+def _auth_probe_line() -> str:
+    """One real sub-model call — proves the transport end to end. Skipped when the free
+    check above already knows the login is dead: paying for a call whose answer is
+    already known is the same waste the batch fail-fast exists to stop."""
+    if resolve_auth_mode_safe() == "oauth":
+        st = transport.cli_auth_status(CFG)
+        if st is not None and not st.get("loggedIn"):
+            return "\n- auth probe: SKIPPED — cli login is dead, a probe would only confirm it"
+    try:
+        res = sub_query("Reply with exactly: ok",
+                        models.select(CFG, models.Role.SUB), max_tokens=16)
+    except Exception as exc:                      # noqa: BLE001 - report, never raise
+        return f"\n- auth probe: FAILED — {type(exc).__name__}: {exc}"
+    if res.error:
+        return f"\n- auth probe: FAILED — {res.error}"
+    return f"\n- auth probe: ok — sub-model replied {res.answer.strip()[:20]!r}"
 
 
 def main() -> None:

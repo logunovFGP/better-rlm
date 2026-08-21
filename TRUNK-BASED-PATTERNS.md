@@ -119,7 +119,7 @@ effect until the MCP server is reconnected.
 | Stashing work instead of landing it | Land a smaller increment |
 | Merging on red verify to unblock | Fix it, or drop the leaf |
 | Code freezes, integration phases | Not needed when leaves are hours old |
-| Editing `site-packages` to patch a dependency | Patch from `src/` (see `src/sandbox_patch.py`) so the fix survives `pip install` |
+| Monkey-patching the engine from `src/` | The engine is vendored source at `./rlm` — fix the defect there (see `rlm/UPSTREAM.md`) |
 
 The deployment-branch bans (no back-merge, no direct commits on a release line)
 do not apply: strategy `trunk` has no such branch. Changing strategy means

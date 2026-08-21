@@ -6,7 +6,17 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11,<3.14"
 dependencies = [
-  "rlms==0.1.3",
+  # The RLM engine is vendored at ./rlm (see rlm/UPSTREAM.md) — no longer a
+  # dependency. These are the deps it used to pull in transitively, restated so
+  # the vendored copy still resolves. Backends other than anthropic are imported
+  # lazily in rlm/clients/__init__.py; they stay declared because config.yaml
+  # still offers gemini / openai / azure_openai / portkey as providers.
+  "anthropic>=0.75.0",
+  "google-genai>=1.56.0",
+  "openai>=2.14.0",
+  "portkey-ai>=2.1.0",
+  "requests>=2.32.5",
+  "rich>=13.0.0",
   "mcp==1.28.1",
   "pyyaml>=6.0",
   "python-dotenv>=1.0",
@@ -20,5 +30,7 @@ dev = ["pytest>=8.0"]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["src"]
+[tool.setuptools.packages.find]
+# `rlm*` picks up the vendored engine and its subpackages (rlm.core, rlm.clients,
+# rlm.environments, rlm.logger, rlm.utils) without enumerating them by hand.
+include = ["src*", "rlm*"]

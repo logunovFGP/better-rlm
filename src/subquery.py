@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from .auth import resolve_auth_mode
 from .config import load_config
 from .logsetup import bind_rid, current_rid
-from .ratelimit import retry_and_queue_retries
+from .ratelimit import is_fatal_auth, retry_and_queue_retries
 from .transport import get_transport
 
 _CFG = load_config()
@@ -54,14 +54,25 @@ def sub_query_batch(prompts: list[str], model: str, *, concurrency: int,
     # correlation id here and re-bind it inside each worker — otherwise the nested
     # cli_spawn/retry events lose the originating tool call's rid.
     parent_rid = current_rid()
+    # A dead login is global, not per-chunk: without this, every remaining prompt
+    # spawns its own doomed call (measured: 20 chunks, 20 identical "OAuth session
+    # expired"). Only auth aborts the batch — a chunk-specific failure must not
+    # discard the chunks that would have succeeded.
+    # ponytail: plain list as the flag. The benign race lets the calls already in
+    # flight finish; a threading.Event only matters if that ever costs something.
+    fatal: list[str] = []
 
     def work(item: tuple[int, str]) -> SubResult:
         idx, prompt = item
+        if fatal:
+            return SubResult(idx, "", 0, 0, error=f"skipped — {fatal[0]}")
         with bind_rid(parent_rid):
             try:
                 text, itok, otok = _call(model, prompt, max_tokens, system)
                 return SubResult(idx, text, itok, otok)
             except Exception as exc:
+                if is_fatal_auth(exc):
+                    fatal.append(str(exc))
                 return SubResult(idx, "", 0, 0, error=str(exc))
 
     # pool.map yields in submission order, so results already line up with `prompts`.

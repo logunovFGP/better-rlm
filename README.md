@@ -32,7 +32,7 @@ engine. Everything below is the gap between a working demo and something you'd l
 
 | | Upstream wrapper | **better-rlm** |
 |---|---|---|
-| **Runs at all** | Errors on `rlms 0.1.3` — the `litellm` backend was removed from the engine | Pinned to `rlms==0.1.3` / `mcp==1.28.1` on the `anthropic` backend |
+| **Runs at all** | Errors on `rlms 0.1.3` — the `litellm` backend was removed from the engine | Engine vendored at `./rlm` (from `v0.1.3`) on the `anthropic` backend, `mcp==1.28.1` |
 | **Setup cost** | OpenRouter account + `OPENROUTER_API_KEY` | **Nothing.** Reuses the Claude Code login you already have |
 | **Model-written Python** | `environment="local"` — executed **on your host** | **Docker sandbox by default**, credentials never enter the container |
 | **Context handling** | Passed as an inline string | External on-disk store; tool output bounded so a big result can't blow up the session |
@@ -601,9 +601,9 @@ A transport **Strategy** (`src/transport.py`) decides *how* each model call is m
 **`mode`** (`config.yaml` or the `RLM_MODE` env var):
 
 - **`claude-cli`** — drives the official `claude` CLI (`claude -p`) for every completion; it does
-  **not** call the HTTP API. Authenticates from your existing Claude Code login (keychain), so
-  there is nothing to set up. A `CLAUDE_CODE_OAUTH_TOKEN` in the env is still honored, e.g. for a
-  headless box with no keychain.
+  **not** call the HTTP API. Authenticates from the **`claude` CLI's own login** (keychain), so
+  usually there is nothing to set up. A `CLAUDE_CODE_OAUTH_TOKEN` in the env is still honored, e.g.
+  for a headless box with no keychain.
 - **`api`** — calls go over the Anthropic SDK using `ANTHROPIC_API_KEY`.
 - **`auto`** (default) — prefer the `claude` CLI when installed; otherwise fall back to
   `ANTHROPIC_API_KEY`.
@@ -611,6 +611,84 @@ A transport **Strategy** (`src/transport.py`) decides *how* each model call is m
 The function interface is identical in every mode; only the transport swaps, and all of them run
 behind the same throttle and auth-aware retry. If no transport is available the server **fails
 fast** with a clear message rather than half-working.
+
+#### Being signed in to Claude Code is NOT the same as the CLI being logged in
+
+This is the one auth trap worth knowing, because every other line of `rlm_status` can be
+correct while it bites. Claude Code (and the desktop app) hold their **own** credential for the
+host session. A nested `claude -p` cannot borrow it — measured with the delegation env both
+stripped and left fully intact, identical `OAuth session expired` either way. The CLI needs a
+login of its own, and when its token expires a headless refresh cannot complete interactive
+OAuth, so it simply stays dead.
+
+`rlm_status` now answers this directly, free and with no model call — it shells out to
+`claude auth status --json` (~215 ms):
+
+```
+- cli login: NOT LOGGED IN — every model-backed tool will fail.
+    1. `claude auth login`   — interactive; refreshes the CLI login
+    2. `claude setup-token`  — long-lived token; put it in CLAUDE_CODE_OAUTH_TOKEN
+    3. ANTHROPIC_API_KEY + `mode: api`
+```
+
+Option 2 is the durable one for a server you leave running: a long-lived token does not
+depend on an interactive refresh that a background process cannot perform. The same
+remediation is attached to every auth failure, so a failed `rlm_sub_query_batch` tells you how
+to fix it instead of only that it broke. With the login dead, `probe=True` skips its call
+rather than spending one to confirm what the free check already established.
+
+#### Where the token has to live
+
+**`export CLAUDE_CODE_OAUTH_TOKEN=…` in your shell does not reach the server.** The MCP
+server is launched by Claude Code with its own environment, not from your login shell — so a
+token exported in a terminal is invisible to it. It goes in **`.env` at the repo root**, which
+`src/config.py` loads at startup and `.gitignore` already covers:
+
+```bash
+./install.sh --auth        # or: .\install.ps1 -Auth
+```
+
+That runs `claude setup-token`, then asks for the token at a **hidden prompt** and writes it
+to `.env` itself (0600, replacing any empty slot). The value is never echoed, never passed as
+an argument, and never enters shell history — the installer reports only its byte count. It
+deliberately does *not* capture `setup-token`'s stdout: the browser flow prints there too, so
+capturing it would hide the UI you have to interact with.
+
+If the token is already exported in the shell you run the installer from, it is copied into
+`.env` for you with no prompt and no second `setup-token` — that export alone would never
+have reached the server.
+
+On POSIX `.env` is written `0600`. On Windows it inherits the repo directory's ACL and the
+installer does **not** tighten it: `Get-Acl`/`Set-Acl` is Windows-only API that cannot be
+exercised on this project's CI, and shipping an unverified credential-permissions path is
+worse than naming the exposure. To lock it down yourself:
+
+```powershell
+icacls .env /inheritance:r /grant:r "$env:USERNAME:(R,W)"
+```
+
+To set it without the value touching your shell history — from the shell where you just
+exported it:
+
+```bash
+python3 -c 'import os,pathlib; p=pathlib.Path(".env"); \
+  ls=[l for l in p.read_text().splitlines() if not l.startswith("CLAUDE_CODE_OAUTH_TOKEN=")]; \
+  p.write_text("\n".join(ls+[f"CLAUDE_CODE_OAUTH_TOKEN={os.environ[\'CLAUDE_CODE_OAUTH_TOKEN\']}"])+"\n")'
+```
+
+`claude setup-token` prints the token exactly once, to your terminal. `install.sh` never
+captures it — piping it anywhere would put a year-long credential into the installer log.
+Note that typing `export CLAUDE_CODE_OAUTH_TOKEN=<token>` writes it to your shell history in
+plaintext; scrub that line, and rotate by re-running `claude setup-token` if it leaked.
+
+Verify it took, without printing it:
+
+```bash
+grep -c '^CLAUDE_CODE_OAUTH_TOKEN=.\+' .env    # 1 = set
+```
+
+Then restart the Claude session and check `rlm_status` — the `cli login:` line should go
+green, or `- CLAUDE_CODE_OAUTH_TOKEN is set in .env`.
 
 ### Model selection
 
@@ -637,7 +715,7 @@ Role→model mapping lives in one place — `src/models.py` — not hardcoded ac
 - **This exists for remote deploys.** A container has no keychain for the `claude` CLI to read, so
   `anthropic` + OAuth cannot work there; a keyed provider can.
 
-No per-vendor code is maintained here: the pinned `rlms` engine already ships clients for all of
+No per-vendor code is written by hand: the vendored engine at `./rlm` already ships clients for all of
 the above, so a non-Anthropic provider reuses *its* client through one adapter
 (`transport.EngineClientTransport`) and gains only our shared throttle and 429 retry. Anthropic
 keeps two dedicated transports (`CliTransport`, `ApiTransport`) precisely because it's the odd one

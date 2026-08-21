@@ -1,5 +1,9 @@
 # Phase 1 — RLM engine architecture note
 
+> **Superseded on structure:** the engine is no longer a pip dependency — it is
+> vendored source at `./rlm` (see `rlm/UPSTREAM.md`). The analysis below still
+> describes the same code at the same version.
+
 Source studied: `github.com/alexzhang13/rlm` (pip `rlms==0.1.3`, MIT; Zhang, Kraska,
 Khattab, MIT CSAIL). Every name below is from the cloned source, not memory.
 

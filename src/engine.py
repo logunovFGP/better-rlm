@@ -14,10 +14,26 @@ import logging
 from typing import Optional
 
 from rlm.core.rlm import RLM
+from rlm.environments import docker_repl as _dr_probe
 from rlm.environments import get_environment
 
+# The engine is vendored source (./rlm, see rlm/UPSTREAM.md). A leftover `rlms`
+# install from before the vendoring shadows it whenever the process starts outside
+# the repo root — and pip never uninstalls a dependency that was merely dropped
+# from pyproject. Silently, every engine-side fix would stop applying: the hardened
+# exec protocol, the atomic state write, the batch fail-fast. Probe for a symbol
+# only the vendored copy has, so this is about WHICH engine loaded and not about
+# where it sits (a wheel install ships ./rlm into site-packages legitimately).
+if not hasattr(_dr_probe, "RLM_RESULT_SENTINEL"):
+    raise ImportError(
+        f"the RLM engine loaded from {_dr_probe.__file__} is not the vendored copy — "
+        "a stale `rlms` distribution is shadowing ./rlm, so none of the engine fixes "
+        "apply (hardened exec protocol, atomic state write, batch fail-fast). "
+        "Remove it:  uv pip uninstall rlms   (or: pip uninstall rlms)"
+    )
+
 from .auth import patch_engine, provider_key
-from .sandbox_patch import patch_sandbox
+from .sandbox_reap import reap_stale_sandboxes
 from .config import Config, cost_usd
 from .logsetup import log_event
 from rlm.utils.prompts import RLM_SYSTEM_PROMPT
@@ -49,8 +65,9 @@ def build_rlm(cfg: Config, root_model: str, sub_model: str) -> RLM:
     """Construct an RLM with the given (already-resolved) root + sub models on
     the Docker sandbox. Auth is injected by patch_engine() — no real key here."""
     patch_engine()
-    patch_sandbox()
-    env_kwargs = {"image": cfg.sandbox_image} if cfg.use_docker else {}
+    reap_stale_sandboxes()
+    env_kwargs = ({"image": cfg.sandbox_image, "timeout_s": cfg.sandbox_timeout_s}
+                  if cfg.use_docker else {})
     # Anthropic routes through our transport, which owns auth — hence the placeholder.
     # Any other provider uses the engine's own client and needs the real key.
     api_key = _PLACEHOLDER_KEY if cfg.provider == "anthropic" else (provider_key(cfg) or "")
@@ -144,8 +161,10 @@ class ReplSession:
 
     def _ensure(self):
         if self._env is None:
-            patch_sandbox()
-            env_kwargs = {"image": self.cfg.sandbox_image} if self.cfg.use_docker else {}
+            reap_stale_sandboxes()
+            env_kwargs = ({"image": self.cfg.sandbox_image,
+                           "timeout_s": self.cfg.sandbox_timeout_s}
+                          if self.cfg.use_docker else {})
             self._env = get_environment(self.cfg.sandbox, env_kwargs)
             self._env.execute_code("answer = {'content': '', 'ready': False}")
         return self._env

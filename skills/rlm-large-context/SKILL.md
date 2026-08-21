@@ -38,7 +38,8 @@ across four long-context tasks at comparable cost:
   Unaided frontier models scored **≤0.1%** where the recursive path reached 58%.
 - **Deep research over a corpus** — multi-hop across ~1000 documents (6–11M tokens).
 - **Whole-repo or whole-directory understanding** — reasoning that spans many files at once
-  (evaluated up to 4.2M tokens).
+  (LongBench-v2 CodeQA, 23K–4.2M tokens). Route it by question shape: see the code-repository
+  entry under *What it is not for* — deterministic `rlm_exec` first, sub-calls only if needed.
 
 ## Remote sources — URLs, Google Sheets, whole websites, a remote bundle
 
@@ -133,10 +134,14 @@ fill, guess or echo the file's contents, and do not read it back into this conve
 - Finding one symbol or definition in a repo — `grep`/`git grep` is faster and free. The
   paper's own result: single-needle tasks degrade to plain keyword heuristics, so paying for
   recursion buys nothing.
-- **Code repositories specifically:** prefer `rlm_exec` over `rlm_query`. On the paper's
-  code-repository benchmark the *no-sub-calling* variant beat every recursive variant, and
-  an ordinary coding agent with context offloading scored higher still. Load the directory,
-  then drive it with your own Python.
+- **Code repositories — prefer `rlm_exec` over `rlm_query`, but stay in RLM.** On the paper's
+  code benchmark (LongBench-v2 CodeQA, 23K–4.2M tokens) the recursion premium is small and its
+  sign flips by model — RLM 56% vs 66% for *no sub-calls* on Qwen3-Coder, but 62% vs 58% on
+  GPT-5 — so sub-calls rarely pay for themselves here: load the directory and drive it with
+  your own Python. What does **not** follow is reaching for an ordinary coding agent instead.
+  That is the paper's `CodeAct (+BM25)` row — a code-executing ReAct agent with a retriever,
+  i.e. exactly context offloading — and it scored **22–24%**, worst in the table and barely
+  above the bare base model (20–24%). Dense questions spanning the whole repo stay here.
 
 ## Workflow
 
