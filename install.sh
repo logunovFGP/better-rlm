@@ -10,10 +10,12 @@ cd "$DIR"
 # this checkout), and `claude mcp add` exits 1 on a name that already exists — so doing
 # it by default would break the idempotency this script promises above.
 REGISTER=0
+AUTH=0
 for arg in "$@"; do
   case "$arg" in
     --register) REGISTER=1 ;;
-    -h|--help) echo "usage: ./install.sh [--register]"; exit 0 ;;
+    --auth) AUTH=1 ;;
+    -h|--help) echo "usage: ./install.sh [--register] [--auth]"; exit 0 ;;
     *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -54,6 +56,48 @@ fi
 
 echo "==> .env (optional — mode=auto reuses your Claude Code login, no key needed)"
 [ -f .env ] || { cp .env.example .env; echo "  created .env (only needed for mode: api — add ANTHROPIC_API_KEY there)"; }
+
+echo "==> Claude CLI login (the credential every model-backed tool uses)"
+# Being signed in to Claude Code does NOT sign in the `claude` CLI: the host session
+# holds its own credential and a nested `claude -p` cannot borrow it. So check the CLI
+# itself, and check it HERE rather than letting the first rlm_query discover it.
+#
+# This step never handles the token. `claude setup-token` prints it once, to the
+# user's terminal, uncaptured — piping it anywhere would put a year-long credential
+# into this script's stdout and into the installer log.
+if ! command -v claude >/dev/null 2>&1; then
+  echo "  WARNING: the \`claude\` CLI is not on PATH."
+  echo "           Install Claude Code: https://claude.com/download"
+  echo "           (or set 'cli_path' in config.yaml to its absolute path, or use"
+  echo "            mode: api with ANTHROPIC_API_KEY — see README Auth.)"
+elif grep -qE '^CLAUDE_CODE_OAUTH_TOKEN=.+' .env 2>/dev/null; then
+  echo "  CLAUDE_CODE_OAUTH_TOKEN is set in .env — the server will use it."
+else
+  # --json is the documented output; --text is for humans. Free, no model call.
+  LOGGED_IN="$(claude auth status --json 2>/dev/null | tr -d ' \n' | grep -o '"loggedIn":true' || true)"
+  if [ -n "$LOGGED_IN" ]; then
+    echo "  \`claude\` CLI is logged in — nothing to do."
+    echo "  TIP: for a server you leave running, prefer a long-lived token"
+    echo "       (./install.sh --auth). An interactive login expires and a background"
+    echo "       refresh cannot renew it."
+  elif [ "$AUTH" -eq 1 ]; then
+    echo "  Not logged in. Running \`claude setup-token\` — complete it in the browser."
+    echo "  The token prints ONCE, below. Copy it into $DIR/.env as:"
+    echo "      CLAUDE_CODE_OAUTH_TOKEN=<token>"
+    echo "  (.env is gitignored, and src/config.py loads it at startup.)"
+    echo
+    claude setup-token || echo "  setup-token did not complete — re-run ./install.sh --auth"
+  else
+    echo "  WARNING: the \`claude\` CLI is NOT logged in — every model-backed tool"
+    echo "           (rlm_query / rlm_sub_query / rlm_sub_query_batch) will fail."
+    echo "           Being signed in to Claude Code is NOT the same thing."
+    echo "           Fix with ONE of:"
+    echo "             ./install.sh --auth   — long-lived token, best for a running server"
+    echo "             claude auth login     — interactive; expires, cannot self-refresh"
+    echo "             ANTHROPIC_API_KEY in .env + mode: api"
+    echo "           (rlm_grep / rlm_exec need no login and keep working.)"
+  fi
+fi
 
 echo "==> Skills — make Claude reach for RLM on oversized inputs"
 # Symlinked, not copied: editing skills/<name>/SKILL.md takes effect immediately with no

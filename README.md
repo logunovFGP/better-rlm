@@ -637,6 +637,42 @@ remediation is attached to every auth failure, so a failed `rlm_sub_query_batch`
 to fix it instead of only that it broke. With the login dead, `probe=True` skips its call
 rather than spending one to confirm what the free check already established.
 
+#### Where the token has to live
+
+**`export CLAUDE_CODE_OAUTH_TOKEN=…` in your shell does not reach the server.** The MCP
+server is launched by Claude Code with its own environment, not from your login shell — so a
+token exported in a terminal is invisible to it. It goes in **`.env` at the repo root**, which
+`src/config.py` loads at startup and `.gitignore` already covers:
+
+```bash
+./install.sh --auth        # runs `claude setup-token`, prints the token once
+# then put it in .env:
+CLAUDE_CODE_OAUTH_TOKEN=<token>
+```
+
+To set it without the value touching your shell history — from the shell where you just
+exported it:
+
+```bash
+python3 -c 'import os,pathlib; p=pathlib.Path(".env"); \
+  ls=[l for l in p.read_text().splitlines() if not l.startswith("CLAUDE_CODE_OAUTH_TOKEN=")]; \
+  p.write_text("\n".join(ls+[f"CLAUDE_CODE_OAUTH_TOKEN={os.environ[\'CLAUDE_CODE_OAUTH_TOKEN\']}"])+"\n")'
+```
+
+`claude setup-token` prints the token exactly once, to your terminal. `install.sh` never
+captures it — piping it anywhere would put a year-long credential into the installer log.
+Note that typing `export CLAUDE_CODE_OAUTH_TOKEN=<token>` writes it to your shell history in
+plaintext; scrub that line, and rotate by re-running `claude setup-token` if it leaked.
+
+Verify it took, without printing it:
+
+```bash
+grep -c '^CLAUDE_CODE_OAUTH_TOKEN=.\+' .env    # 1 = set
+```
+
+Then restart the Claude session and check `rlm_status` — the `cli login:` line should go
+green, or `- CLAUDE_CODE_OAUTH_TOKEN is set in .env`.
+
 ### Model selection
 
 Role→model mapping lives in one place — `src/models.py` — not hardcoded across the codebase.

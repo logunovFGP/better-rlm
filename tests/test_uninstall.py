@@ -95,3 +95,20 @@ def test_registration_removal_is_guarded_by_the_checkout_path(sh, ps1):
     assert "run_server.sh" in before_remove, "uninstall.sh removes 'rlm' without proving it owns it"
     before_remove_ps1 = ps1.split("'mcp' 'remove'", 1)[0]
     assert "run_server.cmd" in before_remove_ps1, "uninstall.ps1 removes 'rlm' without proving it owns it"
+
+
+# --- line endings: Windows-only scripts must stay CRLF ------------------------
+@pytest.mark.parametrize("name", ["run_server.cmd", "install.ps1", "uninstall.ps1"])
+def test_windows_only_scripts_keep_crlf(name):
+    """`.gitattributes` pins these to eol=crlf, so a checkout produces CRLF on every
+    platform. An editor (or a script) that rewrites one with LF silently undoes that —
+    it has happened twice — and cmd.exe/PowerShell are the ones that pay.
+    """
+    data = (ROOT / name).read_bytes()
+    lf_total = data.count(b"\n")
+    crlf = data.count(b"\r\n")
+    assert lf_total > 0, f"{name} is empty?"
+    assert crlf == lf_total, (
+        f"{name} has {lf_total - crlf} bare LF line ending(s) — must be CRLF "
+        "(see .gitattributes)"
+    )
