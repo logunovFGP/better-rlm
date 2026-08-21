@@ -80,6 +80,35 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # --- helpers ---------------------------------------------------------------
+function Write-RlmToken {
+    <#
+      Store the OAuth token in .env without it reaching argv, the console or history.
+      UTF8Encoding($false): Set-Content -Encoding utf8 emits a BOM on Windows
+      PowerShell 5.1 (this script's floor), and a BOM would become part of the first
+      key python-dotenv parses. Only the byte count is ever printed.
+
+      No ACL tightening here on purpose. .env inherits the repo directory's ACL; the
+      Get-Acl/Set-Acl dance is Windows-only API that cannot be exercised on this
+      project's CI or by its maintainer's machine, and shipping an unverified
+      credential-permissions path is worse than documenting the exposure. To lock it
+      down:  icacls .env /inheritance:r /grant:r "$env:USERNAME:(R,W)"
+    #>
+    param([Parameter(Mandatory)][string] $Token)
+
+    $tok = $Token.Trim()
+    if (-not $tok) { Write-Warning 'Empty token - .env not changed.'; return }
+
+    $envPath = Join-Path $PSScriptRoot '.env'
+    $keep = @()
+    if (Test-Path $envPath) {
+        $keep = @(Get-Content -LiteralPath $envPath |
+                  Where-Object { $_ -notmatch '^CLAUDE_CODE_OAUTH_TOKEN=' })
+    }
+    $text = (($keep + "CLAUDE_CODE_OAUTH_TOKEN=$tok") -join "`n") + "`n"
+    [System.IO.File]::WriteAllText($envPath, $text, (New-Object System.Text.UTF8Encoding $false))
+    Write-Note "wrote CLAUDE_CODE_OAUTH_TOKEN to .env ($($tok.Length) bytes)"
+}
+
 function Write-Step { param([Parameter(Mandatory)][string] $Message) Write-Host "==> $Message" -ForegroundColor Cyan }
 function Write-Note { param([Parameter(Mandatory)][string] $Message) Write-Host "    $Message" -ForegroundColor DarkGray }
 function Test-Tool { param([Parameter(Mandatory)][string] $Name) [bool](Get-Command $Name -ErrorAction SilentlyContinue) }
@@ -357,6 +386,13 @@ try {
         Write-Note "Or set 'cli_path' in config.yaml, or use mode: api with ANTHROPIC_API_KEY."
     } elseif ($envHasToken) {
         Write-Note 'CLAUDE_CODE_OAUTH_TOKEN is set in .env - the server will use it.'
+    } elseif ($env:CLAUDE_CODE_OAUTH_TOKEN) {
+        # Exported in the shell running the installer but absent from .env. An export
+        # never reaches the server (Claude Code launches it with its own environment),
+        # so this would look configured and then fail at the first model call.
+        Write-Note 'CLAUDE_CODE_OAUTH_TOKEN is set in this shell but missing from .env -'
+        Write-Note 'an export never reaches the server. Copying it across:'
+        Write-RlmToken -Token $env:CLAUDE_CODE_OAUTH_TOKEN
     } else {
         $loggedIn = $false
         try { $loggedIn = ((claude auth status --json 2>$null) | ConvertFrom-Json).loggedIn } catch { }
@@ -366,9 +402,21 @@ try {
             Write-Note '     an interactive login expires and a background refresh cannot renew it.'
         } elseif ($Auth) {
             Write-Note 'Not logged in. Running `claude setup-token` - complete it in the browser.'
-            Write-Note "The token prints ONCE below. Copy it into $PSScriptRoot\.env as:"
-            Write-Note '    CLAUDE_CODE_OAUTH_TOKEN=<token>'
+            Write-Note 'It prints the token once; paste it at the hidden prompt afterwards'
+            Write-Note 'and this script stores it in .env (loaded by src/config.py).'
             claude setup-token
+            if (-not $script:CanPrompt) {
+                Write-Note 'Non-interactive - add CLAUDE_CODE_OAUTH_TOKEN=<token> to .env yourself.'
+            } else {
+                # -AsSecureString: not echoed, never enters PSReadLine history.
+                # setup-token's stdout is deliberately NOT captured - its browser flow
+                # prints there, so capturing would hide the UI the user must interact with.
+                $sec = Read-Host -Prompt '  Paste the token (hidden), or Enter to skip' -AsSecureString
+                $plain = [System.Net.NetworkCredential]::new('', $sec).Password
+                if ($plain) { Write-RlmToken -Token $plain }
+                else { Write-Note 'Skipped. Add CLAUDE_CODE_OAUTH_TOKEN=<token> to .env yourself.' }
+                $plain = $null; $sec = $null
+            }
         } else {
             Write-Warning 'The `claude` CLI is NOT logged in - every model-backed tool will fail.'
             Write-Note 'Being signed in to Claude Code is NOT the same thing. Fix with ONE of:'

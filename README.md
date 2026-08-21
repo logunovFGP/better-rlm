@@ -658,6 +658,15 @@ If the token is already exported in the shell you run the installer from, it is 
 `.env` for you with no prompt and no second `setup-token` — that export alone would never
 have reached the server.
 
+On POSIX `.env` is written `0600`. On Windows it inherits the repo directory's ACL and the
+installer does **not** tighten it: `Get-Acl`/`Set-Acl` is Windows-only API that cannot be
+exercised on this project's CI, and shipping an unverified credential-permissions path is
+worse than naming the exposure. To lock it down yourself:
+
+```powershell
+icacls .env /inheritance:r /grant:r "$env:USERNAME:(R,W)"
+```
+
 To set it without the value touching your shell history — from the shell where you just
 exported it:
 
