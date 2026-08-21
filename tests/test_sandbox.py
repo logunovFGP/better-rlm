@@ -149,7 +149,8 @@ def test_reap_sweep_never_raises(monkeypatch, tmp_path):
 def test_owner_marker_records_pid_container_and_host_workspace(tmp_path):
     """The 3rd line is how remotely-fetched data reaches a store: the container
     writes to /workspace, the host then loads it by this path."""
-    env = DockerREPL.__new__(DockerREPL)
+    env = DockerREPL.__new__(DockerREPL)   # no __init__: nothing was started here
+    env._cleaned_up = True                 # ...so __del__ must not go `docker exec abc123`
     env.temp_dir = str(tmp_path)
     env.container_id = "abc123"
     env._write_owner_marker()
@@ -158,6 +159,22 @@ def test_owner_marker_records_pid_container_and_host_workspace(tmp_path):
     assert int(pid) == os.getpid()
     assert container == "abc123"
     assert host == str(tmp_path)
+
+
+def test_del_never_shells_out_while_the_interpreter_is_finalizing(monkeypatch, tmp_path):
+    """A __del__ that runs `docker exec` at shutdown fails the process without failing a
+    test: the exception escapes finalization and sets the exit code, so CI goes red while
+    the summary still reads all-passed. Cheap to get wrong again, so pin it."""
+    env = DockerREPL.__new__(DockerREPL)
+    env.temp_dir = str(tmp_path)
+    env.container_id = "abc123"
+    ran = []
+    monkeypatch.setattr(dr.subprocess, "run", lambda *a, **k: ran.append(a))
+    monkeypatch.setattr(dr.shutil, "rmtree", lambda *a, **k: ran.append(a))
+    monkeypatch.setattr(dr.sys, "is_finalizing", lambda: True)
+
+    env.__del__()
+    assert ran == [], "touched docker or the filesystem during interpreter shutdown"
 
 
 def test_stale_rlms_install_is_refused_loudly(monkeypatch):
