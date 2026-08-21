@@ -13,6 +13,12 @@ root_model_override: claude-opus-4-8   # override for the hardest tasks (1M ctx)
 sub_model: claude-haiku-4-5            # cheap sub-LLM for chunk work (200K ctx)
 max_depth: 2
 max_iterations: 20
+query_timeout_s: 1800                  # wall-clock ceiling for ONE rlm_query. max_iterations
+                                       # alone bounds nothing useful: 20 x cli_timeout_s 600 is
+                                       # over three hours. The engine enforces it and returns the
+                                       # best partial answer. 0 = unlimited.
+query_max_errors: 5                    # consecutive failed iterations before the engine stops and
+                                       # returns the best partial answer. 0 = unlimited.
 max_output_tokens: 32768
 sandbox: docker                        # docker (default, sandboxed) | local (host exec — documented risk).
                                        # Override per-launch with RLM_SANDBOX=local (e.g. when no
@@ -26,9 +32,15 @@ report_cost: false                     # OFF by default. The rate table covers A
                                        # and the claude-CLI path under-counts input tokens — so a "$"
                                        # figure would be confidently wrong. Enable only when your
                                        # models are priced in src/config.py COST_PER_MTOK.
-sub_context_tokens: 200000             # context ceiling of sub_model (200K = Haiku). MUST match the
-                                       # configured sub_model — Gemini/OpenAI differ, and this gates
-                                       # whether rlm_sub_query refuses and whether reduce is skipped.
+sub_context_tokens: 0                  # context ceiling of sub_model. 0 = DERIVE it from the
+                                       # engine's own model table (rlm/utils/token_utils.py), so
+                                       # this stops being a second copy of that knowledge that has
+                                       # to be kept in sync by hand. Any non-zero value overrides.
+                                       # Derivation is CAPPED at 200K on purpose: a model's window
+                                       # is a ceiling, not a target. This server scans oversized
+                                       # input rather than stuffing it into the prompt, and a
+                                       # near-window sub-query is worse than chunking the same
+                                       # bytes. Raise it explicitly only with evidence.
 output_cap_bytes: 4096                 # raw-content tools (load/inspect/chunk/grep/read/list/exec/status)
 answer_cap_bytes: 131072               # synthesis tools (rlm_query/sub_query) — the answer is the deliverable
 chunk_strategy: lines                  # lines | paragraphs | functions | headings | semantic | files

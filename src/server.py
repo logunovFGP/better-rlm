@@ -428,6 +428,17 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
     sub_model = models.select(CFG, models.Role.SUB)
     text = STORE.read_text(ctx_id)
     res = run_query(CFG, text, question, root_model, sub_model)
+    if res.get("limit"):
+        # ERROR-prefixed so logsetup records outcome=error; the partial answer still
+        # travels, because a stopped run that found something is not a dead loss.
+        partial = res["answer"]
+        return _answer(
+            f"ERROR: rlm_query stopped on {res['limit']} — {res['limit_detail']}\n"
+            + (f"\n--- best answer before the limit ---\n{partial}\n" if partial
+               else "\nNo partial answer was available.\n")
+            + "\nRaise query_timeout_s / query_max_errors in config.yaml, or narrow the "
+              "question. rlm_exec and rlm_grep need no model call at all."
+        )
     rows = "\n".join(
         f"  - {r['model']}: {r['calls']} calls, "
         f"{r['input_tokens']:,} in / {r['output_tokens']:,} out"
