@@ -38,6 +38,20 @@ _SKIP_DIRS = {".git", ".hg", ".svn", "__pycache__", "node_modules",
 _SKIP_NAMES = {".env", ".env.local", "id_rsa", "id_ed25519", ".netrc", ".pgpass"}
 _MAX_DIR_FILE_BYTES = 25 * 1024 * 1024  # skip individual files larger than this in dir loads
 
+#: Skips that are the POINT of _SKIP_DIRS / _SKIP_NAMES, not a surprise. Reporting
+#: these as loudly as an unexpected drop makes the warning fire on every JS or Python
+#: project, and an alarm that always fires is one nobody reads -- which would defeat
+#: the fix for the case it exists for (11 source files silently classified binary).
+_EXPECTED_SKIPS = frozenset({"skip-dir", "skip-name"})
+
+
+def _count_reasons(entries: list[str]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for e in entries:
+        k = e.split(":", 1)[0]
+        out[k] = out.get(k, 0) + 1
+    return out
+
 
 @dataclass
 class ContextMeta:
@@ -53,9 +67,14 @@ class ContextMeta:
     file_count: int
     files: list[str]
     created: str
-    #: Files load_dir did NOT ingest, as "reason: relpath". Silence here was the
-    #: defect: a dir load reported success having dropped 11 of 184 files, and an
-    #: answer over the remaining 173 was wrong by omission with nothing to show it.
+    #: Exact count per skip reason -- always complete, and cheap. Silence here was
+    #: the defect: a dir load reported success having dropped 11 of 184 files, and
+    #: an answer over the remaining 173 was wrong by omission with nothing to show.
+    skipped_counts: dict[str, int] = field(default_factory=dict)
+    #: A bounded SAMPLE of skipped paths, biased to the surprising reasons. Bounded
+    #: because `skipped` was briefly unbounded and a tree with node_modules wrote
+    #: 3,000 entries / 128 KB of meta.json for a context holding one 20-byte file --
+    #: and list_metas() parses every meta.json. `files` caps at 100 for the same reason.
     skipped: list[str] = field(default_factory=list)
     chunk_strategy: Optional[str] = None
     chunks: list[dict] = field(default_factory=list)
@@ -266,7 +285,9 @@ class ContextStore:
             content_path=str(content_path), bytes=0, lines=0, est_tokens=0, sha256="",
             file_count=len(files), files=files[:100],
             created=datetime.now(timezone.utc).isoformat(),
-            skipped=skipped,
+            skipped_counts=_count_reasons(skipped),
+            # surprising reasons first: those are the ones that cost an answer
+            skipped=sorted(skipped, key=lambda e: e.split(":", 1)[0] in _EXPECTED_SKIPS)[:50],
         )
         return self._finalize(meta)
 
