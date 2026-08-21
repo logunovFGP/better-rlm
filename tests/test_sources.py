@@ -103,6 +103,16 @@ def test_bare_dollar_is_not_treated_as_an_env_reference(tmp_path):
     resolve(src)   # must not raise
 
 
+def test_windows_path_survives_the_split_but_quoting_still_groups(tmp_path):
+    # shlex.split() reads every backslash as an escape and drops it, so C:\tools\x.exe
+    # reached Popen as C:toolsx.exe and died with WinError 2 — which is exactly how PY, an
+    # absolute Windows path, arrived mangled in every command test in this file. Quote
+    # grouping still has to hold, or -H "Authorization: Bearer ..." splits into three.
+    body = "s:\n  command: 'C:\\tools\\x.exe -H \"Bearer abc\" --p={v}'\n"
+    src = load_sources(_registry(tmp_path, body))["s"]
+    assert src.command == ("C:\\tools\\x.exe", "-H", "Bearer abc", "--p={v}")
+
+
 # --- credential handoff ----------------------------------------------------
 def test_missing_credential_file_tells_the_user_to_supply_one(tmp_path):
     src = load_sources(_registry(tmp_path, f"""
