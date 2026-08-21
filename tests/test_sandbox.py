@@ -175,6 +175,10 @@ def test_del_never_shells_out_while_the_interpreter_is_finalizing(monkeypatch, t
 
     env.__del__()
     assert ran == [], "touched docker or the filesystem during interpreter shutdown"
+    # Marked only now: cleanup() has to be live for the assertion above to mean anything,
+    # but once monkeypatch lifts the stubs a collection would run the real `docker exec
+    # abc123`, which is what stalled the Windows job for the run that added this test.
+    env._cleaned_up = True
 
 
 def test_stale_rlms_install_is_refused_loudly(monkeypatch):
