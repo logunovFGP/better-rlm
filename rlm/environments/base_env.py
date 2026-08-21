@@ -194,24 +194,6 @@ class SupportsCustomTools(Protocol):
     custom_tools: dict[str, Any]
 
 
-# --- better-rlm ------------------------------------------------------------
-#: Attribute a backend sets on an exception to say "this failure is a property of
-#: the session, not of this prompt" — an expired login, an exhausted quota. Every
-#: batched fan-out below stops on it instead of reissuing the identical doomed
-#: call once per prompt (measured: 20 chunks, 20 identical auth failures).
-FATAL_SUBCALL_ATTR = "is_fatal_subcall"
-
-
-def aborts_batch(exc: BaseException) -> bool:
-    """True when one sub-call failure condemns the whole batch.
-
-    Duck-typed on purpose: the engine never imports the backend that raised, it
-    only honours the documented attribute. See FATAL_SUBCALL_ATTR.
-    """
-    return bool(getattr(exc, FATAL_SUBCALL_ATTR, False))
-# ---------------------------------------------------------------------------
-
-
 class BaseEnv(ABC):
     """
     Base REPL-like environment that the RLM uses to interact with. The primary types are isolated and non-isolated,
