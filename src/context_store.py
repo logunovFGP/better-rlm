@@ -9,6 +9,7 @@ and directory concatenations are materialized under the context's own dir.
 from __future__ import annotations
 
 import hashlib
+import codecs
 import json
 import os
 import re
@@ -52,6 +53,10 @@ class ContextMeta:
     file_count: int
     files: list[str]
     created: str
+    #: Files load_dir did NOT ingest, as "reason: relpath". Silence here was the
+    #: defect: a dir load reported success having dropped 11 of 184 files, and an
+    #: answer over the remaining 173 was wrong by omission with nothing to show it.
+    skipped: list[str] = field(default_factory=list)
     chunk_strategy: Optional[str] = None
     chunks: list[dict] = field(default_factory=list)
 
@@ -85,12 +90,21 @@ def _stat_path(path: Path) -> tuple[int, int, str]:
 
 
 def _looks_binary(path: Path) -> bool:
+    """Heuristic: a NUL byte in the first KB means binary.
+
+    The decode uses an INCREMENTAL decoder because a fixed-size byte read can end
+    mid-character. A plain ``chunk.decode("utf-8")`` then raises UnicodeDecodeError
+    on a perfectly valid UTF-8 file, which load_dir read as "binary" and dropped in
+    silence. Measured: a .ts file whose em-dash sat at byte 1022 was classified
+    binary; the same file with the character one byte earlier was not. An
+    incremental decoder buffers the partial tail instead of failing on it.
+    """
     try:
         with open(path, "rb") as fh:
             chunk = fh.read(1024)
-        chunk.decode("utf-8")
+        codecs.getincrementaldecoder("utf-8")().decode(chunk)
         return b"\x00" in chunk
-    except UnicodeDecodeError:
+    except UnicodeDecodeError:   # genuinely not UTF-8 in the first KB
         return True
     except OSError:
         return True
@@ -209,19 +223,39 @@ class ContextStore:
         content_path = self._dir(ctx_id) / "content.txt"
         content_path.parent.mkdir(parents=True, exist_ok=True)
         files: list[str] = []
+        skipped: list[str] = []
+
+        def _rel(p: Path) -> str:
+            try:
+                return str(p.relative_to(root))
+            except ValueError:
+                return str(p)
+
         # newline="": see load_text — the concatenated dump must keep the newlines the
         # source files actually had, not the host's.
         with open(content_path, "w", encoding="utf-8", newline="") as out:
             for fp in sorted(root.glob("**/*")):
                 if not fp.is_file():
                     continue
-                if any(part in _SKIP_DIRS for part in fp.parts) or fp.name in _SKIP_NAMES:
+                # Every skip below is RECORDED. Dropping a file silently and still
+                # reporting success is how a tenancy question got answered from a
+                # tree with tenancy.ts missing.
+                if any(part in _SKIP_DIRS for part in fp.parts):
+                    skipped.append(f"skip-dir: {_rel(fp)}")
+                    continue
+                if fp.name in _SKIP_NAMES:
+                    skipped.append(f"skip-name: {_rel(fp)}")
                     continue
                 try:
-                    if fp.stat().st_size > _MAX_DIR_FILE_BYTES or _looks_binary(fp):
+                    if fp.stat().st_size > _MAX_DIR_FILE_BYTES:
+                        skipped.append(f"too-large: {_rel(fp)}")
+                        continue
+                    if _looks_binary(fp):
+                        skipped.append(f"binary: {_rel(fp)}")
                         continue
                     body = fp.read_text(encoding="utf-8", errors="replace")
-                except OSError:
+                except OSError as exc:
+                    skipped.append(f"unreadable ({type(exc).__name__}): {_rel(fp)}")
                     continue
                 rel = str(fp.relative_to(root))
                 out.write(FILE_SEP.format(path=rel, size=len(body.encode("utf-8"))))
@@ -232,6 +266,7 @@ class ContextStore:
             content_path=str(content_path), bytes=0, lines=0, est_tokens=0, sha256="",
             file_count=len(files), files=files[:100],
             created=datetime.now(timezone.utc).isoformat(),
+            skipped=skipped,
         )
         return self._finalize(meta)
 

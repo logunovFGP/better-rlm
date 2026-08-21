@@ -80,6 +80,31 @@ def _cost_note(model: str, itok: int, otok: int) -> str:
     return f"  |  cost: ${cost_usd(model, itok, otok):.4f}"
 
 
+def _skipped_block(meta) -> str:
+    """Loud when a dir load did not ingest everything.
+
+    A partial load that reports success is worse than a failed one: an answer over
+    the remaining files is wrong BY OMISSION, and nothing in the output contradicts
+    it. Observed: 173 of 184 files loaded, the 11 missing ones the exact subject of
+    the question being asked.
+    """
+    skipped = getattr(meta, "skipped", None) or []
+    if not skipped:
+        return ""
+    reasons: dict[str, int] = {}
+    for entry in skipped:
+        reasons[entry.split(":", 1)[0]] = reasons.get(entry.split(":", 1)[0], 0) + 1
+    total = meta.file_count + len(skipped)
+    head = (f"\n- ⚠ **INCOMPLETE — {len(skipped)} of {total} file(s) were NOT loaded** "
+            f"({', '.join(f'{k} x{v}' for k, v in sorted(reasons.items()))}).\n"
+            "  Any answer from this context is wrong by omission if it needed one of them:\n")
+    shown = skipped[:20]
+    body = "".join(f"    {e}\n" for e in shown)
+    if len(skipped) > len(shown):
+        body += f"    … and {len(skipped) - len(shown)} more\n"
+    return head + body.rstrip("\n")
+
+
 def _meta_block(meta) -> str:
     return (
         f"**ctx_id:** `{meta.ctx_id}`\n"
@@ -87,6 +112,7 @@ def _meta_block(meta) -> str:
         f"- size: {meta.bytes:,} bytes, {meta.lines:,} lines, ~{meta.est_tokens:,} tokens\n"
         f"- files: {meta.file_count}\n"
         f"- sha256: {meta.sha256[:16]}…"
+        + _skipped_block(meta)
     )
 
 
