@@ -20,11 +20,12 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import textwrap
 from itertools import islice
 
 from mcp.server.fastmcp import FastMCP
 
-from . import auth, models, sources
+from . import auth, models, sources, transport
 from .chunking import STRATEGIES, chunk_text
 from .config import (
     PROVIDER_KEY_ENV,
@@ -631,13 +632,45 @@ def rlm_status(probe: bool = False) -> str:
         f"- loaded contexts ({len(ids)}): {', '.join(ids[:20]) or 'none'}\n"
         f"- store dir: {CFG.store_dir}\n"
         f"- sources: {src_line}  (registry: {CFG.sources_file})"
+        f"{_cli_login_line()}"
         f"{_auth_probe_line() if probe else ''}"
     )
 
 
+def _cli_login_line() -> str:
+    """Is the `claude` CLI logged in? FREE (no model call, ~215 ms) and it answers the
+    one question every other line here can be right about while the login is dead.
+
+    Always shown, because the failure it catches is invisible otherwise: being signed
+    in to Claude Code does not sign in the CLI, and nothing else in this report says so.
+    """
+    if resolve_auth_mode_safe() != "oauth":
+        return ""                                  # SDK path: no CLI login involved
+    st = transport.cli_auth_status(CFG)
+    if st is None:
+        return "\n- cli login: UNKNOWN — could not run `claude auth status`"
+    if st.get("loggedIn"):
+        return (f"\n- cli login: ok (method: {st.get('authMethod', '?')}, "
+                f"provider: {st.get('apiProvider', '?')})")
+    return ("\n- cli login: NOT LOGGED IN — every model-backed tool will fail.\n"
+            + textwrap.indent(transport.AUTH_REMEDIATION, "    "))
+
+
+def resolve_auth_mode_safe() -> str:
+    try:
+        return auth.resolve_auth_mode(CFG)
+    except Exception:                              # noqa: BLE001
+        return "unknown"
+
+
 def _auth_probe_line() -> str:
-    """One real sub-model call — the only thing that distinguishes 'configured' from
-    'working'. Never raises: a probe that explodes tells you less than one that reports."""
+    """One real sub-model call — proves the transport end to end. Skipped when the free
+    check above already knows the login is dead: paying for a call whose answer is
+    already known is the same waste the batch fail-fast exists to stop."""
+    if resolve_auth_mode_safe() == "oauth":
+        st = transport.cli_auth_status(CFG)
+        if st is not None and not st.get("loggedIn"):
+            return "\n- auth probe: SKIPPED — cli login is dead, a probe would only confirm it"
     try:
         res = sub_query("Reply with exactly: ok",
                         models.select(CFG, models.Role.SUB), max_tokens=16)

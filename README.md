@@ -601,9 +601,9 @@ A transport **Strategy** (`src/transport.py`) decides *how* each model call is m
 **`mode`** (`config.yaml` or the `RLM_MODE` env var):
 
 - **`claude-cli`** — drives the official `claude` CLI (`claude -p`) for every completion; it does
-  **not** call the HTTP API. Authenticates from your existing Claude Code login (keychain), so
-  there is nothing to set up. A `CLAUDE_CODE_OAUTH_TOKEN` in the env is still honored, e.g. for a
-  headless box with no keychain.
+  **not** call the HTTP API. Authenticates from the **`claude` CLI's own login** (keychain), so
+  usually there is nothing to set up. A `CLAUDE_CODE_OAUTH_TOKEN` in the env is still honored, e.g.
+  for a headless box with no keychain.
 - **`api`** — calls go over the Anthropic SDK using `ANTHROPIC_API_KEY`.
 - **`auto`** (default) — prefer the `claude` CLI when installed; otherwise fall back to
   `ANTHROPIC_API_KEY`.
@@ -611,6 +611,31 @@ A transport **Strategy** (`src/transport.py`) decides *how* each model call is m
 The function interface is identical in every mode; only the transport swaps, and all of them run
 behind the same throttle and auth-aware retry. If no transport is available the server **fails
 fast** with a clear message rather than half-working.
+
+#### Being signed in to Claude Code is NOT the same as the CLI being logged in
+
+This is the one auth trap worth knowing, because every other line of `rlm_status` can be
+correct while it bites. Claude Code (and the desktop app) hold their **own** credential for the
+host session. A nested `claude -p` cannot borrow it — measured with the delegation env both
+stripped and left fully intact, identical `OAuth session expired` either way. The CLI needs a
+login of its own, and when its token expires a headless refresh cannot complete interactive
+OAuth, so it simply stays dead.
+
+`rlm_status` now answers this directly, free and with no model call — it shells out to
+`claude auth status --json` (~215 ms):
+
+```
+- cli login: NOT LOGGED IN — every model-backed tool will fail.
+    1. `claude auth login`   — interactive; refreshes the CLI login
+    2. `claude setup-token`  — long-lived token; put it in CLAUDE_CODE_OAUTH_TOKEN
+    3. ANTHROPIC_API_KEY + `mode: api`
+```
+
+Option 2 is the durable one for a server you leave running: a long-lived token does not
+depend on an interactive refresh that a background process cannot perform. The same
+remediation is attached to every auth failure, so a failed `rlm_sub_query_batch` tells you how
+to fix it instead of only that it broke. With the login dead, `probe=True` skips its call
+rather than spending one to confirm what the free check already established.
 
 ### Model selection
 
