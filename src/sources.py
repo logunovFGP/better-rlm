@@ -113,7 +113,17 @@ def _parse_one(name: str, raw: object) -> Source:
         raise ValueError(f"source {name!r} must be a mapping, got {type(raw).__name__}")
     cmd = raw.get("command")
     if isinstance(cmd, str):
-        argv = shlex.split(cmd)
+        # NOT shlex.split(): in posix mode it reads backslash as an escape and eats it, so
+        # a Windows command turns into C:toolsx.exe and the run dies with WinError 2. Only
+        # .escape is cleared, rather than dropping posix mode, because posix=False keeps
+        # the quote characters inside the token and would break a header argument like
+        # -H "Authorization: Bearer ${TOKEN}". Quoting, not backslashes, is how a value
+        # with a literal space gets through - on every platform, so the registry means the
+        # same thing wherever the server runs.
+        lex = shlex.shlex(cmd, posix=True)
+        lex.whitespace_split = True
+        lex.escape = ""
+        argv = list(lex)
     elif isinstance(cmd, list) and all(isinstance(x, str) for x in cmd):
         argv = list(cmd)
     else:
