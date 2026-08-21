@@ -18,12 +18,27 @@ pre-push hook runs: `scripts/githooks/pre-push`, wired up by the installers via
 
 ## Patching the vendored engine
 
-The `rlms` dependency is pinned and its internals are patched from `src/`, never
-in `site-packages` — see `src/auth.py:patch_engine` (transport/auth) and
-`src/sandbox_patch.py:patch_sandbox` (Docker REPL exec protocol). Both are
-idempotent, guarded by an `_rlmmcp_patched` flag on the target module. A patch
-that string-matches vendored source must fail loudly when the match is gone, so a
-version bump surfaces as an error instead of a silent no-op.
+The engine is **vendored source at `./rlm`**, not a dependency — copied from
+`alexzhang13/rlm` at `v0.1.3`, provenance and the upstream-merge recipe in
+`rlm/UPSTREAM.md`. Engine fixes are ordinary edits there; `import rlm` resolves to
+this copy (`rlms` is no longer installed).
+
+One import-time patch remains, and it is not a workaround: `src/auth.py:patch_engine`
+rebinds the engine's `AnthropicClient` so completions route through our transport,
+throttle and retry. That is dependency injection — folding it into `rlm/` would make
+the engine import from `src/`, inverting the dependency and breaking the engine's
+standalone use. It stays. It is idempotent, guarded by an `_rlmmcp_patched` flag.
+
+The Docker REPL exec-protocol fixes that used to live in `src/sandbox_patch.py` are
+now the engine's own code (`rlm/environments/docker_repl.py`): the hardened result
+marker, the capped `locals` echo, the atomic `state.dill` write, the state-load
+warning, UTF-8 host writes, and a real `timeout_s`. `tests/test_sandbox.py::
+test_template_still_carries_every_hardening` is the regression guard that replaced
+the old fail-loudly string match — an upstream merge that reverts the template fails
+there. What is left of that module is `src/sandbox_reap.py`, host-side housekeeping
+that sweeps sandboxes abandoned by a dead server.
+
+**Fix engine defects in `rlm/` directly. Do not add a new monkey-patch.**
 
 ## Running server, files on disk
 

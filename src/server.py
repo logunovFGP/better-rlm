@@ -503,6 +503,11 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
     if errs:
         log_event(LOG, "sub_batch", phase="map", chunks=len(prompts),
                   errors=len(errs), err_sample=errs[0].error)
+    # Every chunk failed: that is a failed tool call, not a result with notes.
+    # Returning the usual success string here is exactly how a dead login reads
+    # back as "no findings". The ERROR prefix is what logsetup maps to outcome=error.
+    if errs and len(errs) == len(results):
+        return _bound(f"ERROR: all {len(results)} chunk(s) failed — {errs[0].error}")
 
     note = ""
     if max_chunks > 0 and max_chunks < n:
@@ -579,9 +584,14 @@ def rlm_exec(code: str, ctx_id: str = "") -> str:
 
 @mcp.tool()
 @logged_tool
-def rlm_status() -> str:
+def rlm_status(probe: bool = False) -> str:
     """Report configuration, the active auth + model-selection strategy with the
-    RESOLVED models, loaded contexts, and sandbox/Docker availability."""
+    RESOLVED models, loaded contexts, and sandbox/Docker availability.
+
+    probe=True additionally spends one tiny sub-model call to prove the transport
+    can actually authenticate. Off by default because it costs a call; worth it
+    the moment anything returns an auth error, since every line below can be
+    correct while the login itself is dead."""
     docker_ok = shutil.which("docker") is not None
     claude_cli = shutil.which(CFG.cli_path)
     creds = auth.auth_status()  # which explicit credential exists (display only)
@@ -621,7 +631,21 @@ def rlm_status() -> str:
         f"- loaded contexts ({len(ids)}): {', '.join(ids[:20]) or 'none'}\n"
         f"- store dir: {CFG.store_dir}\n"
         f"- sources: {src_line}  (registry: {CFG.sources_file})"
+        f"{_auth_probe_line() if probe else ''}"
     )
+
+
+def _auth_probe_line() -> str:
+    """One real sub-model call — the only thing that distinguishes 'configured' from
+    'working'. Never raises: a probe that explodes tells you less than one that reports."""
+    try:
+        res = sub_query("Reply with exactly: ok",
+                        models.select(CFG, models.Role.SUB), max_tokens=16)
+    except Exception as exc:                      # noqa: BLE001 - report, never raise
+        return f"\n- auth probe: FAILED — {type(exc).__name__}: {exc}"
+    if res.error:
+        return f"\n- auth probe: FAILED — {res.error}"
+    return f"\n- auth probe: ok — sub-model replied {res.answer.strip()[:20]!r}"
 
 
 def main() -> None:

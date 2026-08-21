@@ -49,6 +49,18 @@ def _is_rate_limit(exc: BaseException) -> bool:
     )
 
 
+def is_fatal_auth(exc: BaseException) -> bool:
+    """Auth itself is dead — a property of the login, not of this one call.
+
+    Retrying cannot help and neither can the next chunk, so batch callers abort on
+    it rather than reproducing the identical failure N times.
+    """
+    return (
+        isinstance(exc, anthropic.AuthenticationError)
+        or bool(getattr(exc, "is_fatal_subcall", False))
+    )
+
+
 def _retry_after_seconds(exc: BaseException) -> float:
     try:
         ra = exc.response.headers.get("retry-after")  # type: ignore[attr-defined]
