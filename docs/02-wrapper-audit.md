@@ -11,7 +11,7 @@ One file, `src/server.py` (341 lines), `FastMCP` + 5 task tools.
 | API key | `OPENROUTER_API_KEY` | → `ANTHROPIC_API_KEY` |
 | Sandbox | `environment="local"` (host exec; README admits "no additional sandboxing") | → `environment="docker"` (custom `rlm-sandbox` image) |
 | MCP SDK | `mcp>=1.0.0` (unpinned) | → pinned `mcp==1.28.1` |
-| Engine install | README: `git clone … && pip install -e .` | → `pip install rlms==0.1.3` (now on PyPI) |
+| Engine install | README: `git clone … && pip install -e .` | → `pip install rlms==0.1.3`; **since superseded — vendored at `./rlm`, see `rlm/UPSTREAM.md`** |
 | Tool surface | `rlm_execute / rlm_analyze / rlm_code / rlm_decompose / rlm_status` | expanded to 12 (load/inspect/chunk/query/sub_query[_batch]/exec/vars/answer/status) |
 | Oversized inputs | context passed as an **inline string arg** → flows through the caller's context | **external on-disk store** + bounded ~4 KB output |
 

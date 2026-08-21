@@ -32,7 +32,7 @@ engine. Everything below is the gap between a working demo and something you'd l
 
 | | Upstream wrapper | **better-rlm** |
 |---|---|---|
-| **Runs at all** | Errors on `rlms 0.1.3` — the `litellm` backend was removed from the engine | Pinned to `rlms==0.1.3` / `mcp==1.28.1` on the `anthropic` backend |
+| **Runs at all** | Errors on `rlms 0.1.3` — the `litellm` backend was removed from the engine | Engine vendored at `./rlm` (from `v0.1.3`) on the `anthropic` backend, `mcp==1.28.1` |
 | **Setup cost** | OpenRouter account + `OPENROUTER_API_KEY` | **Nothing.** Reuses the Claude Code login you already have |
 | **Model-written Python** | `environment="local"` — executed **on your host** | **Docker sandbox by default**, credentials never enter the container |
 | **Context handling** | Passed as an inline string | External on-disk store; tool output bounded so a big result can't blow up the session |
@@ -637,7 +637,7 @@ Role→model mapping lives in one place — `src/models.py` — not hardcoded ac
 - **This exists for remote deploys.** A container has no keychain for the `claude` CLI to read, so
   `anthropic` + OAuth cannot work there; a keyed provider can.
 
-No per-vendor code is maintained here: the pinned `rlms` engine already ships clients for all of
+No per-vendor code is written by hand: the vendored engine at `./rlm` already ships clients for all of
 the above, so a non-Anthropic provider reuses *its* client through one adapter
 (`transport.EngineClientTransport`) and gains only our shared throttle and 429 retry. Anthropic
 keeps two dedicated transports (`CliTransport`, `ApiTransport`) precisely because it's the odd one

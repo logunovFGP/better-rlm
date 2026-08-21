@@ -846,10 +846,15 @@ name = "rlm-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anthropic" },
+    { name = "google-genai" },
     { name = "mcp" },
+    { name = "openai" },
+    { name = "portkey-ai" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
-    { name = "rlms" },
+    { name = "requests" },
+    { name = "rich" },
 ]
 
 [package.optional-dependencies]
@@ -862,33 +867,19 @@ pdf = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anthropic", specifier = ">=0.75.0" },
+    { name = "google-genai", specifier = ">=1.56.0" },
     { name = "mcp", specifier = "==1.28.1" },
+    { name = "openai", specifier = ">=2.14.0" },
+    { name = "portkey-ai", specifier = ">=2.1.0" },
     { name = "pypdf", marker = "extra == 'pdf'", specifier = ">=4.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "rlms", specifier = "==0.1.3" },
+    { name = "requests", specifier = ">=2.32.5" },
+    { name = "rich", specifier = ">=13.0.0" },
 ]
 provides-extras = ["pdf", "dev"]
-
-[[package]]
-name = "rlms"
-version = "0.1.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "anthropic" },
-    { name = "google-genai" },
-    { name = "openai" },
-    { name = "portkey-ai" },
-    { name = "pytest" },
-    { name = "python-dotenv" },
-    { name = "requests" },
-    { name = "rich" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/28/0c/0114c2beda479e4a1a1c93d6d151df16da73f494ebe538cc333230df3eaf/rlms-0.1.3.tar.gz", hash = "sha256:00fa074b2c7bf5acf0607120e4dbfc58679365fbbceed96dff2af28577ca23e9", size = 132760, upload-time = "2026-06-26T01:03:24.505Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/31/80/267c5eb2599399e931c847e03b414911f36469d560aca067792347b7900d/rlms-0.1.3-py3-none-any.whl", hash = "sha256:fac541ff745242540fee47b6e41a74c847fd7022091330dad7844d413eb5944f", size = 111774, upload-time = "2026-06-26T01:03:23.278Z" },
-]
 
 [[package]]
 name = "rpds-py"
