@@ -23,18 +23,58 @@ _LOG = logging.getLogger("rlm-mcp")
 
 
 def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        return _pid_alive_windows(pid)
     try:
         os.kill(pid, 0)
     except PermissionError:  # exists, owned by another user — must precede OSError
         return True
     except OSError:
-        # POSIX raises ProcessLookupError (an OSError subclass) for ESRCH. Windows has no
-        # ESRCH mapping: os.kill(pid, 0) goes through OpenProcess, so an unknown or
-        # out-of-range pid surfaces as a bare OSError (WinError 87). Catching only
-        # ProcessLookupError let that escape and made reap_orphans raise on Windows
-        # instead of sweeping. Either way the process is unreachable — treat it as gone.
+        # POSIX raises ProcessLookupError (an OSError subclass) for ESRCH. Either way
+        # the process is unreachable — treat it as gone.
         return False
     return True
+
+
+def _pid_alive_windows(pid: int) -> bool:
+    """Ask whether a pid exists WITHOUT signalling it.
+
+    os.kill(pid, 0) is not a probe on Windows. signal.CTRL_C_EVENT is 0, so CPython
+    routes signal 0 to GenerateConsoleCtrlEvent, which delivers a Ctrl+C to the console
+    process group ``pid`` rather than asking whether that pid exists. reap_orphans calls
+    this once per owner marker at startup, so on Windows the sweep was firing console
+    interrupts at whatever group ids it read out of stale markers — and misreporting
+    liveness besides. It surfaced as a KeyboardInterrupt landing in an unrelated test
+    thirty tests after the call that queued it.
+
+    OpenProcess + WaitForSingleObject instead: a handle that has not signalled belongs to
+    a process that has not exited. GetExitCodeProcess would be shorter and wrong — it
+    cannot tell a live process from one that exited with 259 (STILL_ACTIVE).
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    SYNCHRONIZE = 0x0010_0000                    # WaitForSingleObject needs this, not query
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    ERROR_ACCESS_DENIED = 5
+    WAIT_TIMEOUT = 0x102
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    k32.WaitForSingleObject.restype = wintypes.DWORD
+    k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+    handle = k32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # Access denied is the Windows spelling of the PermissionError branch above: the
+        # process is there, it just is not ours. Anything else means no such pid.
+        return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+    try:
+        return k32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+    finally:
+        k32.CloseHandle(handle)
 
 
 def workspace_root() -> str:

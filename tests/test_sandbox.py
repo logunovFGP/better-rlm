@@ -113,13 +113,13 @@ def test_exec_timeout_is_configurable_and_defaults(monkeypatch):
 
 
 def test_reap_removes_dead_owners_and_keeps_live_ones(tmp_path, monkeypatch):
-    dead_pid = 999_999_999  # assert it is really absent rather than assume
-    # POSIX signals ESRCH -> ProcessLookupError; Windows has no such mapping and
-    # OpenProcess on an out-of-range pid surfaces as OSError (WinError 87). Keep the
-    # narrow assertion where the platform supports it rather than widening both.
-    absent = OSError if sys.platform == "win32" else ProcessLookupError
-    with pytest.raises(absent):
-        os.kill(dead_pid, 0)
+    # Absence is asserted through the module's own probe, never os.kill(pid, 0): on
+    # Windows signal 0 is CTRL_C_EVENT, so that call delivers a console Ctrl+C to the
+    # process group instead of answering the question. It queued a KeyboardInterrupt
+    # that landed thirty tests later, inside an unrelated subprocess launch.
+    dead_pid = 999_999_999
+    assert not reap._pid_alive(dead_pid), "pid must really be absent, not assumed"
+    assert reap._pid_alive(os.getpid()), "the probe must recognise a live process"
 
     live = tmp_path / "docker_repl_live"
     dead = tmp_path / "docker_repl_dead"
@@ -137,6 +137,21 @@ def test_reap_removes_dead_owners_and_keeps_live_ones(tmp_path, monkeypatch):
     assert live.exists()          # owned by this very process
     assert fresh.exists()         # no marker, but too young to call an orphan
     assert calls == [["docker", "rm", "-f", "no-such-container"]]
+
+
+def test_liveness_probe_never_signals_the_process_it_asks_about(monkeypatch):
+    """os.kill(pid, 0) is a liveness probe on POSIX and a console Ctrl+C on Windows,
+    where signal.CTRL_C_EVENT == 0. reap_orphans calls the probe once per owner marker
+    at startup, so on Windows the old implementation interrupted process groups it read
+    out of stale markers. Anything that reintroduces os.kill there must fail here."""
+    if os.name != "nt":
+        return  # os.kill IS the right call on POSIX; nothing to guard
+
+    signalled = []
+    monkeypatch.setattr(reap.os, "kill", lambda *a: signalled.append(a))
+    assert reap._pid_alive(os.getpid())
+    assert not reap._pid_alive(999_999_999)
+    assert signalled == [], "the probe signalled instead of asking"
 
 
 def test_reap_sweep_never_raises(monkeypatch, tmp_path):
