@@ -24,6 +24,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import threading
@@ -863,4 +864,11 @@ class DockerREPL(NonIsolatedEnv):
         return False
 
     def __del__(self):
+        # Never spawn a subprocess while the interpreter is tearing down. Thread creation
+        # can fail there, and an exception escaping finalization sets the process exit
+        # code even when nothing actually went wrong: Windows CI printed "164 passed"
+        # and exited 1, from a KeyboardInterrupt raised inside subprocess.run in here.
+        # Explicit cleanup() / close() paths (including the shutdown hooks) still run.
+        if sys.is_finalizing():
+            return
         self.cleanup()
