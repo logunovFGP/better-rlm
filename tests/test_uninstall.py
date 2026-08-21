@@ -57,17 +57,18 @@ def test_both_uninstallers_exist():
     assert (ROOT / "uninstall.ps1").is_file()
 
 
-def test_posix_uninstaller_is_executable():
-    # install.sh ships 0755 and is invoked as ./install.sh; a 0644 uninstall.sh would fail
-    # the same way for anyone following the README. Ask git, not the filesystem: Windows
-    # cannot represent the exec bit, so os.stat reports 0o666 even for install.sh, which is
-    # committed 100755 — a stat() check is red on every Windows checkout no matter what
-    # actually landed in the tree. The committed mode is what a cloner gets, so pin that.
-    mode = subprocess.run(
-        ["git", "ls-files", "-s", "--", "uninstall.sh"],
-        cwd=ROOT, capture_output=True, text=True, check=True,
-    ).stdout.split()[0]
-    assert mode == "100755", f"uninstall.sh is committed as {mode}, not 100755"
+def test_every_committed_script_is_executable():
+    # install.sh ships 0755 and is invoked as ./install.sh, so a 0644 one fails for anyone
+    # following the README — and a 0644 hook is simply never run by git, which is what #3
+    # had to fix for scripts/githooks/pre-push. Ask git, not the filesystem: Windows cannot
+    # represent the exec bit, so os.stat reports 0o666 even for a correct install.sh.
+    # The list comes from git too, so a new script is covered without editing this test.
+    out = subprocess.run(["git", "ls-files", "-s", "--", "*.sh", "scripts/githooks/*"],
+                         cwd=ROOT, capture_output=True, text=True, check=True).stdout
+    entries = [line.split(maxsplit=3) for line in out.splitlines()]
+    assert entries, "pathspec matched nothing — it stopped tracking the scripts"
+    non_exec = [path for mode, _sha, _stage, path in entries if mode != "100755"]
+    assert not non_exec, f"committed without the exec bit: {non_exec}"
 
 
 @pytest.mark.parametrize("artefact,token", sorted(POSIX_ARTEFACTS.items()))
