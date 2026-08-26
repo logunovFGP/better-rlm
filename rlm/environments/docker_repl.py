@@ -60,6 +60,45 @@ LOCALS_REPR_CAP = 200
 #: Wall-clock ceiling for one sandbox exec. Overridable per env via
 #: DockerREPL(timeout_s=...); rlm-mcp passes its `sandbox_timeout_s` knob.
 DEFAULT_EXEC_TIMEOUT_S = 300
+
+#: Ceiling for docker *control-plane* calls - starting the container, probing it,
+#: tearing it down. Against a healthy daemon these take about a second; one that
+#: misses this is wedged, not slow, so the cap is generous rather than tuned.
+#:
+#: Unbounded, these calls do not fail - they never return. A full host disk
+#: blocks the VM's writes without erroring, so `docker run` waits forever;
+#: measured at 44 minutes of a silent MCP tool call before this cap existed.
+#: User code keeps DEFAULT_EXEC_TIMEOUT_S, which is allowed to be slow.
+DEFAULT_DOCKER_TIMEOUT_S = 60
+
+
+class DockerUnresponsiveError(RuntimeError):
+    """A docker control-plane call blew its wall-clock ceiling.
+
+    ``is_fatal_subcall`` is the engine's duck-typed contract
+    (``rlm.utils.exceptions.FATAL_SUBCALL_ATTR``): a wedged daemon fails every
+    other chunk the same way, so a batched fan-out aborts here instead of
+    queuing one doomed sandbox per prompt.
+    """
+
+    is_fatal_subcall = True
+
+
+def _docker(argv, timeout, *, text=False):
+    """Run one docker control-plane command under a hard ceiling.
+
+    The ceiling is the entire point: a blocked daemon neither answers nor
+    errors, so without it the caller has nothing to report and no way out.
+    """
+    try:
+        return subprocess.run(argv, capture_output=True, text=text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise DockerUnresponsiveError(
+            f"docker {' '.join(argv[1:3])} did not return within {timeout}s - the "
+            "daemon is wedged, not slow. Most often the host disk is full, which "
+            "blocks the VM's writes without failing them: check `df -h` and "
+            "`docker system df`, then restart Docker."
+        ) from None
 # ---------------------------------------------------------------------------
 
 
@@ -563,48 +602,55 @@ class DockerREPL(NonIsolatedEnv):
         self.proxy_thread = threading.Thread(target=self.proxy_server.serve_forever, daemon=True)
         self.proxy_thread.start()
 
-        # Start Docker container
-        result = subprocess.run(
-            [
-                "docker",
-                "run",
-                "-d",
-                "--rm",
-                "-v",
-                f"{self.temp_dir}:/workspace",
-                "--add-host",
-                "host.docker.internal:host-gateway",
-                self.image,
-                "tail",
-                "-f",
-                "/dev/null",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            self.cleanup()
-            raise RuntimeError(f"Failed to start container: {result.stderr}")
-
-        self.container_id = result.stdout.strip()
-
-        # Install dependencies. dill is optional (falls back to pickle), but
-        # requests is required for llm_query/rlm_query, so verify it imports.
-        subprocess.run(
-            ["docker", "exec", self.container_id, "pip", "install", "-q", "dill", "requests"],
-            capture_output=True,
-        )
-        check = subprocess.run(
-            ["docker", "exec", self.container_id, "python", "-c", "import requests"],
-            capture_output=True,
-            text=True,
-        )
-        if check.returncode != 0:
-            self.cleanup()
-            raise RuntimeError(
-                "Failed to install 'requests' in the docker image; llm_query/rlm_query "
-                f"would not work. Use an image with requests preinstalled. Error: {check.stderr}"
+        # Start Docker container. Every call here is bounded, so a wedged daemon
+        # raises DockerUnresponsiveError instead of parking this thread forever.
+        # One try/except covers the whole block: any failure must tear down the
+        # half-built env before it propagates, or the container is orphaned.
+        try:
+            result = _docker(
+                [
+                    "docker",
+                    "run",
+                    "-d",
+                    "--rm",
+                    "-v",
+                    f"{self.temp_dir}:/workspace",
+                    "--add-host",
+                    "host.docker.internal:host-gateway",
+                    self.image,
+                    "tail",
+                    "-f",
+                    "/dev/null",
+                ],
+                DEFAULT_DOCKER_TIMEOUT_S,
+                text=True,
             )
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to start container: {result.stderr}")
+
+            self.container_id = result.stdout.strip()
+
+            # Install dependencies. dill is optional (falls back to pickle), but
+            # requests is required for llm_query/rlm_query, so verify it imports.
+            # pip gets the exec budget, not the control-plane one: on a generic
+            # image it really does download, and that is work rather than a wedge.
+            _docker(
+                ["docker", "exec", self.container_id, "pip", "install", "-q", "dill", "requests"],
+                self.timeout_s,
+            )
+            check = _docker(
+                ["docker", "exec", self.container_id, "python", "-c", "import requests"],
+                DEFAULT_DOCKER_TIMEOUT_S,
+                text=True,
+            )
+            if check.returncode != 0:
+                raise RuntimeError(
+                    "Failed to install 'requests' in the docker image; llm_query/rlm_query "
+                    f"would not work. Use an image with requests preinstalled. Error: {check.stderr}"
+                )
+        except Exception:
+            self.cleanup()
+            raise
 
         self._write_owner_marker()
 
@@ -837,18 +883,25 @@ class DockerREPL(NonIsolatedEnv):
         # removal of root-owned workspace files from inside the container first,
         # so the host rmtree below doesn't leave permission-denied garbage.
         if getattr(self, "container_id", None):
-            subprocess.run(
-                [
-                    "docker",
-                    "exec",
-                    self.container_id,
-                    "sh",
-                    "-c",
-                    "rm -rf /workspace/* /workspace/.[!.]* 2>/dev/null || true",
-                ],
-                capture_output=True,
-            )
-            subprocess.run(["docker", "rm", "-f", self.container_id], capture_output=True)
+            # Bounded and best-effort: teardown often runs *because* the daemon
+            # is wedged, and it must not become a second hang. Both calls share
+            # one try, so a timeout on the first skips the second rather than
+            # spending the ceiling twice over on a daemon that is already gone.
+            try:
+                _docker(
+                    [
+                        "docker",
+                        "exec",
+                        self.container_id,
+                        "sh",
+                        "-c",
+                        "rm -rf /workspace/* /workspace/.[!.]* 2>/dev/null || true",
+                    ],
+                    DEFAULT_DOCKER_TIMEOUT_S,
+                )
+                _docker(["docker", "rm", "-f", self.container_id], DEFAULT_DOCKER_TIMEOUT_S)
+            except DockerUnresponsiveError:
+                pass
             self.container_id = None
 
         if getattr(self, "proxy_server", None):
