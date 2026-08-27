@@ -14,11 +14,24 @@ about not destroying that file.
 """
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _set_home(monkeypatch, home) -> None:
+    """Point os.path.expanduser at a throwaway HOME on every platform.
+
+    Both vars, because expanduser reads HOME on POSIX and USERPROFILE on Windows.
+    Patching only HOME left the hook reading the developer's REAL ~/.claude.json:
+    on a machine that has rlm registered the fail-open cases blocked and failed,
+    and the detection cases passed for the wrong reason.
+    """
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
 
 
 def _load(name: str, relpath: str):
@@ -47,7 +60,7 @@ def rlm_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
     (home / ".claude.json").write_text(json.dumps({"mcpServers": {"rlm": {}}}), encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
+    _set_home(monkeypatch, home)
     return home
 
 
@@ -105,7 +118,7 @@ def test_never_blocks_when_rlm_is_absent(big, tmp_path, monkeypatch):
     home = tmp_path / "bare"
     home.mkdir()
     (home / ".claude.json").write_text(json.dumps({"mcpServers": {"other": {}}}), encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
+    _set_home(monkeypatch, home)
     assert hook.decide({"tool_input": {"file_path": str(big)}}, cwd=str(tmp_path)) == (0, "")
 
 
@@ -113,7 +126,7 @@ def test_unreadable_config_never_blocks(big, tmp_path, monkeypatch):
     home = tmp_path / "broken"
     home.mkdir()
     (home / ".claude.json").write_text("{ not json", encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
+    _set_home(monkeypatch, home)
     assert hook.decide({"tool_input": {"file_path": str(big)}}, cwd=str(tmp_path)) == (0, "")
 
 
@@ -129,7 +142,7 @@ def test_rlm_found_at_local_scope(tmp_path, monkeypatch):
     (home / ".claude.json").write_text(
         json.dumps({"projects": {str(proj): {"mcpServers": {"rlm": {}}}}}), encoding="utf-8"
     )
-    monkeypatch.setenv("HOME", str(home))
+    _set_home(monkeypatch, home)
     assert hook.rlm_configured(str(proj)) is True
 
 
@@ -141,7 +154,7 @@ def test_rlm_found_in_a_committed_mcp_json_above_the_cwd(tmp_path, monkeypatch):
     (repo / "src" / "deep").mkdir(parents=True)
     (home / ".claude.json").write_text("{}", encoding="utf-8")
     (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"rlm": {}}}), encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
+    _set_home(monkeypatch, home)
     assert hook.rlm_configured(str(repo / "src" / "deep")) is True
 
 
@@ -242,7 +255,10 @@ def test_installer_and_uninstaller_agree_on_the_hook():
 def test_place_copies_the_shipped_hook_and_makes_it_executable(tmp_path):
     dst = tmp_path / "hooks" / "big-read-to-rlm.py"
     assert "installed" in registrar.place(str(dst))
-    assert dst.is_file() and dst.stat().st_mode & 0o111, "copied but not executable"
+    assert dst.is_file()
+    # Windows has no exec bit for os.chmod to set; the copy is the whole story there.
+    if os.name != "nt":
+        assert dst.stat().st_mode & 0o111, "copied but not executable"
     assert dst.read_text(encoding="utf-8") == Path(registrar.SOURCE).read_text(encoding="utf-8")
 
 
