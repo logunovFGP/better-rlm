@@ -27,6 +27,9 @@ POSIX_ARTEFACTS = {
     "verify gate": "core.hooksPath",
     "sandbox image": "rlm-sandbox",
     "context store": ".rlm",
+    # POSIX-only for now: install.ps1 has no -Hook, so this is deliberately absent
+    # from WINDOWS_ARTEFACTS rather than missing from it.
+    "oversized-read hook": "install_hook.py",
 }
 WINDOWS_ARTEFACTS = {
     "venv": ".venv_windows",

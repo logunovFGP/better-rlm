@@ -99,7 +99,23 @@ for SRC in "$DIR"/skills/*/; do
   fi
 done
 
-# 3) Verify gate --------------------------------------------------------------
+# 3) Oversized-read hook -----------------------------------------------------
+# Ownership-checked like the registration above: the settings.json entry is removed only
+# when its command names the hook file THIS uninstall deletes. A stale entry left behind
+# is worse than an orphaned symlink - a PreToolUse hook pointing at a missing file fails
+# every Read on the machine, in every project.
+echo "==> Oversized-read hook (~/.claude/settings.json)"
+HOOK_DST="$HOME/.claude/hooks/big-read-to-rlm.py"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "  WARNING: python3 not on PATH - cannot edit settings.json. Remove by hand:"
+  echo "    the PreToolUse entry whose command mentions $HOOK_DST"
+elif [ "$DRY" -eq 1 ]; then
+  python3 "$DIR/scripts/install_hook.py" --remove --dry-run
+else
+  python3 "$DIR/scripts/install_hook.py" --remove
+fi
+
+# 4) Verify gate --------------------------------------------------------------
 echo "==> Verify gate (core.hooksPath)"
 if ! git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1; then
   echo "  not a git checkout — skipped"
@@ -115,7 +131,7 @@ else
   fi
 fi
 
-# 4) Python env + build artefacts --------------------------------------------
+# 5) Python env + build artefacts --------------------------------------------
 # .venv goes too: the pre-push gate and `uv run` recreate it on demand, so removing it
 # costs nothing and leaving it behind contradicts "uninstalled".
 echo "==> Python env + build artefacts"
@@ -128,7 +144,7 @@ for P in .venv_sh .venv rlm_mcp.egg-info; do
   fi
 done
 
-# 5) .env ---------------------------------------------------------------------
+# 6) .env ---------------------------------------------------------------------
 # install.sh creates this by copying .env.example. Untouched, it holds no secret and can go.
 # Edited, it may hold CLAUDE_CODE_OAUTH_TOKEN or an API key — deleting that silently would
 # destroy a credential the operator pasted, so it is reported and kept instead.
@@ -144,7 +160,7 @@ else
   echo "             rm $DIR/.env"
 fi
 
-# 6) Loaded contexts + logs (opt-in) -----------------------------------------
+# 7) Loaded contexts + logs (opt-in) -----------------------------------------
 echo "==> Store dir (~/.rlm)"
 STORE="$HOME/.rlm"
 if [ ! -d "$STORE" ]; then
@@ -158,7 +174,7 @@ else
   echo "  data. Delete with: ./uninstall.sh --purge-data"
 fi
 
-# 7) Sandbox image (opt-in) --------------------------------------------------
+# 8) Sandbox image (opt-in) --------------------------------------------------
 echo "==> Docker sandbox image (rlm-sandbox)"
 if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   echo "  docker unavailable — skipped"
