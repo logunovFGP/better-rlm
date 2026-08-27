@@ -45,11 +45,11 @@ from rlm.core.comms_utils import (
     socket_recv,
     socket_send,
 )
+from rlm.utils.exceptions import aborts_batch
 from rlm.core.types import REPLResult, RLMChatCompletion
 from rlm.environments.base_env import (
     NonIsolatedEnv,
     RESERVED_TOOL_NAMES,
-    aborts_batch,
     extract_tool_value,
     validate_custom_tools,
 )

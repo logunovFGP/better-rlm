@@ -71,3 +71,24 @@ class CancellationError(Exception):
     def __init__(self, partial_answer: str | None = None, message: str | None = None):
         self.partial_answer = partial_answer
         super().__init__(message or "Execution cancelled by user")
+
+
+# --- better-rlm --------------------------------------------------------------
+#: Attribute a backend sets on an exception to say "this failure is a property of
+#: the session, not of this prompt" - an expired login, an exhausted quota. Every
+#: batched fan-out in the engine stops on it instead of reissuing the identical
+#: doomed call once per prompt.
+#:
+#: Lives here, not in environments/base_env.py, because core/lm_handler.py fans out
+#: too and core/ must not import from environments/. This module imports nothing
+#: from rlm, so both layers can reach it.
+FATAL_SUBCALL_ATTR = "is_fatal_subcall"
+
+
+def aborts_batch(exc: BaseException) -> bool:
+    """True when one sub-call failure condemns the whole batch.
+
+    Duck-typed on purpose: the engine never imports the backend that raised, it
+    only honours the documented attribute. See FATAL_SUBCALL_ATTR.
+    """
+    return bool(getattr(exc, FATAL_SUBCALL_ATTR, False))

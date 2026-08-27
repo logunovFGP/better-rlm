@@ -12,11 +12,13 @@ the old fail-loudly string match: an upstream merge that reverts the template no
 fails here instead of silently costing megabytes per call.
 """
 
+import ast
 import inspect
 import json
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 from rlm.environments import docker_repl as dr
@@ -26,6 +28,7 @@ from rlm.environments.docker_repl import (
     DockerREPL,
     _build_exec_script,
 )
+from rlm.utils.exceptions import aborts_batch
 
 import src.sandbox_reap as reap
 
@@ -246,3 +249,80 @@ def test_stale_rlms_install_is_refused_loudly(monkeypatch):
         monkeypatch.undo()
         sys.modules.pop("src.engine", None)
         importlib.import_module("src.engine")
+
+
+def test_unserialisable_vars_are_named_not_silently_dropped(tmp_path):
+    """save_state keeps only what serialises. Dropping the rest silently means a
+    variable the user just created raises NameError next call with no explanation --
+    the same class of silent loss as the corrupt-state case above.
+
+    A generator is the right probe: refused by BOTH pickle and dill, so this holds
+    whichever the harness imported. (Measured against dill 0.4.1 in the sandbox
+    image, which DOES serialise threading.Lock, lambdas, open files and Thread
+    objects -- an earlier version of this test used a Lock and proved nothing.)
+    """
+    state = tmp_path / "state.dill"
+    data = _run("kept = 1\ngen = (i for i in range(3))\nprint('ok')", state, tmp_path)
+    assert data["stdout"] == "ok\n"
+    assert "not persisted" in data["stderr"], data["stderr"]
+    assert "gen" in data["stderr"]
+    assert "kept" not in data["stderr"], "named a variable that WAS persisted"
+
+    # and the serialisable one really did survive
+    again = _run("print(kept)", state, tmp_path)
+    assert again["stdout"] == "1\n"
+
+
+def test_control_plane_call_times_out_instead_of_hanging():
+    """The defect this guards: a wedged daemon made docker calls neither succeed
+    nor fail. A full host disk blocks the VM's writes without erroring them, so
+    `docker run` parked one MCP tool call for 44 minutes with nothing logged.
+
+    argv[0] is deliberately not the literal "docker": faking a binary on PATH
+    needs a shell script the Windows checkout cannot execute, and what actually
+    matters is that a child which never returns becomes an exception, promptly.
+    """
+    started = time.monotonic()
+    with pytest.raises(dr.DockerUnresponsiveError) as exc:
+        dr._docker([sys.executable, "-c", "import time; time.sleep(30)"], 1)
+    assert time.monotonic() - started < 15, "raised only after the child finished on its own"
+    assert "wedged" in str(exc.value) and "df -h" in str(exc.value)
+
+
+def test_a_wedged_daemon_aborts_a_batch_fanout():
+    """Every chunk hits the same wall, so the fan-out stops at the first failure
+    instead of queuing one doomed sandbox per prompt."""
+    assert aborts_batch(dr.DockerUnresponsiveError("wedged"))
+
+
+def test_every_docker_call_in_the_env_is_bounded():
+    """The regression guard. An upstream merge that reinstates a bare
+    subprocess.run fails here rather than in production, where the symptom is a
+    tool call that hangs forever and logs nothing at all."""
+    unbounded = [
+        node.lineno
+        for node in ast.walk(ast.parse(inspect.getsource(dr)))
+        if isinstance(node, ast.Call)
+        and ast.unparse(node.func) == "subprocess.run"
+        and "timeout" not in {kw.arg for kw in node.keywords}
+    ]
+    assert not unbounded, f"unbounded subprocess.run at line(s) {unbounded}"
+
+
+def test_cleanup_survives_a_wedged_daemon(monkeypatch):
+    """Teardown usually runs *because* the daemon is wedged, so it must swallow
+    the timeout - and spend the ceiling once, not once per call."""
+    monkeypatch.setattr(dr.DockerREPL, "setup", lambda self: None)
+    env = DockerREPL()
+    env.container_id = "deadbeef"
+
+    seen = []
+
+    def wedged(argv, timeout, **kw):
+        seen.append(argv[1])
+        raise dr.DockerUnresponsiveError("wedged")
+
+    monkeypatch.setattr(dr, "_docker", wedged)
+    env.cleanup()  # must not raise
+    assert env.container_id is None
+    assert seen == ["exec"], "a timed-out first call must skip the second, not repeat the wait"

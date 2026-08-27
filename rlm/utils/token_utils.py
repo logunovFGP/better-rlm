@@ -32,7 +32,18 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
     "o1-mini": 128_000,
     "o1-preview": 128_000,
     "o1": 200_000,
-    # Anthropic
+    # Anthropic. Claude 4/5 ids added by better-rlm: without them every current
+    # model fell through to DEFAULT_CONTEXT_LIMIT (128k) while a 2024 id resolved
+    # correctly, so _should_compact fired at 8x less context than the model has.
+    # Where a limit is not documented in this repo, the CONSERVATIVE 200k is used:
+    # under-reading only compacts earlier, over-reading overruns the window.
+    "claude-sonnet-5": 1_000_000,
+    "claude-opus-4-8": 1_000_000,
+    "claude-opus-4": 200_000,
+    "claude-sonnet-4-6": 200_000,
+    "claude-sonnet-4": 200_000,
+    "claude-haiku-4-5": 200_000,
+    "claude-haiku-4": 200_000,
     "claude-3-5-sonnet": 200_000,
     "claude-3-5-haiku": 200_000,
     "claude-3-opus": 200_000,

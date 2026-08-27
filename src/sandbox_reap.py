@@ -122,3 +122,34 @@ def reap_stale_sandboxes() -> None:
         reap_orphans(workspace_root())
     except Exception as exc:
         _LOG.warning("evt=reap_failed err=%r", exc)
+
+
+def container_image_status(image: str, container_id: str | None) -> str:
+    """Is the live sandbox running the image that is configured RIGHT NOW?
+
+    A container outlives an image rebuild. Nothing recreates it, and reap_orphans
+    keys on whether the OWNING PID is alive, never on image identity -- so a server
+    left running across a `docker build` keeps executing the old image while
+    rlm_status prints only the image NAME, which looks like confirmation.
+
+    Observed in practice: a Python 3.11 container still serving after the image had
+    been rebuilt to 3.13, with nothing anywhere reporting the mismatch.
+    """
+    if not container_id:
+        return "none created yet"
+    try:
+        cur = subprocess.run(
+            ["docker", "images", "--no-trunc", "--format", "{{.ID}}", image],
+            capture_output=True, text=True, timeout=30).stdout.strip().splitlines()
+        live = subprocess.run(
+            ["docker", "inspect", "-f", "{{.Image}}", container_id],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+    except Exception as exc:                      # noqa: BLE001 - report, never raise
+        return f"unknown ({type(exc).__name__})"
+    if not cur or not live:
+        return "unknown (docker did not answer)"
+    short = lambda d: d.split(":")[-1][:12]       # noqa: E731
+    if live == cur[0]:
+        return f"current ({short(live)})"
+    return (f"STALE - built from {short(live)}, image is now {short(cur[0])}; "
+            "reconnect the server so the sandbox is recreated")

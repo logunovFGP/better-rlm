@@ -36,6 +36,35 @@ COST_PER_MTOK: dict[str, tuple[float, float]] = {
 
 HAIKU_CONTEXT_TOKENS = 200_000
 
+#: Largest per-sub-query window derivation will hand out, whatever the model allows.
+#: Bigger is not better here: the tool scans, and a prompt close to the window is
+#: worse than the same bytes chunked.
+SUB_CONTEXT_CAP = HAIKU_CONTEXT_TOKENS
+
+
+def _sub_ctx(m: dict) -> int:
+    """Context ceiling of the sub-model. 0 in config means "ask the engine".
+
+    config.yaml used to carry 200000 with a comment saying it MUST track the
+    configured sub_model -- a hand-maintained duplicate of a table the engine
+    already ships. Imported inside the function so importing config does not drag
+    in the whole engine package.
+    """
+    explicit = int(m.get("sub_context_tokens") or 0)
+    if explicit:
+        return explicit
+    try:
+        from rlm.utils.token_utils import get_context_limit
+        limit = int(get_context_limit(str(m.get("sub_model") or "")))
+    except Exception:
+        return HAIKU_CONTEXT_TOKENS
+    # A model's window is a CEILING, not a target. This server scans oversized input;
+    # it does not stuff it into the prompt. A near-window single sub-query measurably
+    # degrades output versus chunking the same bytes, so derivation never raises the
+    # ceiling above SUB_CONTEXT_CAP even when the model would allow it. Set
+    # sub_context_tokens explicitly to override in either direction.
+    return min(limit, SUB_CONTEXT_CAP)
+
 # Provider → env var holding its API key. The engine (rlm.clients.get_client) already
 # routes these backends; this map is only how we locate the credential. Anthropic is
 # listed but special: it is the ONE provider that can authenticate with no key at all,
@@ -54,6 +83,13 @@ _DEFAULTS: dict[str, Any] = {
     "sub_model": MODEL_HAIKU,
     "max_depth": 2,
     "max_iterations": 20,
+    # Wall-clock ceiling for ONE rlm_query. max_iterations alone bounds nothing
+    # useful: 20 iterations x cli_timeout_s 600 is over three hours. The engine
+    # enforces this itself and returns the best partial answer. 0 = unlimited.
+    "query_timeout_s": 1800,
+    # Consecutive failed iterations before the engine stops and returns the best
+    # partial answer, instead of burning the remaining iterations. 0 = unlimited.
+    "query_max_errors": 5,
     "max_output_tokens": 32768,
     "sandbox": "docker",
     "sandbox_image": "rlm-sandbox",
@@ -84,7 +120,10 @@ _DEFAULTS: dict[str, Any] = {
     # Context ceiling of the SUB model, used to refuse an oversized single sub-query and
     # to skip a too-large reduce pass. 200K is Haiku's; other providers differ wildly
     # (Gemini is 1M+), so it MUST track the configured sub_model, not a vendor constant.
-    "sub_context_tokens": HAIKU_CONTEXT_TOKENS,
+    # 0 = derive from the configured sub_model via the engine's own model table,
+    # so this stops being a second copy of that knowledge that must be kept in
+    # sync by hand. Any non-zero value is an explicit override and wins.
+    "sub_context_tokens": 0,
     # Which vendor answers. "anthropic" is the ONLY one that works with no API key,
     # via the local `claude` CLI login — so it stays the default and the local path is
     # untouched. Remote deploys (no keychain in a pod) set this + the provider's key.
@@ -152,6 +191,8 @@ class Config:
     sub_model: str
     max_depth: int
     max_iterations: int
+    query_timeout_s: int
+    query_max_errors: int
     max_output_tokens: int
     sandbox: str
     sandbox_image: str
@@ -227,7 +268,9 @@ def load_config() -> Config:
         apikey_retry_waits=tuple(float(x) for x in m["apikey_retry_waits"]),
         # RLM_MODE env wins over config.yaml so the mode can be set at registration.
         report_cost=bool(m["report_cost"]),
-        sub_context_tokens=int(m["sub_context_tokens"]),
+        sub_context_tokens=_sub_ctx(m),
+        query_timeout_s=int(m["query_timeout_s"]),
+        query_max_errors=int(m["query_max_errors"]),
         mode=str(os.getenv("RLM_MODE") or m["mode"]).strip().lower(),
         # RLM_PROVIDER env wins, same as mode, so a pod sets it at registration.
         provider=str(os.getenv("RLM_PROVIDER") or m["provider"]).strip().lower(),

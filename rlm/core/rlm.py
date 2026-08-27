@@ -358,9 +358,25 @@ class RLM:
 
             compaction_count = 0
             try:
+                # better-rlm: on_iteration_start/complete were declared, documented and
+                # stored by __init__ but never invoked anywhere - a dead callback API.
+                # Fired here for real, because an rlm_query is otherwise unobservable:
+                # tens of seconds with one log line at the end. Both exit paths report,
+                # since the loop RETURNS from inside the body the moment the answer is
+                # ready - an end-of-body call alone would miss the final iteration and
+                # emit nothing at all for a single-iteration query.
+                def _fire(cb, *args):
+                    if cb:
+                        try:
+                            cb(*args)
+                        except Exception:
+                            pass  # Don't let callback errors break execution
+
                 for i in range(self.max_iterations):
                     # Check timeout before each iteration
                     self._check_timeout(i, time_start)
+                    _iter_start = time.perf_counter()
+                    _fire(self.on_iteration_start, self.depth, i)
 
                     # Compaction: check if context needs summarization
                     if self.compaction and hasattr(environment, "append_compaction_entry"):
@@ -432,6 +448,8 @@ class RLM:
                     self.verbose.print_iteration(iteration, i + 1)
 
                     if final_answer is not None:
+                        _fire(self.on_iteration_complete, self.depth, i,
+                              time.perf_counter() - _iter_start)
                         time_end = time.perf_counter()
                         usage = lm_handler.get_usage_summary()
                         self.verbose.print_final_answer(final_answer)
@@ -459,6 +477,8 @@ class RLM:
                     message_history.extend(new_messages)
                     if self.compaction and hasattr(environment, "append_compaction_entry"):
                         environment.append_compaction_entry(new_messages)
+                    _fire(self.on_iteration_complete, self.depth, i,
+                          time.perf_counter() - _iter_start)
 
             except KeyboardInterrupt:
                 self.verbose.print_limit_exceeded("cancelled", "User interrupted execution")
