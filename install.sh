@@ -11,11 +11,13 @@ cd "$DIR"
 # it by default would break the idempotency this script promises above.
 REGISTER=0
 AUTH=0
+HOOK=0
 for arg in "$@"; do
   case "$arg" in
     --register) REGISTER=1 ;;
     --auth) AUTH=1 ;;
-    -h|--help) echo "usage: ./install.sh [--register] [--auth]"; exit 0 ;;
+    --hook) HOOK=1 ;;
+    -h|--help) echo "usage: ./install.sh [--register] [--auth] [--hook]"; exit 0 ;;
     *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -163,6 +165,33 @@ for SRC in "$DIR"/skills/*/; do
   fi
 done
 
+# The skill above cannot fire on file SIZE, and no rewrite of its description fixes
+# that. Skill selection matches the description against CONVERSATION TEXT, but the
+# trigger here is a property of the DATA: the user types "analyze this log" and nothing
+# in that sentence says 2 GB. The model cannot evaluate the predicate until it has
+# already called Read - by which point the read was truncated and the context is spent.
+# A PreToolUse hook checks it after the call is formed and before it runs, which is the
+# one moment it is knowable.
+#
+# Opt-in for the same reason registration is, and more so: it writes
+# ~/.claude/settings.json (global state outside this checkout) and changes Read
+# behaviour in EVERY project on the machine, not just this one.
+if [ "$HOOK" -eq 1 ]; then
+  echo "==> Oversized-read hook (--hook)"
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "  WARNING: python3 not on PATH — the hook is invoked as \`python3 <path>\`."
+    echo "           Skipping; install python3 and re-run ./install.sh --hook"
+  else
+    mkdir -p "$HOME/.claude/hooks"
+    install -m 0755 "$DIR/hooks/big-read-to-rlm.py" "$HOME/.claude/hooks/big-read-to-rlm.py"
+    python3 "$DIR/scripts/register_hook.py"
+    echo "  Read on a file >200KB is blocked and redirected to rlm_load_file."
+    echo "  Fails open — a normal Read still happens when 'rlm' is not registered, for"
+    echo "  images/PDFs/archives, and for a bounded read (one passing an explicit limit)."
+    echo "  Restart Claude Code to load it."
+  fi
+fi
+
 if [ "$REGISTER" -eq 1 ]; then
   echo "==> Register with Claude Code (--register)"
   if ! command -v claude >/dev/null 2>&1; then
@@ -223,5 +252,13 @@ Auth: mode=auto reuses your Claude Code login via the \`claude\` CLI — no API 
       register with: claude mcp add -s user rlm -e RLM_MODE=api -- bash "$DIR/run_server.sh")
 
 Restart/reopen your Claude session so the 'rlm' server AND the 'rlm-large-context'
-skill load. Then ask about any oversized log/dump — Claude will reach for RLM.
+skill load.
+
+Two ways to reach RLM, and they are not equivalent:
+  explicit   /rlm-large-context, or name the skill in your prompt. Reliable.
+  automatic  ./install.sh --hook  — a PreToolUse hook that redirects any Read of a
+             file >200KB to rlm_load_file. Without it, nothing routes on file size:
+             skill selection matches your WORDS, and "this file is 2 GB" is a fact
+             about the data, not something your prompt says.
+             Covers the Read tool only, not `cat`/`head` run through Bash.
 MSG

@@ -40,7 +40,7 @@ engine. Everything below is the gap between a working demo and something you'd l
 | **Rate limits** | Unhandled | Process-wide throttle + auth-aware retry, so batch runs degrade instead of failing |
 | **Disk** | Grows | Log sweep capped at 20 files / 50 MB / 7 days; orphaned sandboxes reaped at startup |
 | **Shutdown** | Hard kill | SIGTERM/SIGINT tears down the container and logs the exit |
-| **Discovery** | You remember to use it | Ships a skill so Claude reaches for it on oversized-input intents |
+| **Discovery** | You remember to use it | Skill for explicit use, plus an opt-in `--hook` that routes oversized reads automatically |
 | **Platforms** | macOS/Linux | macOS · Linux · **Windows** (native `install.ps1`, no WSL required) |
 
 ### The zero-setup part is the point
@@ -445,9 +445,36 @@ directly and there is nothing to link. From a checkout, both installers add it a
 `install.sh` symlinks it into
 `~/.claude/skills/`, `install.ps1` junctions it into `%USERPROFILE%\.claude\skills` — shared by the
 CLI and desktop app. It is linked rather than copied, so editing `skills/<name>/SKILL.md` takes
-effect with no reinstall. Its description triggers on oversized-input intents ("what's in / find X
-across / summarize this huge log|dump|dataset"), so Claude routes to the `rlm` tools without being
-told. Restart the session after install; `/rlm-large-context` invokes it manually.
+effect with no reinstall. Restart the session after install; `/rlm-large-context` invokes it.
+
+**The skill cannot fire on file size, and its description is not the reason.** Skill selection
+matches a description against *conversation text*. This skill's real trigger is a property of the
+*data* — "the file is larger than ~200 KB". You type "analyze this log"; nothing in that sentence
+says 2 GB, so the model cannot evaluate the condition until it has already called `Read`, by which
+point the read was truncated and the context is spent. No rewrite closes that: it would have to
+enumerate every phrasing of "read a file that happens to be large". Expect to name the skill.
+
+For automatic routing, install the hook:
+
+```bash
+./install.sh --hook
+```
+
+It adds a `PreToolUse` hook that checks the size *after* a `Read` call is formed and *before* it
+runs — the one moment the predicate is knowable — and redirects anything over 200 KB to
+`rlm_load_file`. Deterministic where description-matching is probabilistic.
+
+It fails open, and never blocks without an alternative. A normal `Read` still happens when the
+`rlm` server is not registered, for images/PDFs/archives the context store cannot serve, and for a
+bounded read — one passing an explicit `limit`, which is the correct *end* of the RLM workflow
+after `rlm_grep` returns line numbers.
+
+**It covers the `Read` tool only.** Files read through Bash (`cat`, `head`, `sed -n`) are not seen,
+and some setups instruct the model to prefer those. Matching `Bash` too would mean parsing a path
+out of an arbitrary command line, with real false-positive risk; that is a follow-up, not a
+promise. Opt-in because it writes `~/.claude/settings.json` and changes `Read` behaviour in every
+project on the machine. `./uninstall.sh` removes it. POSIX only for now — `install.ps1` has no
+`-Hook` equivalent yet.
 
 Prefer an explicit rule as well? Add to `~/.claude/CLAUDE.md`:
 
