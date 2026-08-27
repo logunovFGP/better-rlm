@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Add or remove the oversized-read PreToolUse hook in ~/.claude/settings.json.
+"""Install or remove the oversized-read PreToolUse hook.
+
+Owns the whole lifecycle - copying hooks/big-read-to-rlm.py into ~/.claude/hooks
+and merging the settings.json entry - so install.sh and uninstall.sh each hold one
+call instead of two copies of the same paths, python3 probe and message text. The
+shell scripts decide *whether*; this decides *how*.
 
 Idempotent in both directions: registering twice leaves one entry, removing twice
 is a no-op. Without that, every `./install.sh --hook` would append a duplicate and
@@ -13,14 +18,19 @@ here would cost far more than this feature is worth.
 Paths are arguments rather than constants so the tests drive real files under
 tmp_path instead of monkeypatching the module.
 
-usage: register_hook.py [--remove] [--hook PATH] [--settings PATH]
+usage: install_hook.py [--remove] [--dry-run] [--hook PATH] [--settings PATH]
 """
 import argparse
 import json
 import os
+import shutil
 import sys
 import tempfile
 
+#: Shipped copy, resolved from this file so it works from any cwd and from a
+#: worktree. install.sh must not have to know the layout.
+SOURCE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                      "hooks", "big-read-to-rlm.py")
 DEFAULT_HOOK = os.path.expanduser("~/.claude/hooks/big-read-to-rlm.py")
 DEFAULT_SETTINGS = os.path.expanduser("~/.claude/settings.json")
 EVENT = "PreToolUse"
@@ -111,13 +121,41 @@ def apply(settings_path: str, hook_path: str, remove: bool = False) -> str:
     return "  registered"
 
 
+def place(hook_path: str, remove: bool = False) -> str:
+    """Copy the shipped hook into place, or delete the installed copy."""
+    if remove:
+        if not os.path.isfile(hook_path):
+            return "  hook script not installed - nothing to remove"
+        os.unlink(hook_path)
+        return f"  removed {hook_path}"
+    os.makedirs(os.path.dirname(hook_path), exist_ok=True)
+    shutil.copy2(SOURCE, hook_path)
+    os.chmod(hook_path, 0o755)
+    return f"  installed {hook_path}"
+
+
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Register the oversized-read hook.")
-    ap.add_argument("--remove", action="store_true", help="unregister instead of register")
-    ap.add_argument("--hook", default=DEFAULT_HOOK, help="path to the installed hook script")
+    ap = argparse.ArgumentParser(description="Install or remove the oversized-read hook.")
+    ap.add_argument("--remove", action="store_true", help="uninstall instead of install")
+    ap.add_argument("--dry-run", action="store_true", help="print what would happen, change nothing")
+    ap.add_argument("--hook", default=DEFAULT_HOOK, help="where the hook script lives")
     ap.add_argument("--settings", default=DEFAULT_SETTINGS, help="settings.json to edit")
     args = ap.parse_args(argv)
-    print(apply(args.settings, args.hook, remove=args.remove))
+
+    if args.dry_run:
+        verb = "unregister and delete" if args.remove else "install and register"
+        print(f"  [dry-run] would {verb} {args.hook}")
+        return 0
+
+    # Order matters in both directions: register only a file that exists, and
+    # unregister before deleting - a settings entry pointing at a missing file
+    # fails every Read on the machine.
+    if args.remove:
+        print(apply(args.settings, args.hook, remove=True))
+        print(place(args.hook, remove=True))
+    else:
+        print(place(args.hook))
+        print(apply(args.settings, args.hook))
     return 0
 
 

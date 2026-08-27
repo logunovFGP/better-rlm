@@ -30,7 +30,7 @@ def _load(name: str, relpath: str):
 
 
 hook = _load("big_read_to_rlm", "hooks/big-read-to-rlm.py")
-registrar = _load("register_hook", "scripts/register_hook.py")
+registrar = _load("install_hook", "scripts/install_hook.py")
 
 
 @pytest.fixture
@@ -232,5 +232,59 @@ def test_installer_and_uninstaller_agree_on_the_hook():
     artefact table covers the token, this covers the round trip."""
     sh = (ROOT / "install.sh").read_text(encoding="utf-8")
     un = (ROOT / "uninstall.sh").read_text(encoding="utf-8")
-    assert "register_hook.py" in sh and "register_hook.py" in un
+    assert "install_hook.py" in sh and "install_hook.py" in un
     assert "--remove" in un, "uninstall.sh calls the registrar without --remove"
+
+
+# --- the script owns the whole lifecycle, so install.sh holds one call --------
+
+
+def test_place_copies_the_shipped_hook_and_makes_it_executable(tmp_path):
+    dst = tmp_path / "hooks" / "big-read-to-rlm.py"
+    assert "installed" in registrar.place(str(dst))
+    assert dst.is_file() and dst.stat().st_mode & 0o111, "copied but not executable"
+    assert dst.read_text(encoding="utf-8") == Path(registrar.SOURCE).read_text(encoding="utf-8")
+
+
+def test_place_resolves_its_source_from_the_repo_not_the_cwd(monkeypatch, tmp_path):
+    """install.sh must not have to know the layout, and a worktree checkout has a
+    different cwd than the repo root."""
+    monkeypatch.chdir(tmp_path)
+    assert Path(registrar.SOURCE).is_file()
+
+
+def test_place_removal_is_idempotent(tmp_path):
+    dst = tmp_path / "hooks" / "big-read-to-rlm.py"
+    registrar.place(str(dst))
+    assert "removed" in registrar.place(str(dst), remove=True)
+    assert "nothing to remove" in registrar.place(str(dst), remove=True)
+    assert not dst.exists()
+
+
+def test_dry_run_changes_nothing(tmp_path, capsys):
+    """uninstall.sh --dry-run delegates here; printing '[dry-run]' while actually
+    deleting would be the worst possible bug in an uninstaller."""
+    dst = tmp_path / "hooks" / "big-read-to-rlm.py"
+    cfg = tmp_path / "settings.json"
+    registrar.place(str(dst))
+    registrar.apply(str(cfg), str(dst))
+    before = cfg.read_text(encoding="utf-8")
+
+    registrar.main(["--remove", "--dry-run", "--hook", str(dst), "--settings", str(cfg)])
+    assert "[dry-run]" in capsys.readouterr().out
+    assert dst.is_file(), "dry-run deleted the hook"
+    assert cfg.read_text(encoding="utf-8") == before, "dry-run edited settings.json"
+
+
+def test_uninstall_unregisters_before_deleting(tmp_path, capsys):
+    """Order matters: a settings entry pointing at a deleted file fails every Read.
+    Asserting on output order is how we pin it without mocking the filesystem."""
+    dst = tmp_path / "hooks" / "big-read-to-rlm.py"
+    cfg = tmp_path / "settings.json"
+    registrar.main(["--hook", str(dst), "--settings", str(cfg)])
+    capsys.readouterr()
+
+    registrar.main(["--remove", "--hook", str(dst), "--settings", str(cfg)])
+    out = capsys.readouterr().out
+    assert out.index("removed 1 hook entry") < out.index(f"removed {dst}")
+    assert not dst.exists() and not _entries(cfg)

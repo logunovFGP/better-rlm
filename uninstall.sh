@@ -110,15 +110,9 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo "  WARNING: python3 not on PATH - cannot edit settings.json. Remove by hand:"
   echo "    the PreToolUse entry whose command mentions $HOOK_DST"
 elif [ "$DRY" -eq 1 ]; then
-  printf '  [dry-run] %s\n' "register_hook.py --remove --hook $HOOK_DST; rm -f $HOOK_DST"
+  python3 "$DIR/scripts/install_hook.py" --remove --dry-run
 else
-  python3 "$DIR/scripts/register_hook.py" --remove --hook "$HOOK_DST"
-  if [ -f "$HOOK_DST" ]; then
-    rm -f "$HOOK_DST"
-    did "removed $HOOK_DST"
-  else
-    echo "  hook script not installed - nothing to remove"
-  fi
+  python3 "$DIR/scripts/install_hook.py" --remove
 fi
 
 # 4) Verify gate --------------------------------------------------------------

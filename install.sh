@@ -179,12 +179,10 @@ done
 if [ "$HOOK" -eq 1 ]; then
   echo "==> Oversized-read hook (--hook)"
   if ! command -v python3 >/dev/null 2>&1; then
-    echo "  WARNING: python3 not on PATH — the hook is invoked as \`python3 <path>\`."
+    echo "  WARNING: python3 not on PATH — the hook runs as \`python3 <path>\`."
     echo "           Skipping; install python3 and re-run ./install.sh --hook"
   else
-    mkdir -p "$HOME/.claude/hooks"
-    install -m 0755 "$DIR/hooks/big-read-to-rlm.py" "$HOME/.claude/hooks/big-read-to-rlm.py"
-    python3 "$DIR/scripts/register_hook.py"
+    python3 "$DIR/scripts/install_hook.py"
     echo "  Read on a file >200KB is blocked and redirected to rlm_load_file."
     echo "  Fails open — a normal Read still happens when 'rlm' is not registered, for"
     echo "  images/PDFs/archives, and for a bounded read (one passing an explicit limit)."
@@ -260,5 +258,5 @@ Two ways to reach RLM, and they are not equivalent:
              file >200KB to rlm_load_file. Without it, nothing routes on file size:
              skill selection matches your WORDS, and "this file is 2 GB" is a fact
              about the data, not something your prompt says.
-             Covers the Read tool only, not `cat`/`head` run through Bash.
+             Covers the Read tool only, not \`cat\`/\`head\` run through Bash.
 MSG
