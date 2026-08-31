@@ -24,8 +24,32 @@ need (exact char→byte mapping). That regressed three things:
 The fix is a reversion: **`read_text` keeps universal-newline translation.** Byte offsets
 simply decline to exist when the file cannot support them, which the self-validating
 design already handles — a CRLF file's walked total ≠ `meta.bytes`, so offsets stay
-`-1` and those contexts use the char-offset path. Cost: CRLF contexts get no seek
-speedup. The ASCII/LF fast path that produced the measured win is untouched.
+`-1` and those contexts use the char-offset path. The ASCII/LF fast path that produced
+the measured win is untouched. (That cost CRLF contexts the speedup entirely — since
+lifted, see "CRLF earns the fast path" below.)
+
+### CRLF earns the fast path back — and the platform asymmetry it hid
+
+Declining offsets for any file containing `\r` was correct but landed unevenly: a child
+process writing `"\n"` to a text-mode stdout emits `"\r\n"` on Windows and `"\n"` on
+POSIX, so **every** `load_command` context on Windows silently lost the optimization
+while the identical command on Linux kept it — measured directly. In-place Windows-
+authored logs lost it too. On the tool's own premise (contexts too large to hold), that
+put Windows back on the O(file)-per-chunk path this whole plan exists to remove.
+
+The offset walk now prices translation instead of refusing it: `per_newline = 1` when the
+file contains `\r`, so each `"\n"` in the text is charged the two bytes it occupied on
+disk, and `read_chunk` runs the same translation over the bytes it seeks
+(`_translate_newlines`). The byte total still adjudicates — the CRLF walk can only
+validate for a *pure* CRLF file, so mixed endings and lone `\r` are still refused rather
+than guessed at. Measured, 20 MB CRLF file: `read_chunk` 0.62 ms vs 26.63 ms.
+
+**This is deliberately NOT guarded by `os.name`.** Python applies universal-newline
+translation on every platform, so a CRLF log has the identical offset mismatch on Linux;
+an `isWindows` branch here would corrupt Linux reads of Windows-authored logs. The
+trigger is file *content*, not the host, and the tests assert the same outcome on both.
+The repo's `os.name == "nt"` delegate pattern (`sandbox_reap._pid_alive`) is the right
+shape for genuine host differences — this is not one.
 
 Two further corrections:
 

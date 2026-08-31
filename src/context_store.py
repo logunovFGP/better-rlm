@@ -108,6 +108,17 @@ def _stat_path(path: Path) -> tuple[int, int, str]:
     return nbytes, nlines, h.hexdigest()
 
 
+def _translate_newlines(s: str) -> str:
+    """Universal-newline translation, applied by hand to a slice read in binary.
+
+    ``read_text`` translates; a chunk fetched by seeking raw bytes must translate too,
+    or the two read paths return different text for the same chunk. Content-driven, not
+    host-driven: Python translates "\\r\\n" on every platform, so a CRLF log is handled
+    identically whether the server runs on Windows or Linux.
+    """
+    return s.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _has_carriage_return(path: Path) -> bool:
     """True if the raw file contains any b"\\r" -- i.e. reading it as text translates
     newlines, so char offsets taken on that text do NOT map to raw byte positions.
@@ -406,7 +417,7 @@ class ContextStore:
             with open(meta.content_path, "rb") as fh:
                 fh.seek(byte_start)
                 raw = fh.read(byte_end - byte_start)
-            return raw.decode("utf-8", errors="replace")
+            return _translate_newlines(raw.decode("utf-8", errors="replace"))
         return self.read_text(ctx_id)[ch["start"]:ch["end"]]   # legacy/unvalidated metas
 
     def _offsets_still_apply(self, meta: ContextMeta) -> bool:
@@ -473,33 +484,65 @@ class ContextStore:
         """Map each chunk's char offsets to byte offsets in one O(n) prefix-sum pass, so
         read_chunk can seek() instead of re-decoding the whole file per chunk.
 
-        Offsets are stored only when the mapping is PROVEN exact, on two counts:
+        read_text applies universal-newline translation, so a char offset only lands on a
+        byte boundary once we know what that translation cost. Two walks are possible and
+        the byte total says which, if either, is exact:
 
-        * the walked byte total equals meta.bytes (the raw file size). errors="replace"
-          decoding is lossy -- an invalid byte becomes U+FFFD, which re-encodes to 3
-          bytes -- so the total drifts on invalid UTF-8. This also catches CRLF, where
-          each "\\r\\n" read back as one char makes the walk come up short.
-        * the file holds no "\\r" at all. read_text applies universal-newline
-          translation, and a lone "\\r" translates to "\\n" without changing the byte
-          count, so the total alone would not notice.
+        * ``per_newline = 0`` -- the file holds no "\\r", so translation was a no-op and
+          char offsets already sit on byte boundaries.
+        * ``per_newline = 1`` -- every "\\n" in the text was a "\\r\\n" on disk, so each
+          costs one extra byte. This can only validate for a *pure* CRLF file: with A
+          CRLF pairs, B lone "\\n" and C lone "\\r", the walk totals ``utf8len + A+B+C``
+          while the file holds ``utf8len + A``, so anything mixed (B+C > 0) comes up
+          wrong and is refused. A lone-"\\r" file is refused the same way -- which the
+          byte total alone could not do, since "\\r" -> "\\n" preserves the count.
 
-        Either check failing leaves byte_start/byte_end at their Chunk default of -1 and
+        The total also catches errors="replace" drift, where an invalid byte becomes
+        U+FFFD and re-encodes to 3.
+
+        Whichever walk ran, the result is then proven on real bytes by re-reading the
+        LAST chunk -- the one carrying every accumulated error -- and comparing it to the
+        text. Two silent-corruption bugs came out of this mapping; the arithmetic above
+        is sound but has not earned the right to be trusted on its own.
+
+        Any check failing leaves byte_start/byte_end at their Chunk default of -1 and
         readers take the char-offset slow path -- slower, never wrong.
         """
         if text is None:
             text = self.read_text(meta.ctx_id)
+        per_newline = 1 if _has_carriage_return(Path(meta.content_path)) else 0
         positions = sorted({p for c in chunks for p in (c["start"], c["end"])})
         byte_at: dict[int, int] = {}
         total = prev = 0
         for p in positions:
-            total += len(text[prev:p].encode("utf-8"))
+            span = text[prev:p]
+            total += len(span.encode("utf-8")) + per_newline * span.count("\n")
             byte_at[p] = total
             prev = p
-        total += len(text[prev:].encode("utf-8"))
-        if total != meta.bytes or _has_carriage_return(Path(meta.content_path)):
+        tail = text[prev:]
+        total += len(tail.encode("utf-8")) + per_newline * tail.count("\n")
+        if total != meta.bytes or not self._probe_mapping(meta, chunks, byte_at, text):
             return
         for c in chunks:
             c["byte_start"], c["byte_end"] = byte_at[c["start"]], byte_at[c["end"]]
+
+    @staticmethod
+    def _probe_mapping(meta: ContextMeta, chunks: list[dict],
+                       byte_at: dict[int, int], text: str) -> bool:
+        """Read the last chunk through the offsets just computed and check it against the
+        text. One bounded read; it costs a chunk and buys proof instead of an argument."""
+        if not chunks:
+            return True
+        last = max(chunks, key=lambda c: c["end"])
+        start, end = byte_at[last["start"]], byte_at[last["end"]]
+        try:
+            with open(meta.content_path, "rb") as fh:
+                fh.seek(start)
+                probe = fh.read(end - start)
+        except OSError:
+            return False
+        decoded = _translate_newlines(probe.decode("utf-8", errors="replace"))
+        return decoded == text[last["start"]:last["end"]]
 
 
 def _extract_pdf(path: Path) -> str:
