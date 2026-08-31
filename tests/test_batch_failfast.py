@@ -405,6 +405,39 @@ def test_rlm_sub_query_batch_passes_builders_not_strings(monkeypatch):
     ]
 
 
+def test_max_chunks_caps_how_many_prompts_get_built(monkeypatch):
+    """The other half of laziness: with max_chunks set, only the SELECTED chunks may be
+    built -- and none of them before the pool runs."""
+    import src.server as srv
+
+    class _Meta:
+        chunks = [{"i": 0}, {"i": 1}, {"i": 2}]
+
+    builds: list[int] = []
+
+    class _Store:
+        def get(self, ctx_id):
+            return _Meta()
+
+        def read_chunk(self, ctx_id, i):
+            builds.append(i)
+            return f"chunk{i}"
+
+    seen: list = []
+
+    def fake_batch(prompts, model, concurrency=1):
+        assert builds == [], "a prompt was built before the pool ran"
+        seen.extend(prompts)
+        return [sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))]
+
+    monkeypatch.setattr(srv, "STORE", _Store())
+    monkeypatch.setattr(srv, "sub_query_batch", fake_batch)
+    srv.rlm_sub_query_batch("ctx_x", "audit", max_chunks=2, reduce=False)
+
+    assert len(seen) == 2, "max_chunks must cap the builder list, not just the results"
+    assert [p() for p in seen] and builds == [0, 1], "built a chunk max_chunks excluded"
+
+
 def test_a_successful_reduce_is_logged_with_the_batch_total(monkeypatch):
     """A reduce that SUCCEEDS still spends a call and tokens. Logging only the failure
     left those in no record, so the map totals understated every reduce=True batch."""

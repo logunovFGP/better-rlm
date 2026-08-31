@@ -399,7 +399,7 @@ class ContextStore:
             raise IndexError(f"chunk {index} out of range (0..{len(meta.chunks) - 1})")
         ch = meta.chunks[index]
         byte_start, byte_end = ch.get("byte_start", -1), ch.get("byte_end", -1)
-        if 0 <= byte_start <= byte_end:
+        if 0 <= byte_start <= byte_end and self._offsets_still_apply(meta):
             # Binary seek + bounded read: O(chunk), never decodes the rest of the file.
             # Safe to decode the slice on its own: byte_start/byte_end came from Leaf 1's
             # validated char->byte walk, so they always land on UTF-8 sequence boundaries.
@@ -408,6 +408,27 @@ class ContextStore:
                 raw = fh.read(byte_end - byte_start)
             return raw.decode("utf-8", errors="replace")
         return self.read_text(ctx_id)[ch["start"]:ch["end"]]   # legacy/unvalidated metas
+
+    def _offsets_still_apply(self, meta: ContextMeta) -> bool:
+        """Do this context's stored byte offsets still describe the file on disk?
+
+        They were computed against a file of exactly ``meta.bytes`` bytes, and
+        ``load_file`` references user files IN PLACE -- a log the user is still writing
+        to can change under a chunk index. Char offsets go stale there too, but they go
+        stale *consistently*: read_chunk and read_text[start:end] returned the same
+        (stale) slice. Seeking frozen byte offsets into a changed file does not -- it
+        silently returns shifted, truncated content while the char path returns
+        something else, breaking the one contract read_chunk owes its callers.
+
+        One stat() per read, against the size we measured at load. It cannot catch a
+        mutation that preserves the byte count exactly (say, an in-place edit that also
+        swaps an "\\n" for an "\\r"); such a file is stale on either path, and this at
+        least keeps the two paths agreeing.
+        """
+        try:
+            return Path(meta.content_path).stat().st_size == meta.bytes
+        except OSError:
+            return False   # let read_text raise the real error
 
     def grep(self, ctx_id: str, pattern: str, *, ignore_case: bool = False,
              max_matches: int = 50, max_line_len: int = 500) -> tuple[list[tuple[int, str]], bool]:

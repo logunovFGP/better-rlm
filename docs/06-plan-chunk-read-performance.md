@@ -21,7 +21,7 @@ need (exact char→byte mapping). That regressed three things:
 3. `rlm_exec` feeds `read_text` straight to the Linux sandbox guest, which then saw
    CRLF — the exact thing `load_text`'s `newline=""` comment exists to prevent.
 
-The fix is a deletion: **`read_text` keeps universal-newline translation.** Byte offsets
+The fix is a reversion: **`read_text` keeps universal-newline translation.** Byte offsets
 simply decline to exist when the file cannot support them, which the self-validating
 design already handles — a CRLF file's walked total ≠ `meta.bytes`, so offsets stay
 `-1` and those contexts use the char-offset path. Cost: CRLF contexts get no seek
@@ -37,13 +37,38 @@ Two further corrections:
   text, so it now accepts `text=`; chunk-time peak on a 20.1 MB context drops 60.4 MB →
   40.2 MB (one whole copy).
 
+- **Stored offsets could outlive the file they describe.** `load_file` references user
+  files in place, so a log still being written to changes under a chunk index. Char
+  offsets go stale *consistently* (both read paths returned the same stale slice); a
+  frozen byte offset seeked into a changed file does not — measured, `read_chunk`
+  returned `'字alpha\nbra'` where `read_text[start:end]` gave `'字alpha\nbravo'`. The
+  fast path now requires the file to still be `meta.bytes` long (`_offsets_still_apply`,
+  one `stat()` per read). This is the staleness exposure invariant 4 names as its own
+  reason for banning a text cache; a persisted char→byte mapping inherits it.
+
 Also: the Leaf 2 fallback test was **vacuous** — it seeded `-1` before `set_chunks`,
 which recomputes and overwrites them, so it exercised the seek path. It now strips the
 offsets from the stored `meta.json` *after* `set_chunks`, as originally specified. That
 untested fallback is exactly how regression 1 reached `main`.
 
-Invariant 5 below (the Python 3.11 `newline=` note) is moot as a result, and Leaf 1
-step 1 should be read as reverted.
+### Steps below that are superseded — do not follow them as written
+
+- **Invariant 2 / the three "leaf deleted" boxes.** All three stages landed on ONE leaf
+  (`leaf/perf/chunk-read-performance`, merge `1826d74`), not three; the branch names in
+  this plan never existed. The fixes above landed as two further leaves.
+- **Invariant 5** (`Path.read_text` has no `newline=` before 3.13): moot, the code uses
+  `Path.read_text` deliberately.
+- **Leaf 1 step 1** (kill newline translation): reverted, see above.
+- **Leaf 1 step 3's code block**: shipped validation *also* requires
+  `not _has_carriage_return(...)`, and `set_chunks` takes `text=`.
+- **Leaf 1 step 4's CRLF bullet** ("offsets validate … and slices round-trip"): inverted.
+  The test now asserts `(byte_start, byte_end) == (-1, -1)` and round-trips via the
+  char-offset path.
+- **Leaf 2 step 2's first bullet**: CRLF no longer reaches the seek path, so the
+  equivalence test covers ASCII + multibyte there; CRLF equivalence is asserted through
+  the fallback instead.
+- **Leaf 3 step 2's snippet**: shipped as a module-level `_mk_batch_prompt` +
+  `functools.partial`, not a nested closure with default-arg capture. Equivalent.
 
 ## Context to load first (read these before editing anything)
 
@@ -168,7 +193,7 @@ offsets. No reader uses them yet — this leaf is inert for behavior.
 
 - [x] `uv run --extra dev pytest -q` green
 - [x] New chunk metas carry validated `byte_start/byte_end`; behavior otherwise unchanged
-- [x] Merged `--no-ff` to `main`, leaf deleted
+- [x] Landed on `main` (all three stages collapsed into ONE leaf — see Correction)
 
 ---
 
@@ -212,7 +237,7 @@ when they don't (old metas, invalid-UTF-8 files).
 
 - [x] `uv run --extra dev pytest -q` green
 - [x] `read_chunk` never calls `read_text` for offset-bearing metas
-- [x] Merged `--no-ff` to `main`, leaf deleted
+- [x] Landed on `main` (all three stages collapsed into ONE leaf — see Correction)
 
 Measured (20 MB / 200 chunks): `read_chunk(last)` 0.71 ms vs 12.17 ms for a full
 `read_text` + slice (~17x; see the leaf's merge commit for the same numbers).
@@ -273,7 +298,7 @@ cheap, or laziness re-introduces slow reads *serially* inside workers).
 
 - [x] `uv run --extra dev pytest -q` green
 - [x] No list of full prompt strings exists in `rlm_sub_query_batch`
-- [x] Merged `--no-ff` to `main`, leaf deleted
+- [x] Landed on `main` (all three stages collapsed into ONE leaf — see Correction)
 
 ---
 
@@ -283,7 +308,9 @@ Synthetic check, ~20 MB line-chunked file via a scratch script (pattern: build f
 → `load_file` → `chunk_text`+`set_chunks` → time/`tracemalloc` the batch prompt
 path with a stubbed `_call`):
 
-- [x] Per-chunk `read_chunk` ~1 ms (was O(file)) — measured 1.32 ms avg over 200 chunks, 20 MB
+- [x] Per-chunk `read_chunk` ~1 ms (was O(file)) — 0.5–1.5 ms avg over ~200 chunks at
+      20 MB across runs; the old path measured 12–19 ms for a single last-chunk read.
+      Treat the absolute numbers as order-of-magnitude: they move with cache state.
 - [x] Peak traced memory of the batch path ≈ a few chunk-sizes, NOT ≈ 3× file size —
       measured 1.30 MB peak vs a 0.10 MB chunk / 20.1 MB file (concurrency=4, stubbed `_call`)
 - [x] Batch of a legacy (offset-less) meta still returns identical answers (fallback) —
