@@ -567,7 +567,7 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
     # Unconditional, not only on failure: the parent tool_call record carries neither
     # a chunk count nor token counts, so without this a successful batch is just N
     # indistinguishable cli_spawn lines under one rid. Same rid ties it back.
-    log_event(LOG, "sub_batch", phase="map", chunks=len(prompts),
+    log_event(LOG, "sub_batch", phase="map", ctx_id=ctx_id, chunks=len(prompts),
               errors=len(errs), itok=itok, otok=otok,
               err_sample=errs[0].error if errs else None)
     # Every chunk failed: that is a failed tool call, not a result with notes.
@@ -619,7 +619,7 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
         otok += red.output_tokens
     # On success too: a reduce that works still spends a call and tokens, and the map
     # totals would otherwise understate every reduce batch. itok/otok are map+reduce.
-    log_event(LOG, "sub_batch", phase="reduce", chunks=len(prompts),
+    log_event(LOG, "sub_batch", phase="reduce", ctx_id=ctx_id, chunks=len(prompts),
               errors=len(errs), itok=itok, otok=otok, reduce_error=red.error)
     if red.error:
         return _raw(f"\n_(reduce pass failed: {red.error}; showing raw findings)_")

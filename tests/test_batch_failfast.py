@@ -282,3 +282,52 @@ def test_map_start_is_logged_before_the_fan_out(monkeypatch):
     # ctx_id and the denominator are the two things the cli_spawn lines cannot supply.
     assert fields["ctx_id"] == "ctx_x"
     assert (fields["chunks"], fields["total_chunks"]) == (2, 3)
+
+
+def _logged_batch(monkeypatch, reduce, reduce_result=None):
+    """Drive rlm_sub_query_batch over a 2-chunk stub context, returning the sub_batch
+    records it logged. Each chunk reports 10 in / 3 out, so the totals are checkable."""
+    import src.server as srv
+
+    class _Meta:
+        chunks = [{"i": 0}, {"i": 1}]
+
+    class _Store:
+        def get(self, ctx_id):
+            return _Meta()
+
+        def read_chunk(self, ctx_id, i):
+            return f"chunk{i}"
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(srv, "STORE", _Store())
+    monkeypatch.setattr(srv, "log_event", lambda log, evt, **f: events.append((evt, f)))
+    monkeypatch.setattr(srv, "sub_query_batch", lambda prompts, model, concurrency=1: [
+        sq.SubResult(i, f"finding {i}", 10, 3) for i in range(len(prompts))])
+    if reduce_result is not None:
+        monkeypatch.setattr(srv, "sub_query", lambda *a, **k: reduce_result)
+    srv.rlm_sub_query_batch("ctx_x", "audit every file", reduce=reduce)
+    return [f for e, f in events if e == "sub_batch"]
+
+
+def test_a_clean_map_is_logged_with_its_chunk_and_token_counts(monkeypatch):
+    """The batch record used to be emitted only when a chunk ERRORED, so a fully
+    successful run left no chunk count and no token totals anywhere — the parent
+    tool_call carries neither, leaving N anonymous cli_spawn lines under one rid.
+    """
+    rec = next(f for f in _logged_batch(monkeypatch, reduce=False) if f["phase"] == "map")
+    assert (rec["chunks"], rec["errors"]) == (2, 0)
+    assert (rec["itok"], rec["otok"]) == (20, 6)
+    assert rec["err_sample"] is None
+    assert rec["ctx_id"] == "ctx_x", "every sub_batch phase carries ctx_id, not just map_start"
+
+
+def test_a_successful_reduce_is_logged_with_the_batch_total(monkeypatch):
+    """A reduce that SUCCEEDS still spends a call and tokens. Logging only the failure
+    left those in no record, so the map totals understated every reduce=True batch."""
+    recs = _logged_batch(monkeypatch, reduce=True,
+                         reduce_result=sq.SubResult(0, "synthesis", 5, 2))
+    rec = next(f for f in recs if f["phase"] == "reduce")
+    assert (rec["itok"], rec["otok"]) == (25, 8), "map 20/6 + reduce 5/2"
+    assert rec["reduce_error"] is None
+    assert rec["ctx_id"] == "ctx_x"
