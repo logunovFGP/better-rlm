@@ -151,12 +151,16 @@ def _run_retention_sweep(cfg: Config, own_path: Path) -> None:
         except FileNotFoundError:
             pass
         # Touch the sentinel atomically so concurrent starts see the cooldown.
+        tmp = log_dir / f".sweep.{os.getpid()}.tmp"
         try:
-            tmp = log_dir / f".sweep.{os.getpid()}.tmp"
             tmp.write_text(str(now))
             os.replace(tmp, sentinel)
         except OSError:
-            pass
+            # A failed replace (on Windows, another process holding the sentinel) must
+            # not leave the tmp behind: the prune below globs rlm-mcp-*.log*, so nothing
+            # ever collects these. Observed one orphaned in ~/.rlm/logs for days.
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
 
         entries = []
         for p in log_dir.glob("rlm-mcp-*.log*"):
@@ -252,8 +256,13 @@ def configure_logging(cfg: Config) -> logging.Logger:
 # --------------------------------------------------------------------------- #
 # Per-tool-call logging decorator (DRY across the 12 @mcp.tool() functions)
 # --------------------------------------------------------------------------- #
-# Args worth logging (identifiers/flags — never the content itself).
-_ID_ARGS = ("ctx_id", "model_override", "reduce", "chunk_index", "max_chunks", "strategy")
+# Args worth logging (identifiers/flags — never the content itself), each mapped to the
+# ONE value that means "not supplied" for that argument. Per-arg, because a blanket
+# "drop anything falsy" is wrong twice: chunk_index=0 is the FIRST chunk and reduce=False
+# is a real choice, so dropping them makes a supplied value indistinguishable from an
+# absent one. max_chunks=0 genuinely is the "no limit" default and stays dropped.
+_ID_ARGS = {"ctx_id": "", "model_override": "", "reduce": None,
+            "chunk_index": -1, "max_chunks": 0, "strategy": ""}
 _LEN_ARGS = ("question", "prompt", "code", "source")
 
 
@@ -278,10 +287,14 @@ def logged_tool(fn):
             named = bound.arguments
         except TypeError:
             named = dict(kwargs)
-        for k in _ID_ARGS:
+        for k, unset in _ID_ARGS.items():
             v = named.get(k)
-            if v not in (None, "", -1, 0):
-                fields[k] = v
+            # Compare against that arg's own sentinel, and only when the types match:
+            # a bare `v == unset` would drop reduce=False against a 0 sentinel, since
+            # False == 0 in Python. That equality is the bug this guards.
+            if v is None or (type(v) is type(unset) and v == unset):
+                continue
+            fields[k] = v
         for k in _LEN_ARGS:
             v = named.get(k)
             if isinstance(v, str) and v:

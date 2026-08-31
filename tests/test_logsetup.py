@@ -184,3 +184,35 @@ def test_logged_tool_flags_error_returns():
     failing(ctx_id="c")
     lg.removeHandler(cap)
     assert "outcome=error" in " ".join(cap.msgs)
+
+
+def test_logged_tool_logs_zero_valued_first_chunk_and_reduce_false():
+    """chunk_index=0 is the FIRST chunk and reduce=False is a real choice: both must
+    reach the log. A blanket falsy-drop hid them (and False == 0 hid reduce twice over),
+    making a supplied value indistinguishable from an absent one. max_chunks=0 IS the
+    documented no-limit default and stays dropped."""
+    lg, cap = _capture(ls.LOGGER_NAME)
+
+    @ls.logged_tool
+    def sample(ctx_id: str, chunk_index: int, reduce: bool, max_chunks: int) -> str:
+        return "## ok"
+
+    sample(ctx_id="ctx_1", chunk_index=0, reduce=False, max_chunks=0)
+    lg.removeHandler(cap)
+    joined = " ".join(cap.msgs)
+    assert "chunk_index=0" in joined
+    assert "reduce=False" in joined
+    assert "max_chunks=" not in joined
+
+
+def test_sweep_leaves_no_tmp_when_sentinel_replace_fails(tmp_path, monkeypatch):
+    """A failed os.replace must not orphan .sweep.<pid>.tmp — the prune globs
+    rlm-mcp-*.log*, so nothing else ever collects one."""
+    cfg = _cfg(tmp_path, log_sweep_cooldown_s=0)
+
+    def boom(src, dst):
+        raise OSError("sentinel held by another process")
+
+    monkeypatch.setattr(ls.os, "replace", boom)
+    ls._run_retention_sweep(cfg, tmp_path / "rlm-mcp-own.log")
+    assert list(tmp_path.glob(".sweep.*.tmp")) == []

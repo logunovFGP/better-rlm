@@ -557,12 +557,16 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
     # models.select maps a configured id to its closest subscription sibling.
     used = sorted({r.model for r in results if r.model}) or [sub_model]
     used_label = ", ".join(used)
-    # Surface partial failures: the tool still returns a success string (so
-    # tool_call logs outcome=ok), which would otherwise hide that some chunks
-    # errored. Same rid ties this back to the parent tool_call.
-    if errs:
-        log_event(LOG, "sub_batch", phase="map", chunks=len(prompts),
-                  errors=len(errs), err_sample=errs[0].error)
+    # Unconditional, not only on failure: the parent tool_call record carries no
+    # chunk count and no token counts, so without this a *successful* batch is N
+    # indistinguishable cli_spawn lines under one rid — the most expensive tool is
+    # the one you cannot account for afterwards. errors/err_sample still surface
+    # partial failures the success string would otherwise hide (err_sample is None
+    # on a clean run, and log_event drops None fields). Same rid ties this back to
+    # the parent tool_call.
+    log_event(LOG, "sub_batch", phase="map", chunks=len(prompts),
+              errors=len(errs), itok=itok, otok=otok,
+              err_sample=errs[0].error if errs else None)
     # Every chunk failed: that is a failed tool call, not a result with notes.
     # Returning the usual success string here is exactly how a dead login reads
     # back as "no findings". The ERROR prefix is what logsetup maps to outcome=error.
