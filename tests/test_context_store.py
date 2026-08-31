@@ -183,6 +183,27 @@ def test_read_chunk_falls_back_when_byte_offsets_missing(cfg):
         assert store.read_chunk(meta.ctx_id, i) == text[c.start:c.end]
 
 
+def test_read_chunk_ignores_stale_byte_offsets_after_the_file_changes(cfg, tmp_path):
+    """load_file references the user's file IN PLACE, so it can change after chunking.
+    Byte offsets frozen at chunk time must not be seeked into a file that no longer
+    matches them: the seek returned shifted, truncated content ('字alpha\\nbra') while
+    read_text sliced '字alpha\\nbravo'. Stale is survivable; the two paths disagreeing
+    silently is not."""
+    store = ContextStore(cfg)
+    p = tmp_path / "live.log"
+    p.write_bytes(b"alpha\nbravo\ncharlie\ndelta\n")
+    meta = store.load_file(str(p))
+    text = store.read_text(meta.ctx_id)
+    chunks = chunk_text(text, "lines", chunk_lines=2, chunk_chars=120000, overlap=0)
+    store.set_chunks(meta.ctx_id, "lines", [c.as_dict() for c in chunks], text=text)
+    assert all(c["byte_start"] != -1 for c in store.get(meta.ctx_id).chunks)
+
+    p.write_bytes("字".encode("utf-8") + b"alpha\nbravo\ncharlie\ndelta\n")  # +1 char, +3 bytes
+    now = store.read_text(meta.ctx_id)
+    for i, c in enumerate(chunks):
+        assert store.read_chunk(meta.ctx_id, i) == now[c.start:c.end]
+
+
 def test_set_chunks_does_not_decode_again_when_given_the_text(cfg, monkeypatch):
     """Both server.py callers have just decoded the whole context to chunk it. Without
     text=, the byte-offset pass decoded it a second time while that copy was still live
