@@ -611,12 +611,18 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
         "all chunks. Use only what the findings contain; do not invent anything."
     )
     red = sub_query(reduce_prompt, sub_model, max_tokens=4096)
+    if not red.error:
+        itok += red.input_tokens
+        otok += red.output_tokens
+    # Same rule as the map record above, for the same reason: a reduce that SUCCEEDS
+    # still spends a cli_spawn and tokens, and logging only the failure leaves those
+    # in no record at all — the map totals would then understate every reduce batch.
+    # itok/otok here are the batch total (map + reduce); reduce_error is None on
+    # success and log_event drops it.
+    log_event(LOG, "sub_batch", phase="reduce", chunks=len(prompts),
+              errors=len(errs), itok=itok, otok=otok, reduce_error=red.error)
     if red.error:
-        log_event(LOG, "sub_batch", phase="reduce", chunks=len(prompts),
-                  errors=len(errs), reduce_error=red.error)
         return _raw(f"\n_(reduce pass failed: {red.error}; showing raw findings)_")
-    itok += red.input_tokens
-    otok += red.output_tokens
     return _answer(
         f"## Batch sub-query — map+reduce over {len(prompts)} chunks ({used_label}"
         f" · auth: {transport.auth_label(CFG)})\n"
