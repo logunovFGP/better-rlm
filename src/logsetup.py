@@ -38,6 +38,10 @@ from .output import bound_output
 
 LOGGER_NAME = "rlm-mcp"
 _MAX_VAL_LEN = 500  # clamp any single logged value so one record can't bloat the file
+#: A .sweep.<pid>.tmp older than this is debris, not a write in flight. Generous on
+#: purpose: the cost of waiting is 18 bytes, the cost of being wrong is deleting the
+#: sentinel update of a live process.
+_TMP_ORPHAN_AGE_S = 300
 
 # Correlation id for the in-flight tool call. logged_tool binds it; log_event reads
 # it and stamps every nested event (cli_spawn, rlm_query, retry, sub_batch) with the
@@ -151,12 +155,24 @@ def _run_retention_sweep(cfg: Config, own_path: Path) -> None:
         except FileNotFoundError:
             pass
         # Touch the sentinel atomically so concurrent starts see the cooldown.
+        tmp = log_dir / f".sweep.{os.getpid()}.tmp"
         try:
-            tmp = log_dir / f".sweep.{os.getpid()}.tmp"
             tmp.write_text(str(now))
             os.replace(tmp, sentinel)
         except OSError:
-            pass
+            # Don't orphan the tmp: the prune below globs rlm-mcp-*.log*, so nothing
+            # else ever collects one. (Found one stuck in ~/.rlm/logs for days.)
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+        # That unlink covers a FAILED replace, but not a process KILLED between the
+        # write and the replace — no except block runs for SIGKILL, and the pool of
+        # pre-warmed spares is killed routinely. So collect strays here as well, which
+        # is also what retires the ones older builds already left behind. Age-gated so
+        # a tmp another process is mid-write on is never taken.
+        for stray in log_dir.glob(".sweep.*.tmp"):
+            with contextlib.suppress(OSError):
+                if now - stray.stat().st_mtime > _TMP_ORPHAN_AGE_S:
+                    _unlink(stray)
 
         entries = []
         for p in log_dir.glob("rlm-mcp-*.log*"):
@@ -252,8 +268,11 @@ def configure_logging(cfg: Config) -> logging.Logger:
 # --------------------------------------------------------------------------- #
 # Per-tool-call logging decorator (DRY across the 12 @mcp.tool() functions)
 # --------------------------------------------------------------------------- #
-# Args worth logging (identifiers/flags — never the content itself).
-_ID_ARGS = ("ctx_id", "model_override", "reduce", "chunk_index", "max_chunks", "strategy")
+# Args worth logging (identifiers/flags — never the content itself), each mapped to the
+# value meaning "not supplied". Per-arg because falsy != absent: chunk_index=0 is the
+# FIRST chunk and reduce=False a real choice, while max_chunks=0 IS the no-limit default.
+_ID_ARGS = {"ctx_id": "", "model_override": "", "reduce": None,
+            "chunk_index": -1, "max_chunks": 0, "strategy": ""}
 _LEN_ARGS = ("question", "prompt", "code", "source")
 
 
@@ -278,10 +297,13 @@ def logged_tool(fn):
             named = bound.arguments
         except TypeError:
             named = dict(kwargs)
-        for k in _ID_ARGS:
+        for k, unset in _ID_ARGS.items():
             v = named.get(k)
-            if v not in (None, "", -1, 0):
-                fields[k] = v
+            # Type-first: a bare `v == unset` drops reduce=False against a 0 sentinel,
+            # since False == 0 in Python. That equality is the bug this guards.
+            if v is None or (type(v) is type(unset) and v == unset):
+                continue
+            fields[k] = v
         for k in _LEN_ARGS:
             v = named.get(k)
             if isinstance(v, str) and v:

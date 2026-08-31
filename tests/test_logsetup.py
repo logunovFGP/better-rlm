@@ -184,3 +184,55 @@ def test_logged_tool_flags_error_returns():
     failing(ctx_id="c")
     lg.removeHandler(cap)
     assert "outcome=error" in " ".join(cap.msgs)
+
+
+def test_logged_tool_logs_zero_valued_first_chunk_and_reduce_false():
+    """chunk_index=0 is the FIRST chunk and reduce=False is a real choice: both must
+    reach the log. A blanket falsy-drop hid them (and False == 0 hid reduce twice over),
+    making a supplied value indistinguishable from an absent one. max_chunks=0 IS the
+    documented no-limit default and stays dropped."""
+    lg, cap = _capture(ls.LOGGER_NAME)
+
+    @ls.logged_tool
+    def sample(ctx_id: str, chunk_index: int, reduce: bool, max_chunks: int) -> str:
+        return "## ok"
+
+    sample(ctx_id="ctx_1", chunk_index=0, reduce=False, max_chunks=0)
+    lg.removeHandler(cap)
+    joined = " ".join(cap.msgs)
+    assert "chunk_index=0" in joined
+    assert "reduce=False" in joined
+    assert "max_chunks=" not in joined
+
+
+def test_sweep_leaves_no_tmp_when_sentinel_replace_fails(tmp_path):
+    """A failed os.replace must not orphan .sweep.<pid>.tmp — the prune globs
+    rlm-mcp-*.log*, so nothing else ever collects one.
+
+    A directory where the sentinel file belongs fails the replace for real on both
+    POSIX and Windows — no process-wide patch of os.replace, and it goes through the
+    same OSError path the live orphan came in through.
+    """
+    cfg = _cfg(tmp_path, log_sweep_cooldown_s=0)
+    (tmp_path / ".sweep").mkdir()  # os.replace onto a directory raises OSError
+    ls._run_retention_sweep(cfg, tmp_path / "rlm-mcp-own.log")
+    assert list(tmp_path.glob(".sweep.*.tmp")) == []
+
+
+def test_sweep_collects_orphaned_tmps_but_spares_one_in_flight(tmp_path):
+    """The unlink on a failed replace cannot fire for a process KILLED between the
+    write and the replace — SIGKILL runs no except block, and the pre-warmed spares
+    are killed routinely. The sweep collects those strays, and is what retires the
+    ones older builds left behind. A fresh tmp is another process mid-write: spare it.
+    """
+    cfg = _cfg(tmp_path, log_sweep_cooldown_s=0)
+    old = tmp_path / ".sweep.29936.tmp"
+    old.write_text("1787950531.8465369")
+    os.utime(old, (1, 1))  # ancient -> debris
+    fresh = tmp_path / ".sweep.111.tmp"
+    fresh.write_text("now")  # just written -> could be in flight
+
+    ls._run_retention_sweep(cfg, tmp_path / "rlm-mcp-own.log")
+
+    assert not old.exists()
+    assert fresh.exists()
