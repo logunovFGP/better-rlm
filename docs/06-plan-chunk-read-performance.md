@@ -1,8 +1,49 @@
 # Plan — C+D: seek-based chunk reads + lazy batch prompts
 
-Status: **implemented 2026-09-01 — all 3 leaves merged to main, final acceptance passed.**
+Status: **implemented 2026-09-01, then corrected — see "Correction" below before
+trusting any step in this document.**
 Written 2026-09-01 from a measured investigation. This document is written to be
 executed by an agent with no other conversation context.
+
+## Correction (2026-09-01, post-review)
+
+A code review of the merged result found that **Leaf 1 step 1 was wrong** and has been
+reverted. The plan changed `read_text` — a *global* read path — to serve one *local*
+need (exact char→byte mapping). That regressed three things:
+
+1. Chunk metas written before this work hold char offsets computed on **translated**
+   text. Slicing untranslated text shifted them: a 4-line CRLF context returned
+   `'\r\ncharlie\r\ndel'` where `'charlie\ndelta\n'` was stored — silently misaligned
+   and truncated, no error raised.
+2. `chunk_text`'s paragraph regex `r"\n[ \t]*\n"` cannot match `"\r\n\r\n"`, so
+   `paragraphs`/`semantic` found **zero** boundaries on any CRLF context and degraded
+   to blind fixed-size cuts (measured: 2 boundaries → 0).
+3. `rlm_exec` feeds `read_text` straight to the Linux sandbox guest, which then saw
+   CRLF — the exact thing `load_text`'s `newline=""` comment exists to prevent.
+
+The fix is a deletion: **`read_text` keeps universal-newline translation.** Byte offsets
+simply decline to exist when the file cannot support them, which the self-validating
+design already handles — a CRLF file's walked total ≠ `meta.bytes`, so offsets stay
+`-1` and those contexts use the char-offset path. Cost: CRLF contexts get no seek
+speedup. The ASCII/LF fast path that produced the measured win is untouched.
+
+Two further corrections:
+
+- **A lone `\r` defeats the byte-count check.** It translates to `\n` one-for-one, so
+  totals match while a seek returns `\r` where a char slice returns `\n`. Validation now
+  also requires that the raw file contain no `\r` at all (`_has_carriage_return`, a
+  streamed O(1)-memory scan).
+- **`set_chunks` took a second full decode.** Both `server.py` callers already hold the
+  text, so it now accepts `text=`; chunk-time peak on a 20.1 MB context drops 60.4 MB →
+  40.2 MB (one whole copy).
+
+Also: the Leaf 2 fallback test was **vacuous** — it seeded `-1` before `set_chunks`,
+which recomputes and overwrites them, so it exercised the seek path. It now strips the
+offsets from the stored `meta.json` *after* `set_chunks`, as originally specified. That
+untested fallback is exactly how regression 1 reached `main`.
+
+Invariant 5 below (the Python 3.11 `newline=` note) is moot as a result, and Leaf 1
+step 1 should be read as reverted.
 
 ## Context to load first (read these before editing anything)
 

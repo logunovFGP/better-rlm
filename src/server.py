@@ -356,7 +356,9 @@ def rlm_chunk_context(ctx_id: str, strategy: str = "", size: int = 0, overlap: i
         chunk_chars=CFG.chunk_chars,
         overlap=overlap or CFG.chunk_overlap,
     )
-    STORE.set_chunks(ctx_id, strategy, [c.as_dict() for c in chunks])
+    # text=text: hand over the decode we already have, so the byte-offset pass does not
+    # read and decode the whole context a second time alongside this copy.
+    STORE.set_chunks(ctx_id, strategy, [c.as_dict() for c in chunks], text=text)
     lines = [f"## Chunked {ctx_id} — {len(chunks)} chunks ({strategy})", ""]
     for c in chunks[:25]:
         lbl = f" {c.label}" if c.label else ""
@@ -548,7 +550,8 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
         text = STORE.read_text(ctx_id)
         chunks = chunk_text(text, CFG.chunk_strategy, chunk_lines=CFG.chunk_lines,
                             chunk_chars=CFG.chunk_chars, overlap=CFG.chunk_overlap)
-        STORE.set_chunks(ctx_id, CFG.chunk_strategy, [c.as_dict() for c in chunks])
+        STORE.set_chunks(ctx_id, CFG.chunk_strategy, [c.as_dict() for c in chunks],
+                         text=text)   # reuse this decode; don't make a second copy
         meta = STORE.get(ctx_id)
         del text   # the full decode has served chunking; don't hold it for the whole batch
     n = len(meta.chunks)
