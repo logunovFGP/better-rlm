@@ -366,7 +366,12 @@ class ContextStore:
 
     # -- readers -----------------------------------------------------------
     def read_text(self, ctx_id: str) -> str:
-        return Path(self.get(ctx_id).content_path).read_text(encoding="utf-8", errors="replace")
+        # newline="": no universal-newline translation, so char offsets computed on this
+        # text map 1:1 to on-disk bytes (a CRLF file keeps its \r). Path.read_text has no
+        # newline param before Python 3.13; this repo's floor is 3.11, hence open().
+        with open(self.get(ctx_id).content_path, encoding="utf-8",
+                  errors="replace", newline="") as fh:
+            return fh.read()
 
     def read_chunk(self, ctx_id: str, index: int) -> str:
         meta = self.get(ctx_id)
@@ -401,9 +406,33 @@ class ContextStore:
 
     def set_chunks(self, ctx_id: str, strategy: str, chunks: list[dict]) -> ContextMeta:
         meta = self.get(ctx_id)
+        self._add_byte_offsets(meta, chunks)
         meta.chunk_strategy = strategy
         meta.chunks = chunks
         return self._save(meta)
+
+    def _add_byte_offsets(self, meta: ContextMeta, chunks: list[dict]) -> None:
+        """Map each chunk's char offsets to byte offsets in one O(n) prefix-sum pass, so
+        read_chunk (Leaf 2) can seek() instead of re-decoding the whole file per chunk.
+
+        Validated against meta.bytes (the raw file size) rather than trusted outright:
+        errors="replace" decoding is lossy (an invalid byte becomes U+FFFD, which
+        re-encodes to 3 bytes), so a walked total can drift from the real file on
+        invalid-UTF-8 input. On any mismatch this leaves byte_start/byte_end at their
+        Chunk default of -1, and readers fall back to the char-offset slow path.
+        """
+        text = self.read_text(meta.ctx_id)
+        positions = sorted({p for c in chunks for p in (c["start"], c["end"])})
+        byte_at: dict[int, int] = {}
+        total = prev = 0
+        for p in positions:
+            total += len(text[prev:p].encode("utf-8"))
+            byte_at[p] = total
+            prev = p
+        total += len(text[prev:].encode("utf-8"))
+        if total == meta.bytes:
+            for c in chunks:
+                c["byte_start"], c["byte_end"] = byte_at[c["start"]], byte_at[c["end"]]
 
 
 def _extract_pdf(path: Path) -> str:

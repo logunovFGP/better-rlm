@@ -196,7 +196,10 @@ def test_merge_stderr_puts_stderr_logs_into_the_context(cfg, tmp_path):
 
     split = store.load_command([PY, "-c", code], source="source:t",
                                timeout_s=30, max_bytes=1 << 20)
-    assert store.read_text(split.meta.ctx_id) == "out line\n"
+    # A child's own stdout may apply platform line-ending conventions (e.g. Python on
+    # Windows writes "\n" as "\r\n" to a pipe); read_text no longer normalizes that away
+    # (needed so byte offsets stay exact for in-place CRLF files), so normalize here.
+    assert store.read_text(split.meta.ctx_id).replace("\r\n", "\n") == "out line\n"
     assert "log line" in split.stderr_tail          # diagnostic tail, not content
 
     merged = store.load_command([PY, "-c", code], source="source:t",
