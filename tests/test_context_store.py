@@ -74,17 +74,36 @@ def test_set_chunks_computes_byte_offsets_for_multibyte(cfg):
         assert data[c["byte_start"]:c["byte_end"]].decode("utf-8") == text[c["start"]:c["end"]]
 
 
-def test_crlf_file_declines_byte_offsets_and_still_reads_correctly(cfg, tmp_path):
-    """read_text translates newlines, so char offsets on a CRLF file do NOT map to raw
-    byte positions. The offsets must therefore refuse to exist rather than be stored
-    wrong: an earlier attempt disabled translation globally to make them fit, which
-    shifted every previously-stored chunk and broke paragraph chunking."""
+def test_crlf_file_gets_byte_offsets_that_account_for_translation(cfg, tmp_path):
+    """A pure-CRLF file still earns the seek path: each "\\n" in the translated text cost
+    two bytes on disk, which the walk can price exactly. This is content-driven, not
+    host-driven -- Python translates "\\r\\n" on every platform, so this test asserts the
+    same thing on Windows and on Linux. Without it, every command-sourced context on
+    Windows (whose child writes "\\r\\n" to a text-mode stdout) silently lost the
+    optimization while the identical command on Linux kept it."""
     store = ContextStore(cfg)
     p = tmp_path / "crlf.txt"
     p.write_bytes(b"one\r\ntwo\r\nthree\r\n")
     meta = store.load_file(str(p))
     text = store.read_text(meta.ctx_id)
     assert "\r" not in text, "read_text must keep translating newlines"
+    chunks = chunk_text(text, "lines", chunk_lines=1, chunk_chars=120000, overlap=0)
+    store.set_chunks(meta.ctx_id, "lines", [c.as_dict() for c in chunks])
+    stored = store.get(meta.ctx_id).chunks
+    assert all(c["byte_start"] != -1 for c in stored), "CRLF must reach the fast path"
+    assert stored[0]["byte_end"] == 5, 'one\\r\\n is 5 bytes for 4 chars'
+    for i, c in enumerate(stored):
+        assert store.read_chunk(meta.ctx_id, i) == text[c["start"]:c["end"]]
+
+
+def test_mixed_line_endings_decline_byte_offsets(cfg, tmp_path):
+    """Half CRLF, half LF: neither walk prices it, so it must be refused rather than
+    guessed at. The byte total is what catches it."""
+    store = ContextStore(cfg)
+    p = tmp_path / "mixed.txt"
+    p.write_bytes(b"one\r\ntwo\nthree\r\nfour\n")
+    meta = store.load_file(str(p))
+    text = store.read_text(meta.ctx_id)
     chunks = chunk_text(text, "lines", chunk_lines=1, chunk_chars=120000, overlap=0)
     store.set_chunks(meta.ctx_id, "lines", [c.as_dict() for c in chunks])
     for i, c in enumerate(store.get(meta.ctx_id).chunks):
@@ -146,13 +165,16 @@ def test_set_chunks_leaves_offsets_unset_on_invalid_utf8(cfg, tmp_path):
     assert store.read_chunk(meta.ctx_id, 0) == text[chunks[0].start:chunks[0].end]
 
 
-def test_read_chunk_matches_read_text_slice_via_seek_path(cfg):
+def test_read_chunk_matches_read_text_slice_via_seek_path(cfg, tmp_path):
     store = ContextStore(cfg)
-    # Both take the fast path: no "\r" on disk, so char offsets map 1:1 to bytes.
+    # All three take the fast path: LF maps 1:1, CRLF is priced at +1 byte per newline.
     ascii_meta = store.load_text("line one\nline two\nline three\n")
     multibyte_meta = store.load_text("café\n字字字\nplain\n")
+    p = tmp_path / "crlf.txt"
+    p.write_bytes("héllo\r\n字字\r\nplain\r\n".encode("utf-8"))
+    crlf_meta = store.load_file(str(p))
 
-    for meta in (ascii_meta, multibyte_meta):
+    for meta in (ascii_meta, multibyte_meta, crlf_meta):
         text = store.read_text(meta.ctx_id)
         chunks = chunk_text(text, "lines", chunk_lines=1, chunk_chars=120000, overlap=0)
         store.set_chunks(meta.ctx_id, "lines", [c.as_dict() for c in chunks])

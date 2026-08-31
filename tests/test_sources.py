@@ -213,6 +213,29 @@ def test_merge_stderr_puts_stderr_logs_into_the_context(cfg, tmp_path):
     assert on.merge_stderr is True
 
 
+def test_command_context_gets_byte_offsets_on_every_platform(cfg):
+    """A child writing "\\n" to a text-mode stdout emits "\\r\\n" on Windows and "\\n" on
+    POSIX, so a command context's bytes differ by host for identical output. The seek
+    fast path must engage either way: it briefly did not on Windows, which silently left
+    every command-sourced context there on the O(file)-per-chunk path while the same
+    command on Linux ran fast. Content-driven, so this asserts the same on both."""
+    from src.chunking import chunk_text
+
+    code = "import sys" + chr(59) + " [sys.stdout.write('line %d\\n' % i) for i in range(60)]"
+    store = ContextStore(cfg)
+    run = store.load_command([PY, "-c", code], source="source:t",
+                             timeout_s=30, max_bytes=1 << 20)
+    text = store.read_text(run.meta.ctx_id)
+    assert text.startswith("line 0\nline 1\n"), "newlines must read back translated"
+
+    chunks = chunk_text(text, "lines", chunk_lines=20, chunk_chars=120000, overlap=0)
+    store.set_chunks(run.meta.ctx_id, "lines", [c.as_dict() for c in chunks], text=text)
+    stored = store.get(run.meta.ctx_id).chunks
+    assert all(c["byte_start"] != -1 for c in stored), "command context lost the fast path"
+    for i, c in enumerate(stored):
+        assert store.read_chunk(run.meta.ctx_id, i) == text[c["start"]:c["end"]]
+
+
 def test_load_command_does_not_deadlock_on_large_stderr(cfg):
     # stderr on a pipe would fill its buffer while we drain only stdout, wedging both.
     store = ContextStore(cfg)
