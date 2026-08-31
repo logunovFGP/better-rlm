@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import textwrap
+from functools import partial
 from itertools import islice
 
 from mcp.server.fastmcp import FastMCP
@@ -526,6 +527,10 @@ def rlm_sub_query(ctx_id: str, prompt: str, chunk_index: int = -1) -> str:
     )
 
 
+def _mk_batch_prompt(ctx_id: str, prompt: str, i: int, n: int) -> str:
+    return f"{prompt}\n\n--- CHUNK {i + 1}/{n} ---\n{STORE.read_chunk(ctx_id, i)}"
+
+
 @mcp.tool()
 @logged_tool
 def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = True) -> str:
@@ -545,9 +550,14 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
                             chunk_chars=CFG.chunk_chars, overlap=CFG.chunk_overlap)
         STORE.set_chunks(ctx_id, CFG.chunk_strategy, [c.as_dict() for c in chunks])
         meta = STORE.get(ctx_id)
+        del text   # the full decode has served chunking; don't hold it for the whole batch
     n = len(meta.chunks)
     sel = range(n if max_chunks <= 0 else min(max_chunks, n))
-    prompts = [f"{prompt}\n\n--- CHUNK {i + 1}/{n} ---\n{STORE.read_chunk(ctx_id, i)}" for i in sel]
+    # Built lazily, one at a time inside each pool worker (sub_query_batch), not here —
+    # holding all N prompt strings at once is ~= the whole context in RAM for the entire
+    # multi-minute batch. Leaf 2's seek-based read_chunk is what makes per-worker reads
+    # cheap enough that this stays lazy without re-introducing slow reads serially.
+    prompts = [partial(_mk_batch_prompt, ctx_id, prompt, i, n) for i in sel]
     sub_model = models.select(CFG, models.Role.SUB)
     # BEFORE the map, not only after it: this batch runs for tens of minutes on a
     # large context, and until it returns the only trace is N indistinguishable

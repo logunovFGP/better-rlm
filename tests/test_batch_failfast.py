@@ -76,6 +76,55 @@ def test_ordinary_failure_does_not_discard_the_other_chunks(monkeypatch):
     assert len(calls) == 10, "a chunk-local failure must not abort the whole batch"
 
 
+# --- lazy prompt builders (Leaf 3 / option D) -------------------------------
+
+def _counting_builder(build_counts: list[int], i: int):
+    def _build() -> str:
+        build_counts.append(i)
+        return f"p{i}"
+    return _build
+
+
+def test_batch_builds_prompts_lazily_one_per_worker(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(sq, "_call", lambda model, prompt, max_tokens, system: (
+        calls.append(prompt), ("ok", 1, 1, "m"))[1])
+
+    build_counts: list[int] = []
+    builders = [_counting_builder(build_counts, i) for i in range(5)]
+    assert build_counts == [], "constructing the builders must not build any prompt"
+
+    results = sq.sub_query_batch(builders, "m", concurrency=2)
+    assert sorted(build_counts) == list(range(5)), "every item should be built exactly once"
+    assert len(calls) == 5
+    assert all(not r.error for r in results)
+
+
+def test_batch_reports_prompt_build_failure_without_aborting(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(sq, "_call", lambda model, prompt, max_tokens, system: (
+        calls.append(prompt), ("ok", 1, 1, "m"))[1])
+
+    def boom() -> str:
+        raise ValueError("cannot build")
+
+    results = sq.sub_query_batch(["p0", boom, "p2"], "m", concurrency=1)
+    assert "prompt build failed" in results[1].error
+    assert results[0].answer == "ok" and results[2].answer == "ok"
+    assert calls == ["p0", "p2"], "the failing builder must not reach _call"
+
+
+def test_fatal_auth_skip_happens_before_building(monkeypatch):
+    build_counts: list[int] = []
+    builders = [_counting_builder(build_counts, i) for i in range(10)]
+    monkeypatch.setattr(sq, "_call", lambda *a: (_ for _ in ()).throw(
+        CliAuthError("OAuth session expired")))
+
+    results = sq.sub_query_batch(builders, "m", concurrency=1)
+    assert build_counts == [0], "only the item already in flight when the flag tripped should build"
+    assert results[-1].error.startswith("skipped —")
+
+
 # --- rlm_status(probe=True): the line that separates "configured" from "working" ---
 def _login_ok(monkeypatch):
     """Pin the free login check to 'logged in' so these tests exercise the probe
@@ -320,6 +369,40 @@ def test_a_clean_map_is_logged_with_its_chunk_and_token_counts(monkeypatch):
     assert (rec["itok"], rec["otok"]) == (20, 6)
     assert rec["err_sample"] is None
     assert rec["ctx_id"] == "ctx_x", "every sub_batch phase carries ctx_id, not just map_start"
+
+
+def test_rlm_sub_query_batch_passes_builders_not_strings(monkeypatch):
+    """Leaf 3: the server must hand sub_query_batch lazy builders, not a materialized
+    list of full prompt strings — that list is ~= the whole context held in RAM for
+    the entire batch (the defect this plan fixes)."""
+    import src.server as srv
+
+    class _Meta:
+        chunks = [{"i": 0}, {"i": 1}, {"i": 2}]
+
+    class _Store:
+        def get(self, ctx_id):
+            return _Meta()
+
+        def read_chunk(self, ctx_id, i):
+            return f"chunk{i}"
+
+    seen: list = []
+
+    def fake_batch(prompts, model, concurrency=1):
+        seen.extend(prompts)
+        return [sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))]
+
+    monkeypatch.setattr(srv, "STORE", _Store())
+    monkeypatch.setattr(srv, "sub_query_batch", fake_batch)
+    srv.rlm_sub_query_batch("ctx_x", "audit every file", reduce=False)
+
+    assert all(callable(p) for p in seen), "prompts must be lazy builders, not strings"
+    assert [p() for p in seen] == [
+        "audit every file\n\n--- CHUNK 1/3 ---\nchunk0",
+        "audit every file\n\n--- CHUNK 2/3 ---\nchunk1",
+        "audit every file\n\n--- CHUNK 3/3 ---\nchunk2",
+    ]
 
 
 def test_a_successful_reduce_is_logged_with_the_batch_total(monkeypatch):
