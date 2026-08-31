@@ -1,3 +1,5 @@
+import json
+
 from src.chunking import chunk_text
 from src.context_store import ContextStore
 
@@ -72,18 +74,62 @@ def test_set_chunks_computes_byte_offsets_for_multibyte(cfg):
         assert data[c["byte_start"]:c["byte_end"]].decode("utf-8") == text[c["start"]:c["end"]]
 
 
-def test_set_chunks_byte_offsets_survive_crlf_file_loaded_in_place(cfg, tmp_path):
+def test_crlf_file_declines_byte_offsets_and_still_reads_correctly(cfg, tmp_path):
+    """read_text translates newlines, so char offsets on a CRLF file do NOT map to raw
+    byte positions. The offsets must therefore refuse to exist rather than be stored
+    wrong: an earlier attempt disabled translation globally to make them fit, which
+    shifted every previously-stored chunk and broke paragraph chunking."""
     store = ContextStore(cfg)
     p = tmp_path / "crlf.txt"
     p.write_bytes(b"one\r\ntwo\r\nthree\r\n")
     meta = store.load_file(str(p))
     text = store.read_text(meta.ctx_id)
+    assert "\r" not in text, "read_text must keep translating newlines"
     chunks = chunk_text(text, "lines", chunk_lines=1, chunk_chars=120000, overlap=0)
     store.set_chunks(meta.ctx_id, "lines", [c.as_dict() for c in chunks])
-    raw = p.read_bytes()
-    for c in store.get(meta.ctx_id).chunks:
-        assert c["byte_start"] != -1   # validated, not fallen back
-        assert raw[c["byte_start"]:c["byte_end"]].decode("utf-8") == text[c["start"]:c["end"]]
+    for i, c in enumerate(store.get(meta.ctx_id).chunks):
+        assert (c["byte_start"], c["byte_end"]) == (-1, -1)
+        assert store.read_chunk(meta.ctx_id, i) == text[c["start"]:c["end"]]
+
+
+def test_lone_cr_file_declines_byte_offsets(cfg, tmp_path):
+    """A lone "\\r" translates to "\\n" one-for-one, so the byte-count check alone cannot
+    see it: the totals match while a seek would return "\\r" where a char slice returns
+    "\\n". Only the carriage-return scan catches this one."""
+    store = ContextStore(cfg)
+    p = tmp_path / "cr.txt"
+    p.write_bytes(b"a\rb\rc\n")
+    meta = store.load_file(str(p))
+    text = store.read_text(meta.ctx_id)
+    assert text == "a\nb\nc\n" and len(text.encode()) == meta.bytes   # counts agree
+    chunks = chunk_text(text, "lines", chunk_lines=1, chunk_chars=120000, overlap=0)
+    store.set_chunks(meta.ctx_id, "lines", [c.as_dict() for c in chunks])
+    for i, c in enumerate(store.get(meta.ctx_id).chunks):
+        assert (c["byte_start"], c["byte_end"]) == (-1, -1)
+        assert store.read_chunk(meta.ctx_id, i) == text[c["start"]:c["end"]]
+
+
+def test_chunk_metas_written_before_byte_offsets_read_back_intact(cfg, tmp_path):
+    """The regression that made the offsets worth guarding: a context chunked before
+    byte offsets existed has char offsets computed on TRANSLATED text. Reading it must
+    return exactly what it returned then -- not a slice shifted by the \\r bytes."""
+    store = ContextStore(cfg)
+    p = tmp_path / "old.log"
+    p.write_bytes(b"alpha\r\nbravo\r\ncharlie\r\ndelta\r\n")
+    meta = store.load_file(str(p))
+    text = store.read_text(meta.ctx_id)
+    legacy = [c.as_dict() for c in
+              chunk_text(text, "lines", chunk_lines=2, chunk_chars=120000, overlap=0)]
+    for c in legacy:                      # a meta from before the fields existed
+        c.pop("byte_start"), c.pop("byte_end")
+    stored = store.get(meta.ctx_id)
+    stored.chunks, stored.chunk_strategy = legacy, "lines"
+    store._save(stored)
+
+    for i, c in enumerate(legacy):
+        assert store.read_chunk(meta.ctx_id, i) == text[c["start"]:c["end"]]
+    assert store.read_chunk(meta.ctx_id, 0) == "alpha\nbravo\n"
+    assert store.read_chunk(meta.ctx_id, 1) == "charlie\ndelta\n"
 
 
 def test_set_chunks_leaves_offsets_unset_on_invalid_utf8(cfg, tmp_path):
@@ -100,16 +146,13 @@ def test_set_chunks_leaves_offsets_unset_on_invalid_utf8(cfg, tmp_path):
     assert store.read_chunk(meta.ctx_id, 0) == text[chunks[0].start:chunks[0].end]
 
 
-def test_read_chunk_matches_read_text_slice_via_seek_path(cfg, tmp_path):
+def test_read_chunk_matches_read_text_slice_via_seek_path(cfg):
     store = ContextStore(cfg)
-    # ASCII, multibyte, and CRLF-on-disk contexts, all through the fast (byte-offset) path.
+    # Both take the fast path: no "\r" on disk, so char offsets map 1:1 to bytes.
     ascii_meta = store.load_text("line one\nline two\nline three\n")
     multibyte_meta = store.load_text("café\n字字字\nplain\n")
-    p = tmp_path / "crlf.txt"
-    p.write_bytes(b"one\r\ntwo\r\nthree\r\n")
-    crlf_meta = store.load_file(str(p))
 
-    for meta in (ascii_meta, multibyte_meta, crlf_meta):
+    for meta in (ascii_meta, multibyte_meta):
         text = store.read_text(meta.ctx_id)
         chunks = chunk_text(text, "lines", chunk_lines=1, chunk_chars=120000, overlap=0)
         store.set_chunks(meta.ctx_id, "lines", [c.as_dict() for c in chunks])
@@ -124,12 +167,53 @@ def test_read_chunk_falls_back_when_byte_offsets_missing(cfg):
     text = "a\nb\nc\n"
     meta = store.load_text(text)
     chunks = chunk_text(text, "lines", chunk_lines=1, chunk_chars=120000, overlap=0)
-    dicts = [c.as_dict() for c in chunks]
-    for d in dicts:
-        d["byte_start"] = d["byte_end"] = -1   # simulate a legacy/unvalidated meta
-    store.set_chunks(meta.ctx_id, "lines", dicts)
-    for i, c in enumerate(dicts):
-        assert store.read_chunk(meta.ctx_id, i) == text[c["start"]:c["end"]]
+    store.set_chunks(meta.ctx_id, "lines", [c.as_dict() for c in chunks])
+
+    # Strip the offsets from the STORED meta, after set_chunks. Seeding -1 into the dicts
+    # beforehand does NOT work: set_chunks recomputes them, so the test silently ran the
+    # seek path and asserted nothing about the fallback it is named for.
+    meta_path = store._meta_path(meta.ctx_id)
+    raw = json.loads(meta_path.read_text())
+    for c in raw["chunks"]:
+        c.pop("byte_start"), c.pop("byte_end")
+    meta_path.write_text(json.dumps(raw))
+    assert all("byte_start" not in c for c in store.get(meta.ctx_id).chunks)
+
+    for i, c in enumerate(chunks):
+        assert store.read_chunk(meta.ctx_id, i) == text[c.start:c.end]
+
+
+def test_set_chunks_does_not_decode_again_when_given_the_text(cfg, monkeypatch):
+    """Both server.py callers have just decoded the whole context to chunk it. Without
+    text=, the byte-offset pass decoded it a second time while that copy was still live
+    -- two full copies of a multi-GB context at once."""
+    store = ContextStore(cfg)
+    text = "line one\nline two\nline three\n"
+    meta = store.load_text(text)
+    chunks = [c.as_dict() for c in
+              chunk_text(text, "lines", chunk_lines=1, chunk_chars=120000, overlap=0)]
+
+    def boom(self, ctx_id):
+        raise AssertionError("set_chunks re-decoded the context the caller handed it")
+    monkeypatch.setattr(ContextStore, "read_text", boom)
+    store.set_chunks(meta.ctx_id, "lines", chunks, text=text)
+    assert all(c["byte_start"] != -1 for c in store.get(meta.ctx_id).chunks)
+
+
+def test_paragraph_chunking_still_works_on_a_crlf_context(cfg, tmp_path):
+    """The symptom that made the newline change untenable: chunk_text's paragraph regex
+    (r"\\n[ \\t]*\\n") cannot match "\\r\\n\\r\\n", so an untranslated CRLF context found
+    ZERO paragraph boundaries and "paragraphs"/"semantic" silently became blind cuts."""
+    store = ContextStore(cfg)
+    p = tmp_path / "doc.txt"
+    body = b"para one\r\n\r\npara two\r\n\r\npara three\r\n"
+    p.write_bytes(body)
+    meta = store.load_file(str(p))
+    text = store.read_text(meta.ctx_id)
+    chunks = chunk_text(text, "paragraphs", chunk_lines=2000, chunk_chars=12, overlap=0)
+    # Boundaries land on the blank lines, not on arbitrary 12-char cuts.
+    assert [text[c.start:c.end] for c in chunks][0].startswith("para one")
+    assert any(c.end < len(text) and text[c.end - 1] == "\n" for c in chunks)
 
 
 def test_read_chunk_fast_path_never_calls_read_text(cfg, monkeypatch):
