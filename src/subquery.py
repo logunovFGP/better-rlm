@@ -9,6 +9,7 @@ auth mode (OAuth -> claude CLI, API key -> Anthropic SDK).
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
@@ -53,7 +54,7 @@ def sub_query(prompt: str, model: str, *, max_tokens: int = 4096,
         return SubResult(0, "", 0, 0, error=str(exc))
 
 
-def sub_query_batch(prompts: list[str], model: str, *, concurrency: int,
+def sub_query_batch(prompts: Sequence[str | Callable[[], str]], model: str, *, concurrency: int,
                     max_tokens: int = 2048, system: str | None = None) -> list[SubResult]:
     # Pool workers start with a fresh contextvars context, so capture the caller's
     # correlation id here and re-bind it inside each worker — otherwise the nested
@@ -67,10 +68,16 @@ def sub_query_batch(prompts: list[str], model: str, *, concurrency: int,
     # flight finish; a threading.Event only matters if that ever costs something.
     fatal: list[str] = []
 
-    def work(item: tuple[int, str]) -> SubResult:
-        idx, prompt = item
+    def work(item: tuple[int, str | Callable[[], str]]) -> SubResult:
+        idx, entry = item
         if fatal:
             return SubResult(idx, "", 0, 0, error=f"skipped — {fatal[0]}")
+        try:
+            # Built here, not by the caller: a lazy builder keeps only `concurrency`
+            # prompt strings live at once instead of the whole batch (Leaf 3 / option D).
+            prompt = entry() if callable(entry) else entry
+        except Exception as exc:
+            return SubResult(idx, "", 0, 0, error=f"prompt build failed — {exc}")
         with bind_rid(parent_rid):
             try:
                 text, itok, otok, used = _call(model, prompt, max_tokens, system)
