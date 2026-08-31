@@ -217,3 +217,22 @@ def test_sweep_leaves_no_tmp_when_sentinel_replace_fails(tmp_path):
     (tmp_path / ".sweep").mkdir()  # os.replace onto a directory raises OSError
     ls._run_retention_sweep(cfg, tmp_path / "rlm-mcp-own.log")
     assert list(tmp_path.glob(".sweep.*.tmp")) == []
+
+
+def test_sweep_collects_orphaned_tmps_but_spares_one_in_flight(tmp_path):
+    """The unlink on a failed replace cannot fire for a process KILLED between the
+    write and the replace — SIGKILL runs no except block, and the pre-warmed spares
+    are killed routinely. The sweep collects those strays, and is what retires the
+    ones older builds left behind. A fresh tmp is another process mid-write: spare it.
+    """
+    cfg = _cfg(tmp_path, log_sweep_cooldown_s=0)
+    old = tmp_path / ".sweep.29936.tmp"
+    old.write_text("1787950531.8465369")
+    os.utime(old, (1, 1))  # ancient -> debris
+    fresh = tmp_path / ".sweep.111.tmp"
+    fresh.write_text("now")  # just written -> could be in flight
+
+    ls._run_retention_sweep(cfg, tmp_path / "rlm-mcp-own.log")
+
+    assert not old.exists()
+    assert fresh.exists()

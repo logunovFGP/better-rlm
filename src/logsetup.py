@@ -38,6 +38,10 @@ from .output import bound_output
 
 LOGGER_NAME = "rlm-mcp"
 _MAX_VAL_LEN = 500  # clamp any single logged value so one record can't bloat the file
+#: A .sweep.<pid>.tmp older than this is debris, not a write in flight. Generous on
+#: purpose: the cost of waiting is 18 bytes, the cost of being wrong is deleting the
+#: sentinel update of a live process.
+_TMP_ORPHAN_AGE_S = 300
 
 # Correlation id for the in-flight tool call. logged_tool binds it; log_event reads
 # it and stamps every nested event (cli_spawn, rlm_query, retry, sub_batch) with the
@@ -160,6 +164,15 @@ def _run_retention_sweep(cfg: Config, own_path: Path) -> None:
             # else ever collects one. (Found one stuck in ~/.rlm/logs for days.)
             with contextlib.suppress(OSError):
                 tmp.unlink(missing_ok=True)
+        # That unlink covers a FAILED replace, but not a process KILLED between the
+        # write and the replace — no except block runs for SIGKILL, and the pool of
+        # pre-warmed spares is killed routinely. So collect strays here as well, which
+        # is also what retires the ones older builds already left behind. Age-gated so
+        # a tmp another process is mid-write on is never taken.
+        for stray in log_dir.glob(".sweep.*.tmp"):
+            with contextlib.suppress(OSError):
+                if now - stray.stat().st_mtime > _TMP_ORPHAN_AGE_S:
+                    _unlink(stray)
 
         entries = []
         for p in log_dir.glob("rlm-mcp-*.log*"):
