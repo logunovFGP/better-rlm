@@ -100,6 +100,52 @@ def test_set_chunks_leaves_offsets_unset_on_invalid_utf8(cfg, tmp_path):
     assert store.read_chunk(meta.ctx_id, 0) == text[chunks[0].start:chunks[0].end]
 
 
+def test_read_chunk_matches_read_text_slice_via_seek_path(cfg, tmp_path):
+    store = ContextStore(cfg)
+    # ASCII, multibyte, and CRLF-on-disk contexts, all through the fast (byte-offset) path.
+    ascii_meta = store.load_text("line one\nline two\nline three\n")
+    multibyte_meta = store.load_text("café\n字字字\nplain\n")
+    p = tmp_path / "crlf.txt"
+    p.write_bytes(b"one\r\ntwo\r\nthree\r\n")
+    crlf_meta = store.load_file(str(p))
+
+    for meta in (ascii_meta, multibyte_meta, crlf_meta):
+        text = store.read_text(meta.ctx_id)
+        chunks = chunk_text(text, "lines", chunk_lines=1, chunk_chars=120000, overlap=0)
+        store.set_chunks(meta.ctx_id, "lines", [c.as_dict() for c in chunks])
+        stored = store.get(meta.ctx_id).chunks
+        assert all(c["byte_start"] != -1 for c in stored), "expected the validated fast path"
+        for i, c in enumerate(stored):
+            assert store.read_chunk(meta.ctx_id, i) == text[c["start"]:c["end"]]
+
+
+def test_read_chunk_falls_back_when_byte_offsets_missing(cfg):
+    store = ContextStore(cfg)
+    text = "a\nb\nc\n"
+    meta = store.load_text(text)
+    chunks = chunk_text(text, "lines", chunk_lines=1, chunk_chars=120000, overlap=0)
+    dicts = [c.as_dict() for c in chunks]
+    for d in dicts:
+        d["byte_start"] = d["byte_end"] = -1   # simulate a legacy/unvalidated meta
+    store.set_chunks(meta.ctx_id, "lines", dicts)
+    for i, c in enumerate(dicts):
+        assert store.read_chunk(meta.ctx_id, i) == text[c["start"]:c["end"]]
+
+
+def test_read_chunk_fast_path_never_calls_read_text(cfg, monkeypatch):
+    store = ContextStore(cfg)
+    text = "a\nb\nc\n"
+    meta = store.load_text(text)
+    chunks = chunk_text(text, "lines", chunk_lines=1, chunk_chars=120000, overlap=0)
+    store.set_chunks(meta.ctx_id, "lines", [c.as_dict() for c in chunks])
+    assert all(c["byte_start"] != -1 for c in store.get(meta.ctx_id).chunks)
+
+    def boom(self, ctx_id):
+        raise AssertionError("read_chunk should not fall back to read_text here")
+    monkeypatch.setattr(ContextStore, "read_text", boom)
+    assert store.read_chunk(meta.ctx_id, 0) == "a\n"
+
+
 def test_old_meta_without_byte_offset_keys_still_loads(cfg):
     store = ContextStore(cfg)
     meta = store.load_text("a\nb\n")

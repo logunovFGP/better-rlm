@@ -380,7 +380,16 @@ class ContextStore:
         if index < 0 or index >= len(meta.chunks):
             raise IndexError(f"chunk {index} out of range (0..{len(meta.chunks) - 1})")
         ch = meta.chunks[index]
-        return self.read_text(ctx_id)[ch["start"]:ch["end"]]
+        byte_start, byte_end = ch.get("byte_start", -1), ch.get("byte_end", -1)
+        if 0 <= byte_start <= byte_end:
+            # Binary seek + bounded read: O(chunk), never decodes the rest of the file.
+            # Safe to decode the slice on its own: byte_start/byte_end came from Leaf 1's
+            # validated char->byte walk, so they always land on UTF-8 sequence boundaries.
+            with open(meta.content_path, "rb") as fh:
+                fh.seek(byte_start)
+                raw = fh.read(byte_end - byte_start)
+            return raw.decode("utf-8", errors="replace")
+        return self.read_text(ctx_id)[ch["start"]:ch["end"]]   # legacy/unvalidated metas
 
     def grep(self, ctx_id: str, pattern: str, *, ignore_case: bool = False,
              max_matches: int = 50, max_line_len: int = 500) -> tuple[list[tuple[int, str]], bool]:
