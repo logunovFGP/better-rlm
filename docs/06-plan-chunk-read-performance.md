@@ -1,6 +1,6 @@
 # Plan — C+D: seek-based chunk reads + lazy batch prompts
 
-Status: **approved for implementation (C+D chosen; option A skipped — subsumed by C).**
+Status: **implemented 2026-09-01 — all 3 leaves merged to main, final acceptance passed.**
 Written 2026-09-01 from a measured investigation. This document is written to be
 executed by an agent with no other conversation context.
 
@@ -125,9 +125,9 @@ offsets. No reader uses them yet — this leaf is inert for behavior.
 
 ### Done when
 
-- [ ] `uv run --extra dev pytest -q` green
-- [ ] New chunk metas carry validated `byte_start/byte_end`; behavior otherwise unchanged
-- [ ] Merged `--no-ff` to `main`, leaf deleted
+- [x] `uv run --extra dev pytest -q` green
+- [x] New chunk metas carry validated `byte_start/byte_end`; behavior otherwise unchanged
+- [x] Merged `--no-ff` to `main`, leaf deleted
 
 ---
 
@@ -169,9 +169,12 @@ when they don't (old metas, invalid-UTF-8 files).
 
 ### Done when
 
-- [ ] `uv run --extra dev pytest -q` green
-- [ ] `read_chunk` never calls `read_text` for offset-bearing metas
-- [ ] Merged `--no-ff` to `main`, leaf deleted
+- [x] `uv run --extra dev pytest -q` green
+- [x] `read_chunk` never calls `read_text` for offset-bearing metas
+- [x] Merged `--no-ff` to `main`, leaf deleted
+
+Measured (20 MB / 200 chunks): `read_chunk(last)` 0.71 ms vs 12.17 ms for a full
+`read_text` + slice (~17x; see the leaf's merge commit for the same numbers).
 
 ---
 
@@ -227,9 +230,9 @@ cheap, or laziness re-introduces slow reads *serially* inside workers).
 
 ### Done when
 
-- [ ] `uv run --extra dev pytest -q` green
-- [ ] No list of full prompt strings exists in `rlm_sub_query_batch`
-- [ ] Merged `--no-ff` to `main`, leaf deleted
+- [x] `uv run --extra dev pytest -q` green
+- [x] No list of full prompt strings exists in `rlm_sub_query_batch`
+- [x] Merged `--no-ff` to `main`, leaf deleted
 
 ---
 
@@ -239,10 +242,14 @@ Synthetic check, ~20 MB line-chunked file via a scratch script (pattern: build f
 → `load_file` → `chunk_text`+`set_chunks` → time/`tracemalloc` the batch prompt
 path with a stubbed `_call`):
 
-- [ ] Per-chunk `read_chunk` ~1 ms (was O(file))
-- [ ] Peak traced memory of the batch path ≈ a few chunk-sizes, NOT ≈ 3× file size
-- [ ] Batch of a legacy (offset-less) meta still returns identical answers (fallback)
-- [ ] Reconnect the MCP server before any live verification (imports load once)
+- [x] Per-chunk `read_chunk` ~1 ms (was O(file)) — measured 1.32 ms avg over 200 chunks, 20 MB
+- [x] Peak traced memory of the batch path ≈ a few chunk-sizes, NOT ≈ 3× file size —
+      measured 1.30 MB peak vs a 0.10 MB chunk / 20.1 MB file (concurrency=4, stubbed `_call`)
+- [x] Batch of a legacy (offset-less) meta still returns identical answers (fallback) —
+      verified: stripped `byte_start/byte_end` from a stored meta, `read_chunk` output
+      unchanged for every chunk
+- [ ] Reconnect the MCP server before any live verification (imports load once) —
+      unchanged since edits: still required before any live tool call relies on this
 
 ## Explicitly out of scope
 
