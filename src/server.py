@@ -549,6 +549,13 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
     sel = range(n if max_chunks <= 0 else min(max_chunks, n))
     prompts = [f"{prompt}\n\n--- CHUNK {i + 1}/{n} ---\n{STORE.read_chunk(ctx_id, i)}" for i in sel]
     sub_model = models.select(CFG, models.Role.SUB)
+    # BEFORE the map, not only after it: this batch runs for tens of minutes on a
+    # large context, and until it returns the only trace is N indistinguishable
+    # cli_spawn lines under one rid — no ctx_id, and no denominator to count them
+    # against. That is the difference between "377 of 408" and "possibly hung".
+    log_event(LOG, "sub_batch", phase="map_start", ctx_id=ctx_id,
+              chunks=len(prompts), total_chunks=n,
+              concurrency=CFG.subquery_concurrency)
     results = sub_query_batch(prompts, sub_model, concurrency=CFG.subquery_concurrency)
     itok = sum(r.input_tokens for r in results)
     otok = sum(r.output_tokens for r in results)
@@ -557,13 +564,9 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
     # models.select maps a configured id to its closest subscription sibling.
     used = sorted({r.model for r in results if r.model}) or [sub_model]
     used_label = ", ".join(used)
-    # Unconditional, not only on failure: the parent tool_call record carries no
-    # chunk count and no token counts, so without this a *successful* batch is N
-    # indistinguishable cli_spawn lines under one rid — the most expensive tool is
-    # the one you cannot account for afterwards. errors/err_sample still surface
-    # partial failures the success string would otherwise hide (err_sample is None
-    # on a clean run, and log_event drops None fields). Same rid ties this back to
-    # the parent tool_call.
+    # Unconditional, not only on failure: the parent tool_call record carries neither
+    # a chunk count nor token counts, so without this a successful batch is just N
+    # indistinguishable cli_spawn lines under one rid. Same rid ties it back.
     log_event(LOG, "sub_batch", phase="map", chunks=len(prompts),
               errors=len(errs), itok=itok, otok=otok,
               err_sample=errs[0].error if errs else None)
@@ -614,11 +617,8 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
     if not red.error:
         itok += red.input_tokens
         otok += red.output_tokens
-    # Same rule as the map record above, for the same reason: a reduce that SUCCEEDS
-    # still spends a cli_spawn and tokens, and logging only the failure leaves those
-    # in no record at all — the map totals would then understate every reduce batch.
-    # itok/otok here are the batch total (map + reduce); reduce_error is None on
-    # success and log_event drops it.
+    # On success too: a reduce that works still spends a call and tokens, and the map
+    # totals would otherwise understate every reduce batch. itok/otok are map+reduce.
     log_event(LOG, "sub_batch", phase="reduce", chunks=len(prompts),
               errors=len(errs), itok=itok, otok=otok, reduce_error=red.error)
     if red.error:

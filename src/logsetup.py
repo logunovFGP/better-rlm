@@ -156,9 +156,8 @@ def _run_retention_sweep(cfg: Config, own_path: Path) -> None:
             tmp.write_text(str(now))
             os.replace(tmp, sentinel)
         except OSError:
-            # A failed replace (on Windows, another process holding the sentinel) must
-            # not leave the tmp behind: the prune below globs rlm-mcp-*.log*, so nothing
-            # ever collects these. Observed one orphaned in ~/.rlm/logs for days.
+            # Don't orphan the tmp: the prune below globs rlm-mcp-*.log*, so nothing
+            # else ever collects one. (Found one stuck in ~/.rlm/logs for days.)
             with contextlib.suppress(OSError):
                 tmp.unlink(missing_ok=True)
 
@@ -257,10 +256,8 @@ def configure_logging(cfg: Config) -> logging.Logger:
 # Per-tool-call logging decorator (DRY across the 12 @mcp.tool() functions)
 # --------------------------------------------------------------------------- #
 # Args worth logging (identifiers/flags — never the content itself), each mapped to the
-# ONE value that means "not supplied" for that argument. Per-arg, because a blanket
-# "drop anything falsy" is wrong twice: chunk_index=0 is the FIRST chunk and reduce=False
-# is a real choice, so dropping them makes a supplied value indistinguishable from an
-# absent one. max_chunks=0 genuinely is the "no limit" default and stays dropped.
+# value meaning "not supplied". Per-arg because falsy != absent: chunk_index=0 is the
+# FIRST chunk and reduce=False a real choice, while max_chunks=0 IS the no-limit default.
 _ID_ARGS = {"ctx_id": "", "model_override": "", "reduce": None,
             "chunk_index": -1, "max_chunks": 0, "strategy": ""}
 _LEN_ARGS = ("question", "prompt", "code", "source")
@@ -289,9 +286,8 @@ def logged_tool(fn):
             named = dict(kwargs)
         for k, unset in _ID_ARGS.items():
             v = named.get(k)
-            # Compare against that arg's own sentinel, and only when the types match:
-            # a bare `v == unset` would drop reduce=False against a 0 sentinel, since
-            # False == 0 in Python. That equality is the bug this guards.
+            # Type-first: a bare `v == unset` drops reduce=False against a 0 sentinel,
+            # since False == 0 in Python. That equality is the bug this guards.
             if v is None or (type(v) is type(unset) and v == unset):
                 continue
             fields[k] = v

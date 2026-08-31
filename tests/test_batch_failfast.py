@@ -244,3 +244,41 @@ def test_lm_handler_batch_does_not_abort_on_a_local_failure():
     req = LMRequest(prompts=[f"p{i}" for i in range(20)])
     LMRequestHandler._handle_batched(None, req, _Handler())
     assert len(calls) == 20, "a chunk-local failure aborted the batch"
+
+
+def test_map_start_is_logged_before_the_fan_out(monkeypatch):
+    """A 408-chunk batch runs for tens of minutes. Logging the batch only when it
+    RETURNS leaves an in-flight run as N indistinguishable cli_spawn lines with no
+    ctx_id and no denominator — indistinguishable from hung. The record has to land
+    before sub_query_batch is entered, not after it comes back.
+    """
+    import src.server as srv
+
+    class _Meta:
+        chunks = [{"i": 0}, {"i": 1}, {"i": 2}]
+
+    class _Store:
+        def get(self, ctx_id):
+            return _Meta()
+
+        def read_chunk(self, ctx_id, i):
+            return f"chunk{i}"
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(srv, "STORE", _Store())
+    monkeypatch.setattr(srv, "log_event", lambda log, evt, **f: events.append((evt, f)))
+
+    seen_at_fan_out: list[list[str]] = []
+
+    def fake_batch(prompts, model, concurrency=1):
+        seen_at_fan_out.append([f.get("phase") for e, f in events if e == "sub_batch"])
+        return [sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))]
+
+    monkeypatch.setattr(srv, "sub_query_batch", fake_batch)
+    srv.rlm_sub_query_batch("ctx_x", "audit every file", max_chunks=2, reduce=False)
+
+    assert seen_at_fan_out == [["map_start"]], "map_start did not land before the fan-out"
+    phase, fields = next((e, f) for e, f in events if f.get("phase") == "map_start")
+    # ctx_id and the denominator are the two things the cli_spawn lines cannot supply.
+    assert fields["ctx_id"] == "ctx_x"
+    assert (fields["chunks"], fields["total_chunks"]) == (2, 3)
