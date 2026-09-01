@@ -119,19 +119,6 @@ def _translate_newlines(s: str) -> str:
     return s.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _has_carriage_return(path: Path) -> bool:
-    """True if the raw file contains any b"\\r" -- i.e. reading it as text translates
-    newlines, so char offsets taken on that text do NOT map to raw byte positions.
-
-    Streamed, so it costs one bounded-memory pass and no decode. The byte-count check in
-    _add_byte_offsets catches CRLF on its own (each "\\r\\n" collapses to one char, so the
-    totals diverge) but NOT a lone "\\r": that translates to "\\n" one-for-one, the totals
-    match, and a seek would then return "\\r" where a char slice returns "\\n".
-    """
-    with open(path, "rb") as fh:
-        return any(b"\r" in block for block in iter(lambda: fh.read(1 << 20), b""))
-
-
 def _looks_binary(path: Path) -> bool:
     """Heuristic: a NUL byte in the first KB means binary.
 
@@ -474,57 +461,69 @@ class ContextStore:
         premise is contexts too large to hold.
         """
         meta = self.get(ctx_id)
-        self._add_byte_offsets(meta, chunks, text)
         meta.chunk_strategy = strategy
-        meta.chunks = chunks
+        meta.chunks = self._with_byte_offsets(meta, chunks, text)
         return self._save(meta)
 
-    def _add_byte_offsets(self, meta: ContextMeta, chunks: list[dict],
-                          text: str | None = None) -> None:
-        """Map each chunk's char offsets to byte offsets in one O(n) prefix-sum pass, so
-        read_chunk can seek() instead of re-decoding the whole file per chunk.
+    def _with_byte_offsets(self, meta: ContextMeta, chunks: list[dict],
+                           text: str | None = None) -> list[dict]:
+        """Return copies of ``chunks`` carrying byte offsets, so read_chunk can seek()
+        instead of re-decoding the whole file per chunk. Copies, not edits in place: this
+        method used to rewrite the caller's dicts, which silently overwrote offsets a
+        caller had set deliberately -- that is what made an earlier fallback test vacuous.
 
         read_text applies universal-newline translation, so a char offset only lands on a
-        byte boundary once we know what that translation cost. Two walks are possible and
-        the byte total says which, if either, is exact:
+        byte boundary once we know what that translation cost. Each "\\n" in the text is
+        worth either 1 byte (it was "\\n", or a lone "\\r") or 2 (it was "\\r\\n"), and the
+        file's own size picks which, with no need to go looking for "\\r" on disk:
 
-        * ``per_newline = 0`` -- the file holds no "\\r", so translation was a no-op and
-          char offsets already sit on byte boundaries.
-        * ``per_newline = 1`` -- every "\\n" in the text was a "\\r\\n" on disk, so each
-          costs one extra byte. This can only validate for a *pure* CRLF file: with A
-          CRLF pairs, B lone "\\n" and C lone "\\r", the walk totals ``utf8len + A+B+C``
-          while the file holds ``utf8len + A``, so anything mixed (B+C > 0) comes up
-          wrong and is refused. A lone-"\\r" file is refused the same way -- which the
-          byte total alone could not do, since "\\r" -> "\\n" preserves the count.
+        * ``plain == meta.bytes`` -- no "\\r\\n" pairs. Char offsets already sit on byte
+          boundaries. A lone-"\\r" file lands here and is CORRECT, because "\\r" -> "\\n"
+          is one byte for one char and read_chunk translates what it seeks.
+        * ``plain + newlines == meta.bytes`` -- every "\\n" was a "\\r\\n". With A pairs,
+          B lone "\\n" and C lone "\\r" this totals ``plain + A+B+C`` against a file
+          holding ``plain + A``, so it can only match when B+C is 0: a pure-CRLF file,
+          exactly where the assumption holds. Mixed endings match neither and are refused.
 
-        The total also catches errors="replace" drift, where an invalid byte becomes
-        U+FFFD and re-encodes to 3.
+        The totals also catch errors="replace" drift, where an invalid byte becomes U+FFFD
+        and re-encodes to 3.
 
-        Whichever walk ran, the result is then proven on real bytes by re-reading the
-        LAST chunk -- the one carrying every accumulated error -- and comparing it to the
-        text. Two silent-corruption bugs came out of this mapping; the arithmetic above
-        is sound but has not earned the right to be trusted on its own.
+        The winning walk is then proven on real bytes by re-reading the LAST chunk -- the
+        one carrying every accumulated error -- and comparing it to the text. Two
+        silent-corruption bugs came out of this mapping; the arithmetic above is sound but
+        has not earned the right to be trusted on its own.
 
-        Any check failing leaves byte_start/byte_end at their Chunk default of -1 and
+        Anything unproven leaves byte_start/byte_end at their Chunk default of -1 and
         readers take the char-offset slow path -- slower, never wrong.
         """
         if text is None:
             text = self.read_text(meta.ctx_id)
-        per_newline = 1 if _has_carriage_return(Path(meta.content_path)) else 0
+        # Span by span, never len(text.encode()) over the whole thing: that would
+        # materialize a second full copy of a multi-GB context as bytes.
         positions = sorted({p for c in chunks for p in (c["start"], c["end"])})
-        byte_at: dict[int, int] = {}
-        total = prev = 0
+        cumulative: dict[int, tuple[int, int]] = {}
+        plain = newlines = prev = 0
         for p in positions:
             span = text[prev:p]
-            total += len(span.encode("utf-8")) + per_newline * span.count("\n")
-            byte_at[p] = total
+            plain += len(span.encode("utf-8"))
+            newlines += span.count("\n")
+            cumulative[p] = (plain, newlines)
             prev = p
         tail = text[prev:]
-        total += len(tail.encode("utf-8")) + per_newline * tail.count("\n")
-        if total != meta.bytes or not self._probe_mapping(meta, chunks, byte_at, text):
-            return
-        for c in chunks:
-            c["byte_start"], c["byte_end"] = byte_at[c["start"]], byte_at[c["end"]]
+        total_plain = plain + len(tail.encode("utf-8"))
+        total_newlines = newlines + tail.count("\n")
+
+        if total_plain == meta.bytes:
+            per_newline = 0
+        elif total_plain + total_newlines == meta.bytes:
+            per_newline = 1
+        else:
+            return [dict(c) for c in chunks]
+        byte_at = {p: b + per_newline * n for p, (b, n) in cumulative.items()}
+        if not self._probe_mapping(meta, chunks, byte_at, text):
+            return [dict(c) for c in chunks]
+        return [{**c, "byte_start": byte_at[c["start"]], "byte_end": byte_at[c["end"]]}
+                for c in chunks]
 
     @staticmethod
     def _probe_mapping(meta: ContextMeta, chunks: list[dict],

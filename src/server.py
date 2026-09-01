@@ -37,7 +37,11 @@ from .config import (
 from .context_store import ContextStore
 from .engine import ReplSession, run_query
 from .logsetup import configure_logging, log_event, logged_tool, note_startup
+# Imported under their old private names: tests reach for srv._meta_block, and these are
+# pure ContextMeta presentation that moved to output.py to keep this file under 800 lines.
 from .output import bound_output
+from .output import meta_block as _meta_block
+from .output import skipped_block as _skipped_block
 from .sandbox_reap import container_image_status
 from .shutdown import install_shutdown_hooks
 from .subquery import sub_query, sub_query_batch
@@ -79,57 +83,6 @@ def _cost_note(model: str, itok: int, otok: int) -> str:
     if not CFG.report_cost:
         return ""
     return f"  |  cost: ${cost_usd(model, itok, otok):.4f}"
-
-
-#: Skips that are the POINT of the skip lists, not a surprise (node_modules, .env).
-_EXPECTED_SKIPS = frozenset({"skip-dir", "skip-name"})
-
-
-def _skipped_block(meta) -> str:
-    """Report what a dir load did not ingest, loudly ONLY when it is surprising.
-
-    A partial load that reports success is worse than a failure: an answer over the
-    remaining files is wrong BY OMISSION and nothing contradicts it. Observed: 173 of
-    184 files loaded, the 11 missing ones the exact subject of the question.
-
-    But node_modules being skipped is the intent, not an incident. Screaming INCOMPLETE
-    on every JS project trains the reader to skip the line -- and then it is not there
-    when 11 source files really do vanish. So policy exclusions get one quiet count and
-    the surprising ones get the alarm.
-    """
-    counts = dict(getattr(meta, "skipped_counts", None) or {})
-    if not counts:
-        return ""
-    expected = {k: v for k, v in counts.items() if k in _EXPECTED_SKIPS}
-    surprising = {k: v for k, v in counts.items() if k not in _EXPECTED_SKIPS}
-    out = ""
-    if expected:
-        detail = ", ".join(f"{k} x{v:,}" for k, v in sorted(expected.items()))
-        out += f"\n- excluded by policy: {sum(expected.values()):,} ({detail})"
-    if surprising:
-        n = sum(surprising.values())
-        total = meta.file_count + sum(counts.values())
-        detail = ", ".join(f"{k} x{v:,}" for k, v in sorted(surprising.items()))
-        out += (f"\n- ⚠ **INCOMPLETE — {n:,} readable file(s) were NOT loaded** "
-                f"(of {total:,} found; {detail}).\n"
-                "  Any answer from this context is wrong by omission if it needed one:\n")
-        sample = [e for e in (getattr(meta, "skipped", None) or [])
-                  if e.split(":", 1)[0] not in _EXPECTED_SKIPS][:20]
-        out += "".join(f"    {e}\n" for e in sample).rstrip("\n")
-        if n > len(sample):
-            out += f"\n    … and {n - len(sample):,} more"
-    return out
-
-
-def _meta_block(meta) -> str:
-    return (
-        f"**ctx_id:** `{meta.ctx_id}`\n"
-        f"- source: {meta.source}  ({meta.source_type}/{meta.data_type})\n"
-        f"- size: {meta.bytes:,} bytes, {meta.lines:,} lines, ~{meta.est_tokens:,} tokens\n"
-        f"- files: {meta.file_count}\n"
-        f"- sha256: {meta.sha256[:16]}…"
-        + _skipped_block(meta)
-    )
 
 
 def _resolve_root_model(model_override: str) -> str:
@@ -617,7 +570,17 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
         return _raw("\n_(findings too large to reduce in one pass — showing raw; use "
                     "fewer/larger chunks, or rlm_query for engine-side reduction)_")
 
-    # REDUCE: fold the per-chunk findings into one synthesis (one more sub-model call).
+    return _reduce_findings(findings, prompt, sub_model, ctx_id=ctx_id, note=note,
+                            n_prompts=len(prompts), n_errors=len(errs), used_label=used_label,
+                            itok=itok, otok=otok, raw=_raw)
+
+
+def _reduce_findings(findings: str, prompt: str, sub_model: str, *, ctx_id: str, note: str,
+                     n_prompts: int, n_errors: int, used_label: str, itok: int, otok: int,
+                     raw) -> str:
+    """Fold the per-chunk findings into one synthesis (one more sub-model call), and
+    render it. Falls back to ``raw(...)`` — the caller's per-chunk report — when the
+    reduce call fails, so a failed synthesis never discards the findings it was given."""
     reduce_prompt = (
         "Reduce these independent per-chunk findings from one large document into a "
         "single answer.\n"
@@ -632,12 +595,12 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
         otok += red.output_tokens
     # On success too: a reduce that works still spends a call and tokens, and the map
     # totals would otherwise understate every reduce batch. itok/otok are map+reduce.
-    log_event(LOG, "sub_batch", phase="reduce", ctx_id=ctx_id, chunks=len(prompts),
-              errors=len(errs), itok=itok, otok=otok, reduce_error=red.error)
+    log_event(LOG, "sub_batch", phase="reduce", ctx_id=ctx_id, chunks=n_prompts,
+              errors=n_errors, itok=itok, otok=otok, reduce_error=red.error)
     if red.error:
-        return _raw(f"\n_(reduce pass failed: {red.error}; showing raw findings)_")
+        return raw(f"\n_(reduce pass failed: {red.error}; showing raw findings)_")
     return _answer(
-        f"## Batch sub-query — map+reduce over {len(prompts)} chunks ({used_label}"
+        f"## Batch sub-query — map+reduce over {n_prompts} chunks ({used_label}"
         f" · auth: {transport.auth_label(CFG)})\n"
         f"tokens: {itok:,} in / {otok:,} out{_cost_note(sub_model, itok, otok)}{note}\n\n"
         f"{red.answer.strip()}"
