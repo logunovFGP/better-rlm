@@ -6,6 +6,7 @@ fatal, and sub_query_batch has to stop fanning out once it has seen one — with
 throwing away chunks that fail for their own, local reasons.
 """
 
+import dataclasses
 import json
 
 import pytest
@@ -489,3 +490,74 @@ def test_a_successful_reduce_is_logged_with_the_batch_total(monkeypatch):
     assert (rec["itok"], rec["otok"]) == (25, 8), "map 20/6 + reduce 5/2"
     assert rec["reduce_error"] is None
     assert rec["ctx_id"] == "ctx_x"
+
+
+# --- the three report branches the coverage report showed uncovered ----------
+# All are "the batch partly worked" paths: the map spent real model calls, so each must
+# still hand back the per-chunk findings rather than an error or an empty answer.
+
+def _batch_over(monkeypatch, results, *, n_chunks=3, reduce=True, sub_context_tokens=None):
+    """Drive rlm_sub_query_batch over a stub context whose map returns `results`."""
+    import src.server as srv
+
+    class _Meta:
+        chunks = [{"i": i} for i in range(n_chunks)]
+
+    class _Store:
+        def get(self, ctx_id):
+            return _Meta()
+
+        def read_chunk(self, ctx_id, i):
+            return f"chunk{i}"
+
+    monkeypatch.setattr(srv, "STORE", _Store())
+    monkeypatch.setattr(srv, "log_event", lambda log, evt, **f: None)
+    monkeypatch.setattr(srv, "sub_query_batch", lambda prompts, model, concurrency=1: results)
+    monkeypatch.setattr(srv, "sub_query",
+                        lambda *a, **k: sq.SubResult(0, "synthesis", 1, 1))
+    if sub_context_tokens is not None:
+        # Config is a frozen dataclass: swap the whole object, do not poke a field.
+        monkeypatch.setattr(
+            srv, "CFG", dataclasses.replace(srv.CFG, sub_context_tokens=sub_context_tokens))
+    return srv.rlm_sub_query_batch("ctx_x", "audit every file", reduce=reduce)
+
+
+def test_a_partly_failed_map_notes_the_skipped_chunks_and_keeps_the_rest(monkeypatch):
+    """One chunk erroring must not cost the others. The count in the note is what tells a
+    reader the answer is partial -- without it a 2-of-3 result reads as complete."""
+    out = _batch_over(monkeypatch, [
+        sq.SubResult(0, "finding 0", 10, 3),
+        sq.SubResult(1, "", 0, 0, error="rate limited"),
+        sq.SubResult(2, "finding 2", 10, 3),
+    ], reduce=False)
+
+    assert "1 of 3 chunk(s) errored and were skipped" in out
+    assert "finding 0" in out and "finding 2" in out, "successful chunks were discarded"
+    assert "[ERROR: rate limited]" in out, "the failed chunk is shown, not hidden"
+
+
+def test_a_map_that_produced_no_findings_shows_the_raw_report(monkeypatch):
+    """Every chunk answered, but every answer was blank: there is nothing to reduce, and
+    spending another model call on nothing is waste. Says so instead of returning empty."""
+    out = _batch_over(monkeypatch, [
+        sq.SubResult(0, "   ", 10, 3),
+        sq.SubResult(1, "", 10, 3),
+    ], n_chunks=2, reduce=True)
+
+    assert "(no findings to reduce)" in out
+    assert "map over 2 chunks" in out, "should fall back to the raw map report"
+
+
+def test_findings_too_large_to_reduce_fall_back_to_raw_instead_of_being_truncated(monkeypatch):
+    """The reduce pass sends every finding in one prompt, so findings bigger than the
+    sub-model's window cannot be reduced at all. Returning raw beats a call certain to
+    fail with "prompt is too long", and the note names the two ways out."""
+    big = "x" * 4000
+    out = _batch_over(monkeypatch, [
+        sq.SubResult(0, big, 10, 3),
+        sq.SubResult(1, big, 10, 3),
+    ], n_chunks=2, reduce=True, sub_context_tokens=100)
+
+    assert "findings too large to reduce in one pass" in out
+    assert "fewer/larger chunks" in out and "rlm_query" in out, "must name the way out"
+    assert big in out, "the raw findings are still returned"
