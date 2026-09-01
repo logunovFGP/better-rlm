@@ -843,7 +843,6 @@ wheels = [
 
 [[package]]
 name = "rlm-mcp"
-version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },

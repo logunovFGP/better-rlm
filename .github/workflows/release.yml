@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release, e.g. 0.2.0 — must equal the version in pyproject.toml'
+        description: 'Version to release, e.g. 0.2.0 — must equal the VERSION file'
         required: true
         type: string
       dry_run:
@@ -56,11 +56,13 @@ jobs:
             *) echo "::error::version must look like 1.2.3, got '$VERSION'"; exit 1 ;;
           esac
 
-      - name: Refuse a version pyproject does not declare
+      - name: Refuse a version the VERSION file does not declare
         run: |
-          declared=$(uv run --no-project python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])")
+          # VERSION is the single source: pyproject reads it via setuptools dynamic, so
+          # there is no [project] version key left to parse. Plain read, no interpreter.
+          declared=$(tr -d '[:space:]' < VERSION)
           if [ "$declared" != "$VERSION" ]; then
-            echo "::error::pyproject.toml declares $declared, but you asked to release $VERSION. Bump pyproject on main first so the tag and the package agree."
+            echo "::error::VERSION declares $declared, but you asked to release $VERSION. Bump VERSION on main (then scripts/sync_version.py) so the tag and the package agree."
             exit 1
           fi
 
@@ -82,6 +84,6 @@ jobs:
       - name: Dry run summary
         if: ${{ inputs.dry_run }}
         run: |
-          echo "Dry run: suite green on both platforms, version agrees with pyproject," >> "$GITHUB_STEP_SUMMARY"
+          echo "Dry run: suite green on both platforms, version agrees with VERSION," >> "$GITHUB_STEP_SUMMARY"
           echo "package builds. Nothing tagged, nothing published." >> "$GITHUB_STEP_SUMMARY"
           ls -l dist >> "$GITHUB_STEP_SUMMARY"

@@ -46,6 +46,7 @@ from .output import meta_block as _meta_block
 from .sandbox_reap import container_image_status
 from .shutdown import install_shutdown_hooks
 from .subquery import sub_query, sub_query_batch
+from .version import __version__
 
 CFG = load_config()
 # stdout is the JSON-RPC channel; detailed logs go to a per-PID file in log_dir with
@@ -53,6 +54,10 @@ CFG = load_config()
 LOG = configure_logging(CFG)
 STORE = ContextStore(CFG)
 mcp = FastMCP("rlm")
+# FastMCP takes no version=, and the lowlevel server it wraps advertises
+# pkg_version("mcp") when its own version is None -- so an unset version makes the
+# handshake report the MCP SDK's version as ours. Set it on the wrapped server.
+mcp._mcp_server.version = __version__
 
 _repl: ReplSession | None = None
 
