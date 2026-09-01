@@ -304,3 +304,34 @@ def test_uninstall_unregisters_before_deleting(tmp_path, capsys):
     out = capsys.readouterr().out
     assert out.index("removed 1 hook entry") < out.index(f"removed {dst}")
     assert not dst.exists() and not _entries(cfg)
+
+
+def test_probe_accepts_the_shipped_hook():
+    """The hook must run under bare `python3` -- that is the command settings.json gets."""
+    import scripts.install_hook as ih
+
+    assert ih.probe(ih.SOURCE) is None
+
+
+def test_probe_rejects_a_hook_the_interpreter_cannot_run(tmp_path):
+    bad = tmp_path / "bad.py"
+    bad.write_text("this is not python(\n", encoding="utf-8")
+    import scripts.install_hook as ih
+
+    assert ih.probe(str(bad)) is not None
+
+
+def test_a_hook_that_cannot_run_is_never_registered(tmp_path, monkeypatch):
+    """settings.json must stay untouched: a registered-but-crashing hook prints a
+    traceback on every Read in every project on the machine."""
+    import scripts.install_hook as ih
+
+    settings = tmp_path / "settings.json"
+    settings.write_text('{"model": "opus"}', encoding="utf-8")
+    monkeypatch.setattr(ih, "SOURCE", str(tmp_path / "missing.py"))
+
+    rc = ih.main(["--settings", str(settings), "--hook", str(tmp_path / "h.py")])
+
+    assert rc == 1
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "opus"}
+    assert not (tmp_path / "h.py").exists()
