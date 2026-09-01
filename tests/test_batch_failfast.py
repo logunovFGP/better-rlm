@@ -438,6 +438,48 @@ def test_max_chunks_caps_how_many_prompts_get_built(monkeypatch):
     assert [p() for p in seen] and builds == [0, 1], "built a chunk max_chunks excluded"
 
 
+def test_a_failed_reduce_falls_back_to_the_raw_findings(monkeypatch):
+    """A reduce call that fails must not discard the map work that succeeded.
+
+    The whole point is the fallback: the map spent N model calls, and a failed synthesis
+    on top of them is no reason to return nothing. Mutation-checked -- replacing
+    ``raw(...)`` with a bare error string fails this test.
+
+    The token assertion here is weaker than it looks and is NOT a guard on the
+    itok/otok bookkeeping: a failed sub_query reports 0/0, so billing it anyway is a
+    no-op with real inputs (verified by mutation: removing the `if not red.error` guard
+    breaks nothing). That guard is defensive, not load-bearing.
+    """
+    import src.server as srv
+
+    class _Meta:
+        chunks = [{"i": 0}, {"i": 1}]
+
+    class _Store:
+        def get(self, ctx_id):
+            return _Meta()
+
+        def read_chunk(self, ctx_id, i):
+            return f"chunk{i}"
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(srv, "STORE", _Store())
+    monkeypatch.setattr(srv, "log_event", lambda log, evt, **f: events.append((evt, f)))
+    monkeypatch.setattr(srv, "sub_query_batch", lambda prompts, model, concurrency=1: [
+        sq.SubResult(i, f"finding {i}", 10, 3) for i in range(len(prompts))])
+    monkeypatch.setattr(srv, "sub_query",
+                        lambda *a, **k: sq.SubResult(0, "", 0, 0, error="reduce blew up"))
+
+    out = srv.rlm_sub_query_batch("ctx_x", "audit every file", reduce=True)
+
+    assert "reduce pass failed: reduce blew up" in out
+    assert "finding 0" in out and "finding 1" in out, "map findings were discarded"
+    assert "tokens: 20 in / 6 out" in out, "a failed reduce must not bill its own tokens"
+    rec = next(f for e, f in events if f.get("phase") == "reduce")
+    assert (rec["itok"], rec["otok"]) == (20, 6)
+    assert rec["reduce_error"] == "reduce blew up"
+
+
 def test_a_successful_reduce_is_logged_with_the_batch_total(monkeypatch):
     """A reduce that SUCCEEDS still spends a call and tokens. Logging only the failure
     left those in no record, so the map totals understated every reduce=True batch."""

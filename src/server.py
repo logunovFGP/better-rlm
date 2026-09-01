@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import textwrap
+from collections.abc import Callable
 from functools import partial
 from itertools import islice
 
@@ -37,11 +38,11 @@ from .config import (
 from .context_store import ContextStore
 from .engine import ReplSession, run_query
 from .logsetup import configure_logging, log_event, logged_tool, note_startup
-# Imported under their old private names: tests reach for srv._meta_block, and these are
-# pure ContextMeta presentation that moved to output.py to keep this file under 800 lines.
+# meta_block keeps its old private name: tests reach for srv._meta_block. It and
+# skipped_block are pure ContextMeta presentation, moved to output.py to keep this file
+# under 800 lines; skipped_block is called from meta_block there, not from here.
 from .output import bound_output
 from .output import meta_block as _meta_block
-from .output import skipped_block as _skipped_block
 from .sandbox_reap import container_image_status
 from .shutdown import install_shutdown_hooks
 from .subquery import sub_query, sub_query_batch
@@ -577,10 +578,17 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
 
 def _reduce_findings(findings: str, prompt: str, sub_model: str, *, ctx_id: str, note: str,
                      n_prompts: int, n_errors: int, used_label: str, itok: int, otok: int,
-                     raw) -> str:
+                     raw: Callable[[str], str]) -> str:
     """Fold the per-chunk findings into one synthesis (one more sub-model call), and
-    render it. Falls back to ``raw(...)`` — the caller's per-chunk report — when the
-    reduce call fails, so a failed synthesis never discards the findings it was given."""
+    render it. Falls back to ``raw(extra)`` — the caller's per-chunk report — when the
+    reduce call fails, so a failed synthesis never discards the findings it was given.
+
+    The parameter list is wide because every item is load-bearing: findings/prompt/
+    sub_model drive the call, ctx_id/n_errors the log record, and note/n_prompts/
+    used_label/itok/otok the report header. ``itok``/``otok`` are locals here on purpose —
+    the reduce call's tokens are added to them for the success header and the log, while
+    ``raw`` still renders the caller's map-only totals on the failure path.
+    """
     reduce_prompt = (
         "Reduce these independent per-chunk findings from one large document into a "
         "single answer.\n"
