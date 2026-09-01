@@ -53,10 +53,12 @@ shape for genuine host differences — this is not one.
 
 Two further corrections:
 
-- **A lone `\r` defeats the byte-count check.** It translates to `\n` one-for-one, so
-  totals match while a seek returns `\r` where a char slice returns `\n`. Validation now
-  also requires that the raw file contain no `\r` at all (`_has_carriage_return`, a
-  streamed O(1)-memory scan).
+- **A lone `\r` needed handling.** It translates to `\n` one-for-one, so byte totals match
+  while a naive seek returned `\r` where a char slice returned `\n`. First fixed with a
+  streamed `_has_carriage_return` scan; that scan became redundant once `read_chunk`
+  learned to translate what it seeks (see below) and was deleted — it cost a full extra
+  file read per `set_chunks` (20.1 MB → 42 KB on a 20 MB context) and needlessly denied
+  lone-`\r` files the fast path.
 - **`set_chunks` took a second full decode.** Both `server.py` callers already hold the
   text, so it now accepts `text=`; chunk-time peak on a 20.1 MB context drops 60.4 MB →
   40.2 MB (one whole copy).

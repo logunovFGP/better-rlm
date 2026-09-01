@@ -111,10 +111,10 @@ def test_mixed_line_endings_decline_byte_offsets(cfg, tmp_path):
         assert store.read_chunk(meta.ctx_id, i) == text[c["start"]:c["end"]]
 
 
-def test_lone_cr_file_declines_byte_offsets(cfg, tmp_path):
-    """A lone "\\r" translates to "\\n" one-for-one, so the byte-count check alone cannot
-    see it: the totals match while a seek would return "\\r" where a char slice returns
-    "\\n". Only the carriage-return scan catches this one."""
+def test_lone_cr_file_uses_the_fast_path_because_reads_translate(cfg, tmp_path):
+    """A lone "\\r" is one byte for one char, so char offsets already sit on byte
+    boundaries and read_chunk's own translation turns the "\\r" it seeks into the "\\n"
+    read_text reports. No separate carriage-return scan is needed to see this."""
     store = ContextStore(cfg)
     p = tmp_path / "cr.txt"
     p.write_bytes(b"a\rb\rc\n")
@@ -124,8 +124,23 @@ def test_lone_cr_file_declines_byte_offsets(cfg, tmp_path):
     chunks = chunk_text(text, "lines", chunk_lines=1, chunk_chars=120000, overlap=0)
     store.set_chunks(meta.ctx_id, "lines", [c.as_dict() for c in chunks])
     for i, c in enumerate(store.get(meta.ctx_id).chunks):
-        assert (c["byte_start"], c["byte_end"]) == (-1, -1)
+        assert c["byte_start"] != -1
         assert store.read_chunk(meta.ctx_id, i) == text[c["start"]:c["end"]]
+
+
+def test_set_chunks_does_not_mutate_the_callers_dicts(cfg):
+    """set_chunks used to rewrite byte_start/byte_end on the dicts handed to it. A caller
+    that had set those deliberately saw them silently replaced -- which is exactly how an
+    earlier fallback test ended up asserting nothing about the fallback."""
+    store = ContextStore(cfg)
+    text = "a\nb\nc\n"
+    meta = store.load_text(text)
+    dicts = [c.as_dict() for c in
+             chunk_text(text, "lines", chunk_lines=1, chunk_chars=120000, overlap=0)]
+    before = [dict(d) for d in dicts]
+    store.set_chunks(meta.ctx_id, "lines", dicts)
+    assert dicts == before, "the caller's dicts were modified in place"
+    assert all(c["byte_start"] != -1 for c in store.get(meta.ctx_id).chunks)
 
 
 def test_chunk_metas_written_before_byte_offsets_read_back_intact(cfg, tmp_path):
