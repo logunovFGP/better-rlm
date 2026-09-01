@@ -33,6 +33,8 @@ class Chunk:
     n_chars: int
     est_tokens: int
     label: str = ""
+    byte_start: int = -1   # -1 = unknown; set by ContextStore.set_chunks, readers must fall back
+    byte_end: int = -1
 
     def as_dict(self) -> dict:
         return asdict(self)

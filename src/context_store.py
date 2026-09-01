@@ -108,6 +108,17 @@ def _stat_path(path: Path) -> tuple[int, int, str]:
     return nbytes, nlines, h.hexdigest()
 
 
+def _translate_newlines(s: str) -> str:
+    """Universal-newline translation, applied by hand to a slice read in binary.
+
+    ``read_text`` translates; a chunk fetched by seeking raw bytes must translate too,
+    or the two read paths return different text for the same chunk. Content-driven, not
+    host-driven: Python translates "\\r\\n" on every platform, so a CRLF log is handled
+    identically whether the server runs on Windows or Linux.
+    """
+    return s.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _looks_binary(path: Path) -> bool:
     """Heuristic: a NUL byte in the first KB means binary.
 
@@ -366,6 +377,16 @@ class ContextStore:
 
     # -- readers -----------------------------------------------------------
     def read_text(self, ctx_id: str) -> str:
+        # Universal-newline translation stays ON, deliberately. It was briefly disabled
+        # (newline="") so char offsets would map 1:1 to on-disk bytes for the seek-based
+        # read_chunk -- a global change to serve one local need, and it regressed three
+        # things: chunk metas written earlier held offsets computed on TRANSLATED text, so
+        # the fallback slice shifted and silently truncated their content; chunk_text's
+        # paragraph regex (r"\n[ \t]*\n") cannot match "\r\n\r\n", so "paragraphs"/
+        # "semantic" degraded to blind fixed-size cuts on any CRLF context; and rlm_exec
+        # handed a Linux sandbox guest CRLF. Byte offsets now simply decline to exist for
+        # such files (see _add_byte_offsets), which costs those files the seek fast path
+        # and nothing else.
         return Path(self.get(ctx_id).content_path).read_text(encoding="utf-8", errors="replace")
 
     def read_chunk(self, ctx_id: str, index: int) -> str:
@@ -375,7 +396,37 @@ class ContextStore:
         if index < 0 or index >= len(meta.chunks):
             raise IndexError(f"chunk {index} out of range (0..{len(meta.chunks) - 1})")
         ch = meta.chunks[index]
-        return self.read_text(ctx_id)[ch["start"]:ch["end"]]
+        byte_start, byte_end = ch.get("byte_start", -1), ch.get("byte_end", -1)
+        if 0 <= byte_start <= byte_end and self._offsets_still_apply(meta):
+            # Binary seek + bounded read: O(chunk), never decodes the rest of the file.
+            # Safe to decode the slice on its own: byte_start/byte_end came from Leaf 1's
+            # validated char->byte walk, so they always land on UTF-8 sequence boundaries.
+            with open(meta.content_path, "rb") as fh:
+                fh.seek(byte_start)
+                raw = fh.read(byte_end - byte_start)
+            return _translate_newlines(raw.decode("utf-8", errors="replace"))
+        return self.read_text(ctx_id)[ch["start"]:ch["end"]]   # legacy/unvalidated metas
+
+    def _offsets_still_apply(self, meta: ContextMeta) -> bool:
+        """Do this context's stored byte offsets still describe the file on disk?
+
+        They were computed against a file of exactly ``meta.bytes`` bytes, and
+        ``load_file`` references user files IN PLACE -- a log the user is still writing
+        to can change under a chunk index. Char offsets go stale there too, but they go
+        stale *consistently*: read_chunk and read_text[start:end] returned the same
+        (stale) slice. Seeking frozen byte offsets into a changed file does not -- it
+        silently returns shifted, truncated content while the char path returns
+        something else, breaking the one contract read_chunk owes its callers.
+
+        One stat() per read, against the size we measured at load. It cannot catch a
+        mutation that preserves the byte count exactly (say, an in-place edit that also
+        swaps an "\\n" for an "\\r"); such a file is stale on either path, and this at
+        least keeps the two paths agreeing.
+        """
+        try:
+            return Path(meta.content_path).stat().st_size == meta.bytes
+        except OSError:
+            return False   # let read_text raise the real error
 
     def grep(self, ctx_id: str, pattern: str, *, ignore_case: bool = False,
              max_matches: int = 50, max_line_len: int = 500) -> tuple[list[tuple[int, str]], bool]:
@@ -399,11 +450,98 @@ class ContextStore:
                         break
         return out, capped
 
-    def set_chunks(self, ctx_id: str, strategy: str, chunks: list[dict]) -> ContextMeta:
+    def set_chunks(self, ctx_id: str, strategy: str, chunks: list[dict],
+                   *, text: str | None = None) -> ContextMeta:
+        """Record the chunk index on a context, computing byte offsets for it.
+
+        ``text`` lets a caller hand over the decode it already holds. Both callers in
+        server.py have just read the whole context to chunk it, and without this the
+        byte-offset pass decoded it a SECOND time while the caller's copy was still
+        live -- two complete copies of a multi-GB context at once, in a tool whose
+        premise is contexts too large to hold.
+        """
         meta = self.get(ctx_id)
         meta.chunk_strategy = strategy
-        meta.chunks = chunks
+        meta.chunks = self._with_byte_offsets(meta, chunks, text)
         return self._save(meta)
+
+    def _with_byte_offsets(self, meta: ContextMeta, chunks: list[dict],
+                           text: str | None = None) -> list[dict]:
+        """Return copies of ``chunks`` carrying byte offsets, so read_chunk can seek()
+        instead of re-decoding the whole file per chunk. Copies, not edits in place: this
+        method used to rewrite the caller's dicts, which silently overwrote offsets a
+        caller had set deliberately -- that is what made an earlier fallback test vacuous.
+
+        read_text applies universal-newline translation, so a char offset only lands on a
+        byte boundary once we know what that translation cost. Each "\\n" in the text is
+        worth either 1 byte (it was "\\n", or a lone "\\r") or 2 (it was "\\r\\n"), and the
+        file's own size picks which, with no need to go looking for "\\r" on disk:
+
+        * ``plain == meta.bytes`` -- no "\\r\\n" pairs. Char offsets already sit on byte
+          boundaries. A lone-"\\r" file lands here and is CORRECT, because "\\r" -> "\\n"
+          is one byte for one char and read_chunk translates what it seeks.
+        * ``plain + newlines == meta.bytes`` -- every "\\n" was a "\\r\\n". With A pairs,
+          B lone "\\n" and C lone "\\r" this totals ``plain + A+B+C`` against a file
+          holding ``plain + A``, so it can only match when B+C is 0: a pure-CRLF file,
+          exactly where the assumption holds. Mixed endings match neither and are refused.
+
+        The totals also catch errors="replace" drift, where an invalid byte becomes U+FFFD
+        and re-encodes to 3.
+
+        The winning walk is then proven on real bytes by re-reading the LAST chunk -- the
+        one carrying every accumulated error -- and comparing it to the text. Two
+        silent-corruption bugs came out of this mapping; the arithmetic above is sound but
+        has not earned the right to be trusted on its own.
+
+        Anything unproven leaves byte_start/byte_end at their Chunk default of -1 and
+        readers take the char-offset slow path -- slower, never wrong.
+        """
+        if text is None:
+            text = self.read_text(meta.ctx_id)
+        # Span by span, never len(text.encode()) over the whole thing: that would
+        # materialize a second full copy of a multi-GB context as bytes.
+        positions = sorted({p for c in chunks for p in (c["start"], c["end"])})
+        cumulative: dict[int, tuple[int, int]] = {}
+        plain = newlines = prev = 0
+        for p in positions:
+            span = text[prev:p]
+            plain += len(span.encode("utf-8"))
+            newlines += span.count("\n")
+            cumulative[p] = (plain, newlines)
+            prev = p
+        tail = text[prev:]
+        total_plain = plain + len(tail.encode("utf-8"))
+        total_newlines = newlines + tail.count("\n")
+
+        if total_plain == meta.bytes:
+            per_newline = 0
+        elif total_plain + total_newlines == meta.bytes:
+            per_newline = 1
+        else:
+            return [dict(c) for c in chunks]
+        byte_at = {p: b + per_newline * n for p, (b, n) in cumulative.items()}
+        if not self._probe_mapping(meta, chunks, byte_at, text):
+            return [dict(c) for c in chunks]
+        return [{**c, "byte_start": byte_at[c["start"]], "byte_end": byte_at[c["end"]]}
+                for c in chunks]
+
+    @staticmethod
+    def _probe_mapping(meta: ContextMeta, chunks: list[dict],
+                       byte_at: dict[int, int], text: str) -> bool:
+        """Read the last chunk through the offsets just computed and check it against the
+        text. One bounded read; it costs a chunk and buys proof instead of an argument."""
+        if not chunks:
+            return True
+        last = max(chunks, key=lambda c: c["end"])
+        start, end = byte_at[last["start"]], byte_at[last["end"]]
+        try:
+            with open(meta.content_path, "rb") as fh:
+                fh.seek(start)
+                probe = fh.read(end - start)
+        except OSError:
+            return False
+        decoded = _translate_newlines(probe.decode("utf-8", errors="replace"))
+        return decoded == text[last["start"]:last["end"]]
 
 
 def _extract_pdf(path: Path) -> str:

@@ -6,6 +6,7 @@ fatal, and sub_query_batch has to stop fanning out once it has seen one — with
 throwing away chunks that fail for their own, local reasons.
 """
 
+import dataclasses
 import json
 
 import pytest
@@ -74,6 +75,55 @@ def test_auth_failure_stops_the_fan_out(monkeypatch):
 def test_ordinary_failure_does_not_discard_the_other_chunks(monkeypatch):
     calls, _ = _run_batch(monkeypatch, CliCompletionError("just this chunk"))
     assert len(calls) == 10, "a chunk-local failure must not abort the whole batch"
+
+
+# --- lazy prompt builders (Leaf 3 / option D) -------------------------------
+
+def _counting_builder(build_counts: list[int], i: int):
+    def _build() -> str:
+        build_counts.append(i)
+        return f"p{i}"
+    return _build
+
+
+def test_batch_builds_prompts_lazily_one_per_worker(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(sq, "_call", lambda model, prompt, max_tokens, system: (
+        calls.append(prompt), ("ok", 1, 1, "m"))[1])
+
+    build_counts: list[int] = []
+    builders = [_counting_builder(build_counts, i) for i in range(5)]
+    assert build_counts == [], "constructing the builders must not build any prompt"
+
+    results = sq.sub_query_batch(builders, "m", concurrency=2)
+    assert sorted(build_counts) == list(range(5)), "every item should be built exactly once"
+    assert len(calls) == 5
+    assert all(not r.error for r in results)
+
+
+def test_batch_reports_prompt_build_failure_without_aborting(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(sq, "_call", lambda model, prompt, max_tokens, system: (
+        calls.append(prompt), ("ok", 1, 1, "m"))[1])
+
+    def boom() -> str:
+        raise ValueError("cannot build")
+
+    results = sq.sub_query_batch(["p0", boom, "p2"], "m", concurrency=1)
+    assert "prompt build failed" in results[1].error
+    assert results[0].answer == "ok" and results[2].answer == "ok"
+    assert calls == ["p0", "p2"], "the failing builder must not reach _call"
+
+
+def test_fatal_auth_skip_happens_before_building(monkeypatch):
+    build_counts: list[int] = []
+    builders = [_counting_builder(build_counts, i) for i in range(10)]
+    monkeypatch.setattr(sq, "_call", lambda *a: (_ for _ in ()).throw(
+        CliAuthError("OAuth session expired")))
+
+    results = sq.sub_query_batch(builders, "m", concurrency=1)
+    assert build_counts == [0], "only the item already in flight when the flag tripped should build"
+    assert results[-1].error.startswith("skipped —")
 
 
 # --- rlm_status(probe=True): the line that separates "configured" from "working" ---
@@ -322,6 +372,115 @@ def test_a_clean_map_is_logged_with_its_chunk_and_token_counts(monkeypatch):
     assert rec["ctx_id"] == "ctx_x", "every sub_batch phase carries ctx_id, not just map_start"
 
 
+def test_rlm_sub_query_batch_passes_builders_not_strings(monkeypatch):
+    """Leaf 3: the server must hand sub_query_batch lazy builders, not a materialized
+    list of full prompt strings — that list is ~= the whole context held in RAM for
+    the entire batch (the defect this plan fixes)."""
+    import src.server as srv
+
+    class _Meta:
+        chunks = [{"i": 0}, {"i": 1}, {"i": 2}]
+
+    class _Store:
+        def get(self, ctx_id):
+            return _Meta()
+
+        def read_chunk(self, ctx_id, i):
+            return f"chunk{i}"
+
+    seen: list = []
+
+    def fake_batch(prompts, model, concurrency=1):
+        seen.extend(prompts)
+        return [sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))]
+
+    monkeypatch.setattr(srv, "STORE", _Store())
+    monkeypatch.setattr(srv, "sub_query_batch", fake_batch)
+    srv.rlm_sub_query_batch("ctx_x", "audit every file", reduce=False)
+
+    assert all(callable(p) for p in seen), "prompts must be lazy builders, not strings"
+    assert [p() for p in seen] == [
+        "audit every file\n\n--- CHUNK 1/3 ---\nchunk0",
+        "audit every file\n\n--- CHUNK 2/3 ---\nchunk1",
+        "audit every file\n\n--- CHUNK 3/3 ---\nchunk2",
+    ]
+
+
+def test_max_chunks_caps_how_many_prompts_get_built(monkeypatch):
+    """The other half of laziness: with max_chunks set, only the SELECTED chunks may be
+    built -- and none of them before the pool runs."""
+    import src.server as srv
+
+    class _Meta:
+        chunks = [{"i": 0}, {"i": 1}, {"i": 2}]
+
+    builds: list[int] = []
+
+    class _Store:
+        def get(self, ctx_id):
+            return _Meta()
+
+        def read_chunk(self, ctx_id, i):
+            builds.append(i)
+            return f"chunk{i}"
+
+    seen: list = []
+
+    def fake_batch(prompts, model, concurrency=1):
+        assert builds == [], "a prompt was built before the pool ran"
+        seen.extend(prompts)
+        return [sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))]
+
+    monkeypatch.setattr(srv, "STORE", _Store())
+    monkeypatch.setattr(srv, "sub_query_batch", fake_batch)
+    srv.rlm_sub_query_batch("ctx_x", "audit", max_chunks=2, reduce=False)
+
+    assert len(seen) == 2, "max_chunks must cap the builder list, not just the results"
+    assert [p() for p in seen] and builds == [0, 1], "built a chunk max_chunks excluded"
+
+
+def test_a_failed_reduce_falls_back_to_the_raw_findings(monkeypatch):
+    """A reduce call that fails must not discard the map work that succeeded.
+
+    The whole point is the fallback: the map spent N model calls, and a failed synthesis
+    on top of them is no reason to return nothing. Mutation-checked -- replacing
+    ``raw(...)`` with a bare error string fails this test.
+
+    The token assertion here is weaker than it looks and is NOT a guard on the
+    itok/otok bookkeeping: a failed sub_query reports 0/0, so billing it anyway is a
+    no-op with real inputs (verified by mutation: removing the `if not red.error` guard
+    breaks nothing). That guard is defensive, not load-bearing.
+    """
+    import src.server as srv
+
+    class _Meta:
+        chunks = [{"i": 0}, {"i": 1}]
+
+    class _Store:
+        def get(self, ctx_id):
+            return _Meta()
+
+        def read_chunk(self, ctx_id, i):
+            return f"chunk{i}"
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(srv, "STORE", _Store())
+    monkeypatch.setattr(srv, "log_event", lambda log, evt, **f: events.append((evt, f)))
+    monkeypatch.setattr(srv, "sub_query_batch", lambda prompts, model, concurrency=1: [
+        sq.SubResult(i, f"finding {i}", 10, 3) for i in range(len(prompts))])
+    monkeypatch.setattr(srv, "sub_query",
+                        lambda *a, **k: sq.SubResult(0, "", 0, 0, error="reduce blew up"))
+
+    out = srv.rlm_sub_query_batch("ctx_x", "audit every file", reduce=True)
+
+    assert "reduce pass failed: reduce blew up" in out
+    assert "finding 0" in out and "finding 1" in out, "map findings were discarded"
+    assert "tokens: 20 in / 6 out" in out, "a failed reduce must not bill its own tokens"
+    rec = next(f for e, f in events if f.get("phase") == "reduce")
+    assert (rec["itok"], rec["otok"]) == (20, 6)
+    assert rec["reduce_error"] == "reduce blew up"
+
+
 def test_a_successful_reduce_is_logged_with_the_batch_total(monkeypatch):
     """A reduce that SUCCEEDS still spends a call and tokens. Logging only the failure
     left those in no record, so the map totals understated every reduce=True batch."""
@@ -331,3 +490,74 @@ def test_a_successful_reduce_is_logged_with_the_batch_total(monkeypatch):
     assert (rec["itok"], rec["otok"]) == (25, 8), "map 20/6 + reduce 5/2"
     assert rec["reduce_error"] is None
     assert rec["ctx_id"] == "ctx_x"
+
+
+# --- the three report branches the coverage report showed uncovered ----------
+# All are "the batch partly worked" paths: the map spent real model calls, so each must
+# still hand back the per-chunk findings rather than an error or an empty answer.
+
+def _batch_over(monkeypatch, results, *, n_chunks=3, reduce=True, sub_context_tokens=None):
+    """Drive rlm_sub_query_batch over a stub context whose map returns `results`."""
+    import src.server as srv
+
+    class _Meta:
+        chunks = [{"i": i} for i in range(n_chunks)]
+
+    class _Store:
+        def get(self, ctx_id):
+            return _Meta()
+
+        def read_chunk(self, ctx_id, i):
+            return f"chunk{i}"
+
+    monkeypatch.setattr(srv, "STORE", _Store())
+    monkeypatch.setattr(srv, "log_event", lambda log, evt, **f: None)
+    monkeypatch.setattr(srv, "sub_query_batch", lambda prompts, model, concurrency=1: results)
+    monkeypatch.setattr(srv, "sub_query",
+                        lambda *a, **k: sq.SubResult(0, "synthesis", 1, 1))
+    if sub_context_tokens is not None:
+        # Config is a frozen dataclass: swap the whole object, do not poke a field.
+        monkeypatch.setattr(
+            srv, "CFG", dataclasses.replace(srv.CFG, sub_context_tokens=sub_context_tokens))
+    return srv.rlm_sub_query_batch("ctx_x", "audit every file", reduce=reduce)
+
+
+def test_a_partly_failed_map_notes_the_skipped_chunks_and_keeps_the_rest(monkeypatch):
+    """One chunk erroring must not cost the others. The count in the note is what tells a
+    reader the answer is partial -- without it a 2-of-3 result reads as complete."""
+    out = _batch_over(monkeypatch, [
+        sq.SubResult(0, "finding 0", 10, 3),
+        sq.SubResult(1, "", 0, 0, error="rate limited"),
+        sq.SubResult(2, "finding 2", 10, 3),
+    ], reduce=False)
+
+    assert "1 of 3 chunk(s) errored and were skipped" in out
+    assert "finding 0" in out and "finding 2" in out, "successful chunks were discarded"
+    assert "[ERROR: rate limited]" in out, "the failed chunk is shown, not hidden"
+
+
+def test_a_map_that_produced_no_findings_shows_the_raw_report(monkeypatch):
+    """Every chunk answered, but every answer was blank: there is nothing to reduce, and
+    spending another model call on nothing is waste. Says so instead of returning empty."""
+    out = _batch_over(monkeypatch, [
+        sq.SubResult(0, "   ", 10, 3),
+        sq.SubResult(1, "", 10, 3),
+    ], n_chunks=2, reduce=True)
+
+    assert "(no findings to reduce)" in out
+    assert "map over 2 chunks" in out, "should fall back to the raw map report"
+
+
+def test_findings_too_large_to_reduce_fall_back_to_raw_instead_of_being_truncated(monkeypatch):
+    """The reduce pass sends every finding in one prompt, so findings bigger than the
+    sub-model's window cannot be reduced at all. Returning raw beats a call certain to
+    fail with "prompt is too long", and the note names the two ways out."""
+    big = "x" * 4000
+    out = _batch_over(monkeypatch, [
+        sq.SubResult(0, big, 10, 3),
+        sq.SubResult(1, big, 10, 3),
+    ], n_chunks=2, reduce=True, sub_context_tokens=100)
+
+    assert "findings too large to reduce in one pass" in out
+    assert "fewer/larger chunks" in out and "rlm_query" in out, "must name the way out"
+    assert big in out, "the raw findings are still returned"

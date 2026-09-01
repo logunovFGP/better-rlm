@@ -21,6 +21,8 @@ import os
 import re
 import shutil
 import textwrap
+from collections.abc import Callable
+from functools import partial
 from itertools import islice
 
 from mcp.server.fastmcp import FastMCP
@@ -36,7 +38,11 @@ from .config import (
 from .context_store import ContextStore
 from .engine import ReplSession, run_query
 from .logsetup import configure_logging, log_event, logged_tool, note_startup
+# meta_block keeps its old private name: tests reach for srv._meta_block. It and
+# skipped_block are pure ContextMeta presentation, moved to output.py to keep this file
+# under 800 lines; skipped_block is called from meta_block there, not from here.
 from .output import bound_output
+from .output import meta_block as _meta_block
 from .sandbox_reap import container_image_status
 from .shutdown import install_shutdown_hooks
 from .subquery import sub_query, sub_query_batch
@@ -78,57 +84,6 @@ def _cost_note(model: str, itok: int, otok: int) -> str:
     if not CFG.report_cost:
         return ""
     return f"  |  cost: ${cost_usd(model, itok, otok):.4f}"
-
-
-#: Skips that are the POINT of the skip lists, not a surprise (node_modules, .env).
-_EXPECTED_SKIPS = frozenset({"skip-dir", "skip-name"})
-
-
-def _skipped_block(meta) -> str:
-    """Report what a dir load did not ingest, loudly ONLY when it is surprising.
-
-    A partial load that reports success is worse than a failure: an answer over the
-    remaining files is wrong BY OMISSION and nothing contradicts it. Observed: 173 of
-    184 files loaded, the 11 missing ones the exact subject of the question.
-
-    But node_modules being skipped is the intent, not an incident. Screaming INCOMPLETE
-    on every JS project trains the reader to skip the line -- and then it is not there
-    when 11 source files really do vanish. So policy exclusions get one quiet count and
-    the surprising ones get the alarm.
-    """
-    counts = dict(getattr(meta, "skipped_counts", None) or {})
-    if not counts:
-        return ""
-    expected = {k: v for k, v in counts.items() if k in _EXPECTED_SKIPS}
-    surprising = {k: v for k, v in counts.items() if k not in _EXPECTED_SKIPS}
-    out = ""
-    if expected:
-        detail = ", ".join(f"{k} x{v:,}" for k, v in sorted(expected.items()))
-        out += f"\n- excluded by policy: {sum(expected.values()):,} ({detail})"
-    if surprising:
-        n = sum(surprising.values())
-        total = meta.file_count + sum(counts.values())
-        detail = ", ".join(f"{k} x{v:,}" for k, v in sorted(surprising.items()))
-        out += (f"\n- ⚠ **INCOMPLETE — {n:,} readable file(s) were NOT loaded** "
-                f"(of {total:,} found; {detail}).\n"
-                "  Any answer from this context is wrong by omission if it needed one:\n")
-        sample = [e for e in (getattr(meta, "skipped", None) or [])
-                  if e.split(":", 1)[0] not in _EXPECTED_SKIPS][:20]
-        out += "".join(f"    {e}\n" for e in sample).rstrip("\n")
-        if n > len(sample):
-            out += f"\n    … and {n - len(sample):,} more"
-    return out
-
-
-def _meta_block(meta) -> str:
-    return (
-        f"**ctx_id:** `{meta.ctx_id}`\n"
-        f"- source: {meta.source}  ({meta.source_type}/{meta.data_type})\n"
-        f"- size: {meta.bytes:,} bytes, {meta.lines:,} lines, ~{meta.est_tokens:,} tokens\n"
-        f"- files: {meta.file_count}\n"
-        f"- sha256: {meta.sha256[:16]}…"
-        + _skipped_block(meta)
-    )
 
 
 def _resolve_root_model(model_override: str) -> str:
@@ -355,7 +310,9 @@ def rlm_chunk_context(ctx_id: str, strategy: str = "", size: int = 0, overlap: i
         chunk_chars=CFG.chunk_chars,
         overlap=overlap or CFG.chunk_overlap,
     )
-    STORE.set_chunks(ctx_id, strategy, [c.as_dict() for c in chunks])
+    # text=text: hand over the decode we already have, so the byte-offset pass does not
+    # read and decode the whole context a second time alongside this copy.
+    STORE.set_chunks(ctx_id, strategy, [c.as_dict() for c in chunks], text=text)
     lines = [f"## Chunked {ctx_id} — {len(chunks)} chunks ({strategy})", ""]
     for c in chunks[:25]:
         lbl = f" {c.label}" if c.label else ""
@@ -526,6 +483,10 @@ def rlm_sub_query(ctx_id: str, prompt: str, chunk_index: int = -1) -> str:
     )
 
 
+def _mk_batch_prompt(ctx_id: str, prompt: str, i: int, n: int) -> str:
+    return f"{prompt}\n\n--- CHUNK {i + 1}/{n} ---\n{STORE.read_chunk(ctx_id, i)}"
+
+
 @mcp.tool()
 @logged_tool
 def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = True) -> str:
@@ -543,11 +504,17 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
         text = STORE.read_text(ctx_id)
         chunks = chunk_text(text, CFG.chunk_strategy, chunk_lines=CFG.chunk_lines,
                             chunk_chars=CFG.chunk_chars, overlap=CFG.chunk_overlap)
-        STORE.set_chunks(ctx_id, CFG.chunk_strategy, [c.as_dict() for c in chunks])
+        STORE.set_chunks(ctx_id, CFG.chunk_strategy, [c.as_dict() for c in chunks],
+                         text=text)   # reuse this decode; don't make a second copy
         meta = STORE.get(ctx_id)
+        del text   # the full decode has served chunking; don't hold it for the whole batch
     n = len(meta.chunks)
     sel = range(n if max_chunks <= 0 else min(max_chunks, n))
-    prompts = [f"{prompt}\n\n--- CHUNK {i + 1}/{n} ---\n{STORE.read_chunk(ctx_id, i)}" for i in sel]
+    # Built lazily, one at a time inside each pool worker (sub_query_batch), not here —
+    # holding all N prompt strings at once is ~= the whole context in RAM for the entire
+    # multi-minute batch. Leaf 2's seek-based read_chunk is what makes per-worker reads
+    # cheap enough that this stays lazy without re-introducing slow reads serially.
+    prompts = [partial(_mk_batch_prompt, ctx_id, prompt, i, n) for i in sel]
     sub_model = models.select(CFG, models.Role.SUB)
     # BEFORE the map, not only after it: this batch runs for tens of minutes on a
     # large context, and until it returns the only trace is N indistinguishable
@@ -604,7 +571,24 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
         return _raw("\n_(findings too large to reduce in one pass — showing raw; use "
                     "fewer/larger chunks, or rlm_query for engine-side reduction)_")
 
-    # REDUCE: fold the per-chunk findings into one synthesis (one more sub-model call).
+    return _reduce_findings(findings, prompt, sub_model, ctx_id=ctx_id, note=note,
+                            n_prompts=len(prompts), n_errors=len(errs), used_label=used_label,
+                            itok=itok, otok=otok, raw=_raw)
+
+
+def _reduce_findings(findings: str, prompt: str, sub_model: str, *, ctx_id: str, note: str,
+                     n_prompts: int, n_errors: int, used_label: str, itok: int, otok: int,
+                     raw: Callable[[str], str]) -> str:
+    """Fold the per-chunk findings into one synthesis (one more sub-model call), and
+    render it. Falls back to ``raw(extra)`` — the caller's per-chunk report — when the
+    reduce call fails, so a failed synthesis never discards the findings it was given.
+
+    The parameter list is wide because every item is load-bearing: findings/prompt/
+    sub_model drive the call, ctx_id/n_errors the log record, and note/n_prompts/
+    used_label/itok/otok the report header. ``itok``/``otok`` are locals here on purpose —
+    the reduce call's tokens are added to them for the success header and the log, while
+    ``raw`` still renders the caller's map-only totals on the failure path.
+    """
     reduce_prompt = (
         "Reduce these independent per-chunk findings from one large document into a "
         "single answer.\n"
@@ -619,12 +603,12 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
         otok += red.output_tokens
     # On success too: a reduce that works still spends a call and tokens, and the map
     # totals would otherwise understate every reduce batch. itok/otok are map+reduce.
-    log_event(LOG, "sub_batch", phase="reduce", ctx_id=ctx_id, chunks=len(prompts),
-              errors=len(errs), itok=itok, otok=otok, reduce_error=red.error)
+    log_event(LOG, "sub_batch", phase="reduce", ctx_id=ctx_id, chunks=n_prompts,
+              errors=n_errors, itok=itok, otok=otok, reduce_error=red.error)
     if red.error:
-        return _raw(f"\n_(reduce pass failed: {red.error}; showing raw findings)_")
+        return raw(f"\n_(reduce pass failed: {red.error}; showing raw findings)_")
     return _answer(
-        f"## Batch sub-query — map+reduce over {len(prompts)} chunks ({used_label}"
+        f"## Batch sub-query — map+reduce over {n_prompts} chunks ({used_label}"
         f" · auth: {transport.auth_label(CFG)})\n"
         f"tokens: {itok:,} in / {otok:,} out{_cost_note(sub_model, itok, otok)}{note}\n\n"
         f"{red.answer.strip()}"
