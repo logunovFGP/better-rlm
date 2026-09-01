@@ -73,13 +73,27 @@ def _cap_spans(spans: list[tuple[int, int, str]], max_chars: int) -> list[tuple[
     sub-model's window and every sub-query over it fails with "prompt is too long".
     Sub-spans stay adjacent, so concatenation still reconstructs the source exactly.
     """
+    max_chars = max(1, max_chars)   # a 0 from config.yaml used to spin forever below
     out: list[tuple[int, int, str]] = []
     for s, e, label in spans:
-        while e - s > max_chars:
-            out.append((s, s + max_chars, label))
-            s += max_chars
-        if e > s:
+        n = e - s
+        if n <= 0:
+            continue
+        if n <= max_chars:
             out.append((s, e, label))
+            continue
+        # Split EVENLY, not max_chars-then-remainder. The default 2000-line window is
+        # ~124 KB on a typical log, so capping at 120 KB used to emit 120 KB plus a
+        # 4 KB sliver -- for *every* window. That doubled the chunk count (401 chunks
+        # on a 400k-line log where 201 is right) and with it the sub_query_batch
+        # fan-out, for chunks holding a few dozen lines. Ceil twice: k pieces of
+        # ceil(n/k) chars, each guaranteed <= max_chars.
+        k = -(-n // max_chars)
+        size = -(-n // k)
+        for i in range(k):
+            a, b = s + i * size, min(s + (i + 1) * size, e)
+            if b > a:
+                out.append((a, b, label))
     return out
 
 
@@ -95,17 +109,32 @@ def chunk_text(text: str, strategy: str, *, chunk_lines: int, chunk_chars: int, 
     starts = _line_starts(text)
 
     if strategy == "lines":
+        # Bound each chunk by lines AND chars while walking, whichever binds first.
+        # Long lines (JSON-per-line logs) make chunk_lines alone a poor bound: 2000
+        # lines of 4 KB is 8 MB, far past the sub-model. But applying chunk_chars only
+        # afterwards, via _cap_spans, is worse than it looks: _cap_spans cannot see line
+        # boundaries, so a 2000-line window of ~124 KB against a 120 KB cap came back as
+        # two half-full chunks. That doubled the chunk count -- 401 chunks on a 400k-line
+        # log where ~207 hold the same content -- and rlm_sub_query_batch pays per chunk.
+        # Choosing the boundary here keeps every chunk as full as both limits allow.
         spans: list[tuple[int, int, str]] = []
-        step = max(1, chunk_lines - max(0, overlap))
-        for i in range(0, len(starts), step):
+        n = len(starts)
+        i = 0
+        while i < n:
             s = starts[i]
-            end_line_idx = min(i + chunk_lines, len(starts))
-            e = starts[end_line_idx] if end_line_idx < len(starts) else len(text)
+            by_lines = min(i + chunk_lines, n)
+            # Last line start still within chunk_chars of s, so the span cannot exceed it.
+            by_chars = bisect.bisect_right(starts, s + chunk_chars) - 1
+            # max(i + 1, ...) guarantees progress: a single line longer than chunk_chars
+            # yields by_chars == i, and that lone long line falls to _cap_spans below.
+            j = max(i + 1, min(by_lines, by_chars))
+            e = starts[j] if j < n else len(text)
             spans.append((s, e, ""))
             if e >= len(text):
                 break
-        # Long lines (JSON-per-line logs) make chunk_lines alone a poor bound: 2000
-        # lines of 4 KB is 8 MB, far past the sub-model. Cap on chunk_chars too.
+            i = max(i + 1, j - max(0, overlap))
+        # Still needed for the one case the walk cannot fix: a single line wider than
+        # chunk_chars, which has no line boundary to break on.
         return _mk(text, starts, _cap_spans(spans, chunk_chars))
 
     # "semantic" is paragraph-boundary splitting with a larger target — NOT

@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -72,6 +73,39 @@ def _write_atomic(path: str, data: dict) -> None:
         except OSError:
             pass
         raise
+
+
+def probe(source: str) -> str | None:
+    """Run the hook under the interpreter that will actually fire it. None = usable.
+
+    install.sh only checked that `python3` EXISTS. But the command written into
+    settings.json is literally ``python3 <path>``, re-resolved from PATH every time a
+    Read happens -- which need not be the interpreter running this installer, and need
+    not satisfy this project's requires-python. The hook is deliberately stdlib-only so
+    it can run outside the project venv, but "stdlib-only" is not "runs anywhere": its
+    ``tuple[int, str]`` annotations are evaluated at import and need >= 3.9.
+
+    A hook that crashes fails open (Read still happens) but prints a traceback on every
+    Read on the machine, in every project. Cheaper to find out here. Probed with a
+    no-op payload, which the fail-open ladder answers with exit 0.
+    """
+    exe = shutil.which("python3")
+    if exe is None:
+        return "python3 is not on PATH, and the hook command is `python3 <path>`"
+    try:
+        r = subprocess.run(
+            [exe, source], input=json.dumps({"tool_name": "Read", "tool_input": {}}),
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"could not run `{exe} {source}`: {exc}"
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()
+        detail = f" -- {tail[-1].strip()}" if tail else ""
+        ver = subprocess.run([exe, "-V"], capture_output=True, text=True).stdout.strip()
+        return (f"`python3 {source}` exited {r.returncode} on a no-op payload"
+                f" ({exe}, {ver}){detail}")
+    return None
 
 
 def apply(settings_path: str, hook_path: str, remove: bool = False) -> str:
@@ -153,9 +187,18 @@ def main(argv=None) -> int:
     if args.remove:
         print(apply(args.settings, args.hook, remove=True))
         print(place(args.hook, remove=True))
-    else:
-        print(place(args.hook))
-        print(apply(args.settings, args.hook))
+        return 0
+
+    # Probe the shipped copy BEFORE placing or registering: same bytes as the installed
+    # copy, so this is equivalent, and failing here leaves settings.json untouched
+    # instead of registering a hook that traceback-spams every Read on the machine.
+    broken = probe(SOURCE)
+    if broken is not None:
+        print(f"  ERROR: {broken}")
+        print("  Not registered. Install a python3 the hook can run, then retry.")
+        return 1
+    print(place(args.hook))
+    print(apply(args.settings, args.hook))
     return 0
 
 
