@@ -287,8 +287,16 @@ def rlm_chunk_context(ctx_id: str, strategy: str = "", size: int = 0, overlap: i
     context. strategy: lines | paragraphs | functions | headings | semantic | files
     (default from config). 'size' = lines-per-chunk for the lines strategy.
     Returns chunk count + per-chunk metadata (no content). Chunk defaults stay well
-    under the sub-model's context ceiling (config: sub_context_tokens) so sub-queries fit."""
-    strategy = strategy or CFG.chunk_strategy
+    under the sub-model's context ceiling (config: sub_context_tokens) so sub-queries fit.
+
+    Leave strategy empty for the content-aware default: `files` when the context is a
+    dir load or carries `===== FILE:` markers. File boundaries survive edits elsewhere,
+    so a re-analysis after changing 3 of 1,000 files re-asks about 3 chunks, not 1,000 --
+    under `lines`, one edit shifts every later boundary and nearly nothing is reused."""
+    # Empty strategy = the content-aware default: `files` for a dir load or a bundle
+    # with FILE markers (boundaries that survive edits, so cached answers keep hitting),
+    # else the configured default. See batch.default_strategy for why this matters.
+    strategy = strategy or batch.default_strategy(DEPS, STORE.get(ctx_id))
     if strategy not in STRATEGIES:
         return _bound(f"ERROR: unknown strategy '{strategy}'. Choose from {', '.join(STRATEGIES)}.")
     text = STORE.read_text(ctx_id)
@@ -406,9 +414,11 @@ def rlm_estimate(ctx_id: str, prompt: str = "", max_chunks: int = 0, reduce: boo
     ~60% of a 4-hour window and returned nothing when it was interrupted; this is the
     tool that would have said so in advance.
 
-    Reports how many chunks are ALREADY ANSWERED on disk, so the forecast covers only
-    the work that remains — and a run that does not fit this window is not a dead end:
-    start it, let it stop at the budget line, and call the batch again next window.
+    Reports how many chunks are ALREADY ANSWERED on disk -- cached by chunk CONTENT, so a
+    re-loaded file counts too -- and the forecast covers only the work that remains. A run
+    that does not fit this window is not a dead end: start it, let it stop at the budget
+    line, and call the batch again next window. Also prints the ceiling for rlm_query on
+    this context, which cannot be estimated, only bounded.
     """
     return batch.estimate(DEPS, ctx_id, prompt, max_chunks, reduce)
 
@@ -437,6 +447,14 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
 
     model_override: '' (Sonnet) | 'opus' (Opus 4.8, hardest tasks) | explicit model id.
     Models are resolved by the selection strategy (closest OAuth sibling when on OAuth).
+
+    COST CANNOT BE ESTIMATED, ONLY BOUNDED. The root model decides at run time how many
+    sub-calls to make. rlm_estimate prints the ceiling: what config permits (usually
+    several times a whole session window) and what query_timeout_s allows in practice.
+    This tool is stopped by the clock, is NOT gated at the budget line, and a stopped run
+    returns a partial answer that cannot be resumed. Its spend is ledgered, so the next
+    estimate sees it. Prefer rlm_exec/rlm_grep (free) and rlm_sub_query_batch (estimable,
+    gated, resumable) unless the question truly needs multi-hop reasoning.
     """
     root_model = _resolve_root_model(model_override)
     sub_model = models.select(DEPS.cfg, models.Role.SUB)

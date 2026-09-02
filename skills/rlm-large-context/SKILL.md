@@ -18,9 +18,9 @@ Size decides *whether* to load. The question's complexity decides *which* tool.
 | **"What will this cost me?" — before any batch or query** | **`rlm_estimate(ctx_id, prompt)`** | **free, no model call** |
 | "Where is X / does X appear" — one lookup | `rlm_grep(ctx_id, pattern)` | free, no model call |
 | Exact counts, sums, buckets, parsing | `rlm_exec(code, ctx_id)` | free, no model call |
-| "Label / classify / judge **every** entry"; aggregate over the whole input | `rlm_chunk_context` → `rlm_sub_query_batch` | one cheap call per chunk |
+| "Label / classify / judge **every** entry"; aggregate over the whole input | `rlm_chunk_context` → `rlm_sub_query_batch` | one cheap call per chunk; re-runs over unchanged chunks are **free** |
 | One targeted semantic question, input under ~200K tokens | `rlm_sub_query(ctx_id, prompt)` | one cheap call |
-| Cross-referencing, contradicting pairs, multi-hop over a corpus | `rlm_query(ctx_id, question)` | recursive loop, tens of seconds |
+| Cross-referencing, contradicting pairs, multi-hop over a corpus | `rlm_query(ctx_id, question)` | recursive loop; **bounded by timeout, not tokens** — see `rlm_estimate` |
 | Hardest reasoning | `rlm_query(..., model_override="opus")` | most expensive |
 
 Start at the top. `rlm_grep` and `rlm_exec` answer more questions than expected and spend
@@ -158,18 +158,35 @@ sittings rather than one. Its verdict is one of:
 | **Does not fit this window** — needs ~N windows | Still run it. It stops cleanly at the budget line, keeps every answer it bought, and resumes from there on the next call. Tell the user it will take N sittings. |
 | **Window budget: unknown** | No ceiling is configured and none has been learned yet, so nothing can be gated. Either set `session_budget_tokens` in `config.yaml`, or accept that the first run is uninstrumented — the server learns the ceiling the first time it hits a usage limit. |
 
-**Resume is automatic and is keyed on `(ctx_id, prompt, chunking)`.** Call
-`rlm_sub_query_batch` again with the **same ctx_id and the same prompt** and it re-uses
-every answer already on disk and pays only for the rest. Practical consequences:
+**Answers are cached by CONTENT, not by context.** Every chunk answer is stored under a
+hash of `(chunk bytes, prompt, model)`. Call `rlm_sub_query_batch` again with the same
+prompt — on the same ctx_id, on a **re-loaded copy of the same file**, or on a new bundle
+that happens to contain the same files — and every byte-identical chunk is free. Only
+chunks whose text actually changed are sent. Practical consequences:
+
+- **Use `strategy="files"` for anything with file boundaries — repo dumps, dir loads,
+  bundles with `===== FILE:` separators.** It is now the automatic default for those. Under
+  `files`, editing 3 of 1,053 files costs 3 calls on re-analysis; under `lines` the same
+  edit shifts every later boundary and nearly everything misses. The cache is worth ten
+  times more under `files`.
 
 - Re-word the prompt and you re-pay for everything. If you want to refine the question,
   finish the first pass, then ask the *findings* a new question — do not re-map.
-- Re-chunk (different strategy or size) and the cached answers no longer apply, by design:
-  chunk 7 is different text now.
+- Re-chunk with a different strategy or size and most chunks are different bytes, so most
+  miss. Pick the chunking once, then keep it.
 - `fresh=True` is the deliberate way to discard cached answers and re-ask.
 - A run that stopped at the budget line reports **STOPPED AT THE BUDGET LINE** with the
   chunk it will resume at. That is a scheduled continuation, not a failure — do not
   report it to the user as an error, and do not retry it in a loop hoping it will finish.
+
+**`rlm_query` cannot be estimated, only bounded.** The root model decides at run time how
+many sub-calls to make. `rlm_estimate` therefore prints a *ceiling* for it, not a
+forecast: the worst case config permits (normally several times a whole window) and the
+tighter bound the timeout imposes in practice. `rlm_query` is stopped by the clock, is
+not gated at the budget line, and a stopped run returns a partial answer that cannot be
+resumed — its spend is ledgered, so the *next* estimate sees it. Prefer `rlm_exec` /
+`rlm_grep` (free) and `rlm_sub_query_batch` (estimable, gated, resumable) unless the
+question truly needs multi-hop reasoning.
 
 **A synthesis over a partially-mapped context is partial.** When a run stops early, the
 reduce pass says so explicitly. Carry that caveat into whatever you tell the user; a

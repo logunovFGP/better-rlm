@@ -25,6 +25,7 @@ def bcfg(tmp_path):
         store_dir=tmp_path / "contexts",
         budget_ledger=tmp_path / "usage.jsonl",
         budget_state=tmp_path / "budget.json",
+        cache_dir=tmp_path / "cache",
         session_window_h=5.0,
         session_budget_tokens=0,
         budget_stop_fraction=0.95,
@@ -195,50 +196,114 @@ def test_a_gate_with_no_known_ceiling_never_closes(bcfg):
     assert all(gate.allow(10_000_000) for _ in range(3))
 
 
-# --------------------------- resumable results --------------------------- #
-def test_answers_survive_the_process_that_produced_them(bcfg):
-    key = results.key_for("audit", "haiku", "lines", 10)
-    results.append(bcfg, "ctx_1", key, results.Saved(3, "finding three", 100, 20, "haiku"))
-    results.append(bcfg, "ctx_1", key, results.Saved(7, "finding seven", 100, 20, "haiku"))
+# --------------------------- content-addressed answer cache ------------------------- #
+def test_an_answer_is_found_again_from_a_different_context(bcfg):
+    """THE reason the cache is keyed by content. The first design stored answers under the
+    ctx_id, so re-loading the same file (a new ctx_id) orphaned every answer already paid
+    for. The identity of an answer is (chunk bytes, prompt, model) -- which context asked
+    is an accident of when you loaded it."""
+    k = results.content_key("def test_x(): pass", "audit", "haiku")
+    results.cache_put(bcfg, k, results.Saved(7, "finding", 100, 20, "haiku"))
 
-    loaded = results.load(bcfg, "ctx_1", key)
-    assert set(loaded) == {3, 7}
-    assert loaded[3].answer == "finding three"
-
-
-def test_rechunking_invalidates_cached_answers(bcfg):
-    """Chunk 7 under a different strategy or chunk count is different TEXT. Re-using an
-    answer across a re-chunk would silently answer about bytes nobody asked about."""
-    k_lines = results.key_for("audit", "haiku", "lines", 10)
-    results.append(bcfg, "ctx_1", k_lines, results.Saved(7, "old", 1, 1, "haiku"))
-
-    assert results.load(bcfg, "ctx_1", results.key_for("audit", "haiku", "files", 10)) == {}
-    assert results.load(bcfg, "ctx_1", results.key_for("audit", "haiku", "lines", 25)) == {}
-    assert results.load(bcfg, "ctx_1", results.key_for("other", "haiku", "lines", 10)) == {}
-    assert results.load(bcfg, "ctx_1", k_lines)[7].answer == "old"
+    # a second context holding the same bytes computes the same key -- no ctx_id involved
+    k2 = results.content_key("def test_x(): pass", "audit", "haiku")
+    hit = results.cache_get(bcfg, k2, index=3)
+    assert hit is not None and hit.answer == "finding"
+    assert hit.index == 3, "the index is the CALLER's position, not the one stored"
 
 
-def test_a_torn_final_line_costs_one_chunk_not_the_whole_resume(bcfg):
-    """The exact crash this exists for: killed mid-append. If load() raised, the resume
-    file would be unreadable and the run would start from zero — the original failure."""
-    key = results.key_for("audit", "haiku", "lines", 3)
-    results.append(bcfg, "ctx_1", key, results.Saved(0, "good", 1, 1, "haiku"))
-    with open(results.path_for(bcfg, "ctx_1", key), "a", encoding="utf-8") as fh:
-        fh.write('{"index": 1, "answer": "half writ')
-
-    loaded = results.load(bcfg, "ctx_1", key)
-    assert set(loaded) == {0}
+def test_the_key_separates_text_prompt_and_model(bcfg):
+    base = results.content_key("same text", "same prompt", "same-model")
+    assert results.content_key("other text", "same prompt", "same-model") != base
+    assert results.content_key("same text", "other prompt", "same-model") != base
+    assert results.content_key("same text", "same prompt", "other-model") != base
+    # ...and does NOT depend on chunk position or chunking, by design
+    assert results.content_key("same text", "same prompt", "same-model") == base
 
 
-def test_fresh_clears_only_the_matching_question(bcfg):
-    k1 = results.key_for("q1", "haiku", "lines", 5)
-    k2 = results.key_for("q2", "haiku", "lines", 5)
-    results.append(bcfg, "ctx_1", k1, results.Saved(0, "a", 1, 1, "haiku"))
-    results.append(bcfg, "ctx_1", k2, results.Saved(0, "b", 1, 1, "haiku"))
+def test_a_corrupt_cache_entry_is_a_miss_not_a_crash(bcfg):
+    """Entries are written atomically so torn files should not exist, but a bad one
+    must still cost one re-ask rather than take the batch down."""
+    k = results.content_key("t", "p", "m")
+    p = results.cache_path(bcfg, k)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text('{"answer": ', encoding="utf-8")
 
-    assert results.clear(bcfg, "ctx_1", k1) is True
-    assert results.load(bcfg, "ctx_1", k1) == {}
-    assert results.load(bcfg, "ctx_1", k2)[0].answer == "b"
+    assert results.cache_get(bcfg, k, index=0) is None
+
+
+def test_fresh_deletes_only_the_matching_answer(bcfg):
+    k1 = results.content_key("t1", "p", "m")
+    k2 = results.content_key("t2", "p", "m")
+    results.cache_put(bcfg, k1, results.Saved(0, "a", 1, 1, "m"))
+    results.cache_put(bcfg, k2, results.Saved(1, "b", 1, 1, "m"))
+
+    assert results.cache_delete(bcfg, k1) is True
+    assert results.cache_get(bcfg, k1, index=0) is None
+    assert results.cache_get(bcfg, k2, index=1).answer == "b"
+
+
+def test_a_cache_hit_refreshes_the_entry_so_lru_keeps_it(bcfg, clock):
+    """Eviction is LRU by mtime. A hit must touch the file, or an answer used every day
+    is evicted as if it had never been read since it was written."""
+    import os
+    k = results.content_key("t", "p", "m")
+    results.cache_put(bcfg, k, results.Saved(0, "a", 1, 1, "m"), now=clock)
+    p = results.cache_path(bcfg, k)
+    os.utime(p, (clock.now - 1000, clock.now - 1000))
+    before = p.stat().st_mtime
+
+    results.cache_get(bcfg, k, index=0)
+
+    assert p.stat().st_mtime > before, "a hit did not refresh the entry"
+
+
+def test_the_sweep_evicts_least_recently_used_beyond_the_byte_cap(bcfg, clock):
+    """No TTL, on purpose -- an entry stays correct as long as (bytes, prompt, model)
+    match. Disk is bounded by bytes, evicting the entries least recently USEFUL first."""
+    import dataclasses as dc, os
+    cfg = dc.replace(bcfg, cache_sweep_cooldown_s=0)
+    keys = [results.content_key(f"t{i}", "p", "m") for i in range(3)]
+    for i, k in enumerate(keys):
+        results.cache_put(cfg, k, results.Saved(i, "x" * 20, 1, 1, "m"), now=clock)
+        os.utime(results.cache_path(cfg, k), (clock.now - 100 + i, clock.now - 100 + i))
+    # Cap = room for exactly two entries, measured from a real one rather than guessed:
+    # the JSON envelope is ~85 bytes here, and a hand-picked number was simply wrong.
+    one = results.cache_path(cfg, keys[0]).stat().st_size
+    cfg = dc.replace(cfg, cache_max_bytes=2 * one)
+    # entry 0 is the oldest on disk, but it was just USED -- the hit refreshes it
+    results.cache_get(cfg, keys[0], index=0)
+    os.utime(results.cache_path(cfg, keys[0]), (clock.now, clock.now))
+
+    results.sweep(cfg, now=clock)
+
+    alive = [results.cache_get(cfg, k, index=0) is not None for k in keys]
+    assert alive == [True, False, True], (
+        "expected the least-recently-used entry (1) evicted and the recently hit one (0) kept")
+
+
+def test_the_sweep_respects_its_cooldown(bcfg, clock):
+    import dataclasses as dc, os
+    cfg = dc.replace(bcfg, cache_max_bytes=1, cache_sweep_cooldown_s=300)
+    k = results.content_key("t", "p", "m")
+    results.cache_put(cfg, k, results.Saved(0, "x" * 50, 1, 1, "m"), now=clock)
+    sentinel = cfg.cache_dir / ".sweep"
+    sentinel.write_text("recent")
+    os.utime(sentinel, (clock.now - 10, clock.now - 10))
+
+    results.sweep(cfg, now=clock)
+    assert results.cache_get(cfg, k, index=0) is not None, "swept inside the cooldown"
+
+
+def test_the_manifest_records_what_a_run_produced_with_its_timestamps(bcfg, clock):
+    key = results.run_key("audit", "haiku", "lines", 3)
+    results.manifest_append(bcfg, "ctx_1", key, results.Saved(0, "a", 1, 1, "haiku"), now=clock)
+    clock.tick(45)
+    results.manifest_append(bcfg, "ctx_1", key, results.Saved(1, "b", 1, 1, "haiku"), now=clock)
+
+    lines = [json.loads(l) for l in
+             results.manifest_path(bcfg, "ctx_1", key).read_text(encoding="utf-8").splitlines()]
+    assert [(r["index"], r["ts"]) for r in lines] == [(0, FrozenClock.START), (1, FrozenClock.START + 45)]
 
 
 # --------------------------- end-to-end resume through the tool --------------------- #
@@ -452,14 +517,144 @@ def test_the_learned_ceiling_records_when_it_was_observed(bcfg, clock):
     assert state["observed_at"] == clock.now
 
 
-def test_a_persisted_answer_carries_the_time_it_landed(bcfg, clock):
-    """Resume reads these back; a timestamp that drifts with the reader is not evidence
-    of when the answer was actually bought."""
-    key = results.key_for("audit", "haiku", "lines", 3)
-    results.append(bcfg, "ctx_1", key, results.Saved(0, "a", 1, 1, "haiku"), now=clock)
-    clock.tick(45)
-    results.append(bcfg, "ctx_1", key, results.Saved(1, "b", 1, 1, "haiku"), now=clock)
 
-    stamps = [json.loads(line)["ts"] for line
-              in results.path_for(bcfg, "ctx_1", key).read_text(encoding="utf-8").splitlines()]
-    assert stamps == [FrozenClock.START, FrozenClock.START + 45]
+
+# --------------------------- (1) content cache, through the tool ------------------- #
+def test_a_re_loaded_copy_of_the_same_file_pays_nothing(monkeypatch, batch_ctx):
+    """The gap the ctx-keyed design had: same bytes, new ctx_id, full re-spend. Two
+    different ctx_ids over identical chunk text must share every answer."""
+    import src.subquery as sq
+    d, _ = batch_ctx(4)
+    asked: list[list[int]] = []
+
+    def fake_batch(cfg, prompts, model, concurrency=1, indices=None, on_result=None, **kw):
+        asked.append(list(indices))
+        out = [sq.SubResult(i, f"finding {i}", 10, 5, model=model) for i in indices]
+        for r in out:
+            on_result(r)
+        return out
+
+    monkeypatch.setattr(bt, "sub_query_batch", fake_batch)
+    bt.run(d, "ctx_first_load", "audit every file", reduce=False)
+    out = bt.run(d, "ctx_second_load", "audit every file", reduce=False)
+
+    assert asked == [[0, 1, 2, 3]], "the second context re-asked about identical bytes"
+    assert "RESUMED: 4 chunk(s) reused from disk" in out
+
+
+def test_only_the_changed_chunk_is_re_asked(monkeypatch, batch_ctx):
+    """Edit one file in a repo, re-analyse: exactly one call. This is the property that
+    makes the cache worth having, and it only holds when chunk boundaries are stable --
+    which is why default_strategy prefers `files`."""
+    import src.subquery as sq
+    asked: list[list[int]] = []
+
+    def fake_batch(cfg, prompts, model, concurrency=1, indices=None, on_result=None, **kw):
+        asked.append(list(indices))
+        out = [sq.SubResult(i, f"finding {i}", 10, 5, model=model) for i in indices]
+        for r in out:
+            on_result(r)
+        return out
+
+    monkeypatch.setattr(bt, "sub_query_batch", fake_batch)
+    d, _ = batch_ctx(4)
+    bt.run(d, "ctx_v1", "audit", reduce=False)
+
+    d2, _ = batch_ctx(4, text_for=lambda i: "EDITED" if i == 2 else f"chunk{i}")
+    bt.run(d2, "ctx_v2", "audit", reduce=False)
+
+    assert asked == [[0, 1, 2, 3], [2]], "chunks whose bytes did not change were re-asked"
+
+
+# --------------------------- (2) the content-aware default strategy ------------------ #
+def test_a_dir_load_defaults_to_files_chunking(deps, tmp_path):
+    class _Meta:
+        source_type = "dir"
+        content_path = str(tmp_path / "nope")
+    assert bt.default_strategy(deps, _Meta()) == "files"
+
+
+def test_a_bundle_with_file_markers_defaults_to_files_chunking(deps, tmp_path):
+    bundle = tmp_path / "bundle.txt"
+    bundle.write_text("===== FILE: a.py (12 bytes) =====\nprint(1)\n", encoding="utf-8")
+
+    class _Meta:
+        source_type = "file"
+        content_path = str(bundle)
+    assert bt.default_strategy(deps, _Meta()) == "files"
+
+
+def test_a_plain_file_keeps_the_configured_default(deps, tmp_path):
+    plain = tmp_path / "log.txt"
+    plain.write_text("2026-09-02 boot\n2026-09-02 ready\n", encoding="utf-8")
+
+    class _Meta:
+        source_type = "file"
+        content_path = str(plain)
+    assert bt.default_strategy(deps, _Meta()) == deps.cfg.chunk_strategy
+
+
+# --------------------------- (3) never-possible is judged against the ceiling -------- #
+def test_a_chunk_larger_than_the_stop_line_is_impossible_not_waitable(bcfg):
+    """The bug: the refusal compared one chunk against REMAINING headroom and said
+    "headroom returns in ~Xh". A chunk larger than the ceiling never fits any window;
+    saying "wait" is false. The verdict must say so and name the fix (re-chunk)."""
+    cfg = dataclasses.replace(bcfg, session_budget_tokens=100_000, budget_stop_fraction=0.95)
+    est = budget.estimate_batch(cfg, [200_000], prompt="p", max_output_tokens=2048, reduce=False)
+    v = budget.judge(cfg, est)
+
+    assert not v.possible
+    assert not v.fits
+    text = budget.render(v, what="x")
+    assert "Impossible in ANY window" in text
+    assert "Re-chunk" in text
+    assert "returns" not in text, "must not tell the user to wait for something that never comes"
+
+
+def test_a_chunk_that_fits_a_fresh_window_but_not_the_remainder_is_waitable(bcfg):
+    cfg = dataclasses.replace(bcfg, session_budget_tokens=100_000, budget_stop_fraction=0.95)
+    budget.record(cfg, "m", 90_000, 0)   # 5k headroom left
+    est = budget.estimate_batch(cfg, [20_000], prompt="p", max_output_tokens=2048, reduce=False)
+    v = budget.judge(cfg, est)
+
+    assert v.possible, "a 22k call fits a fresh 95k window -- it is waitable, not impossible"
+    assert not v.fits
+
+
+def test_the_batch_refuses_an_impossible_chunk_without_promising_headroom(monkeypatch, batch_ctx):
+    d, _ = batch_ctx(2, est_tokens=10_000_000)
+    d = dataclasses.replace(d, cfg=dataclasses.replace(d.cfg, session_budget_tokens=5_800_000))
+    called = []
+    monkeypatch.setattr(bt, "sub_query_batch", lambda *a, **k: called.append(1) or [])
+
+    out = bt.run(d, "ctx_1", "audit", reduce=False)
+
+    assert out.startswith("ERROR: a single chunk can never fit")
+    assert "Headroom returns" not in out
+    assert not called, "an impossible batch must not dispatch"
+
+
+# --------------------------- (4) rlm_query: a ceiling, not an estimate ---------------- #
+def test_the_query_ceiling_is_derived_from_config_alone(bcfg):
+    q = budget.query_ceiling(bcfg)
+    subs = bcfg.max_iterations * bcfg.max_concurrent_subcalls
+    assert q.root_calls_max == bcfg.max_iterations
+    assert q.sub_calls_max == subs
+    assert q.worst_tokens == subs * (bcfg.sub_context_tokens + 2048) + bcfg.max_iterations * bcfg.max_output_tokens
+    assert q.timeout_s == bcfg.query_timeout_s
+    assert q.timeout_calls == int(bcfg.query_timeout_s / budget._DEFAULT_CALL_S)
+
+
+def test_the_query_ceiling_says_what_it_is_and_is_not(bcfg):
+    text = budget.render_query_ceiling(budget.query_ceiling(bcfg), cap=5_800_000)
+    assert "ceiling, not an estimate" in text
+    assert "bounded by the clock, not by tokens" in text
+    assert "cannot be resumed" in text
+    assert "x the whole window" in text, "worst case should be stated relative to the window"
+
+
+def test_the_estimate_tool_appends_the_query_ceiling(monkeypatch, batch_ctx):
+    d, _ = batch_ctx(3)
+    out = bt.estimate(d, "ctx_1", "audit", reduce=False)
+    assert "## Estimate" in out
+    assert "rlm_query on this context" in out

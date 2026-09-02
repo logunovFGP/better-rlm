@@ -191,6 +191,10 @@ class Estimate:
     chunks_total: int
     chunks_todo: int
     chunks_done: int
+    #: The largest SINGLE call in the run. This is what decides "possible at all": a run
+    #: can always be split across windows, but one call cannot, so a chunk bigger than
+    #: the stop line can never be sent -- in this window or any other.
+    max_call_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -227,10 +231,12 @@ def estimate_batch(cfg: Config, chunk_tokens: list[int], *, prompt: str,
         otok += max_output_tokens
         calls += 1
     conc = max(1, cfg.subquery_concurrency)
+    biggest = ((max(todo) if todo else 0) + per_prompt_overhead + max_output_tokens) if todo else 0
     return Estimate(calls=calls, input_tokens=itok, output_tokens=otok,
                     seconds=(calls / conc) * _observed_call_s(cfg, now),
                     chunks_total=len(chunk_tokens), chunks_todo=len(todo),
-                    chunks_done=len(chunk_tokens) - len(todo))
+                    chunks_done=len(chunk_tokens) - len(todo),
+                    max_call_tokens=biggest)
 
 
 def _observed_call_s(cfg: Config, now: Clock = time.time) -> float:
@@ -269,10 +275,12 @@ class Verdict:
 def judge(cfg: Config, est: Estimate, *, now: Clock = time.time) -> Verdict:
     """Compare an estimate against the window's remaining headroom.
 
-    ``possible`` is True whenever the caller can resume, even if the run needs several
-    windows — which, with durable per-chunk results, is every batch. An oversized job is
-    not refused, it is SCHEDULED: that is the difference between "you cannot do this" and
-    "this takes three sittings, and each one keeps what it earned".
+    ``possible`` is False in exactly one case: the largest single call exceeds the stop
+    line. A run can be split across windows -- durable per-chunk answers make any SIZE
+    completable -- but one call cannot be split, so a chunk bigger than the line can never
+    be sent, now or later. Everything else is SCHEDULED, not refused: "this takes three
+    sittings, and each one keeps what it earned" is a different message from "this can
+    never run", and the first version of this function could only say the first.
     """
     cap, source = ceiling(cfg)
     s = spent(cfg, now=now)
@@ -283,9 +291,10 @@ def judge(cfg: Config, est: Estimate, *, now: Clock = time.time) -> Verdict:
                        spend=s, estimate=est)
     usable = cap * cfg.budget_stop_fraction
     headroom = int(max(0.0, usable - s.tokens))
+    possible = est.max_call_tokens <= usable
     return Verdict(
-        fits=est.total_tokens <= headroom,
-        possible=True,  # durable per-chunk results make any size completable across windows
+        fits=possible and est.total_tokens <= headroom,
+        possible=possible,
         windows_needed=(est.total_tokens / usable) if usable > 0 else float("inf"),
         headroom_tokens=headroom, ceiling_tokens=cap, ceiling_source=source,
         stop_pct=stop_pct, spend=s, estimate=est,
@@ -342,6 +351,74 @@ class Gate:
 
 
 # --------------------------------------------------------------------------- #
+# rlm_query -- a ceiling, not an estimate
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class QueryCeiling:
+    """What rlm_query CAN cost, from config alone. Not a forecast: the root model decides
+    at run time how many sub-calls to make, so no pre-flight can predict the count. What
+    can be stated is the worst case the limits permit, and the tighter bound the timeout
+    imposes in practice."""
+
+    root_calls_max: int
+    sub_calls_max: int
+    worst_tokens: int         # every permitted call at its maximum size
+    timeout_s: int
+    timeout_calls: int        # how many calls fit in the timeout at the observed latency
+    timeout_tokens: int       # those calls at a typical chunk-sized prompt
+    per_call_s: float
+
+
+def query_ceiling(cfg: Config, *, now: Clock = time.time) -> QueryCeiling:
+    """Bound rlm_query from config. Two numbers, both honest about what they are:
+
+    * worst_tokens -- max_iterations root turns, each allowed max_concurrent_subcalls
+      sub-calls at the sub-model's full window. This is the limit the config permits, and
+      it is normally far past a whole session window.
+    * timeout_tokens -- what query_timeout_s actually allows at the observed per-call
+      latency. In practice THIS is the bound: rlm_query is stopped by the clock, not by
+      tokens, and that is the fact a caller needs before starting one.
+
+    Root-turn INPUT is omitted from both: it is the REPL transcript, which grows per turn
+    in a way config cannot bound. Root output is included at max_output_tokens.
+    """
+    subs = cfg.max_iterations * max(1, cfg.max_concurrent_subcalls)
+    sub_out = 2048
+    worst = subs * (cfg.sub_context_tokens + sub_out) + cfg.max_iterations * cfg.max_output_tokens
+    per_call = _observed_call_s(cfg, now)
+    timeout_calls = int(cfg.query_timeout_s / per_call) if cfg.query_timeout_s > 0 else 0
+    typical_call = estimate_tokens(cfg.chunk_chars) + sub_out
+    return QueryCeiling(
+        root_calls_max=cfg.max_iterations, sub_calls_max=subs, worst_tokens=worst,
+        timeout_s=cfg.query_timeout_s, timeout_calls=timeout_calls,
+        timeout_tokens=timeout_calls * typical_call, per_call_s=per_call,
+    )
+
+
+def render_query_ceiling(q: QueryCeiling, cap: int | None) -> str:
+    per_turn = q.sub_calls_max // max(1, q.root_calls_max)
+    lines = [
+        "## rlm_query on this context -- a ceiling, not an estimate",
+        "",
+        "The root model decides at run time how many sub-calls to make, so the count cannot "
+        "be forecast. What config permits, and what the timeout allows in practice:",
+        "",
+        f"- permitted: up to **{q.root_calls_max}** root turns x **{per_turn}** sub-calls = "
+        f"**{q.sub_calls_max}** sub-calls; worst case **~{q.worst_tokens:,} tokens**"
+        + (f" ({q.worst_tokens / cap:.1f}x the whole window)" if cap else ""),
+        f"- in practice: `query_timeout_s={q.timeout_s}` at ~{q.per_call_s:.0f}s/call allows "
+        f"**~{q.timeout_calls} calls, ~{q.timeout_tokens:,} tokens** before the engine is stopped",
+        "",
+        "_rlm_query is bounded by the clock, not by tokens: it is not gated at the budget "
+        "line, and a stopped query returns a partial answer that cannot be resumed. Its "
+        "spend IS ledgered, so the next estimate sees it. Prefer rlm_exec / rlm_grep (free) "
+        "and rlm_sub_query_batch (estimable, gated, resumable) unless the question truly "
+        "needs multi-hop reasoning._",
+    ]
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
 # Rendering
 # --------------------------------------------------------------------------- #
 def fmt_dur(seconds: float) -> str:
@@ -387,6 +464,17 @@ def render(v: Verdict, *, what: str) -> str:
         f"- headroom to the {v.stop_pct}% stop line: ~{v.headroom_tokens:,}",
         "",
     ]
+    if not v.possible:
+        usable = int(v.ceiling_tokens * (v.stop_pct / 100))
+        lines += [
+            f"**Impossible in ANY window.** The largest single chunk needs "
+            f"~{e.max_call_tokens:,} tokens in one call, and the {v.stop_pct}% stop line is "
+            f"~{usable:,}. Waiting does not help: no window is ever that large.",
+            "",
+            "Re-chunk smaller (`rlm_chunk_context(ctx_id, strategy='lines', size=<fewer "
+            "lines>)`), or raise `session_budget_tokens` if the ceiling is set too low.",
+        ]
+        return "\n".join(lines)
     if v.fits:
         lines.append(f"**Fits** — this run needs ~{pct:.0f}% of the remaining headroom.")
     else:

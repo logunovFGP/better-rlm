@@ -12,8 +12,8 @@ from src.deps import Deps
 def cfg(tmp_path: Path):
     """Config with every on-disk path redirected under this test's tmp_path.
 
-    All four paths, not just the store: logs, the persisted chunk answers, the spend
-    ledger and the learned-ceiling state. Each was written into the operator's real
+    EVERY path field, not just the store: logs, the per-run manifests, the spend
+    ledger, the learned-ceiling state and the content-addressed answer cache. Each was written into the operator's real
     ``~/.rlm`` at some point during development, and the ledger was the worst of them —
     fake spend recorded there skews the budget gate of a REAL run afterwards.
     """
@@ -23,6 +23,11 @@ def cfg(tmp_path: Path):
         log_dir=tmp_path / "logs",
         budget_ledger=tmp_path / "usage.jsonl",
         budget_state=tmp_path / "budget.json",
+        cache_dir=tmp_path / "cache",
+        # Adding a path to Config and forgetting it here is how the answer cache leaked
+        # into the real ~/.rlm and made five tests hit each other's entries.
+        # test_config.py::test_every_config_path_is_redirected_by_the_cfg_fixture fails
+        # loudly the next time a Path field is added without a line above.
     )
 
 
@@ -188,7 +193,10 @@ def batch_ctx(deps, monkeypatch):
     module's config.
     """
     def _make(n_chunks: int = 3, *, est_tokens: int = 1000, strategy: str = "lines",
-              on_read=None):
+              on_read=None, text_for=None):
+        """``text_for(i)`` overrides a chunk's text. The answer cache is keyed by chunk
+        bytes, so a test that wants to prove "only the CHANGED chunk is re-asked" needs
+        to change exactly one chunk's bytes and nothing else."""
         import src.batch as batch_mod
 
         class _Meta:
@@ -202,7 +210,7 @@ def batch_ctx(deps, monkeypatch):
             def read_chunk(self, ctx_id, i):
                 if on_read is not None:
                     on_read(i)   # lets a test prove WHEN a chunk was read, not just that it was
-                return f"chunk{i}"
+                return text_for(i) if text_for is not None else f"chunk{i}"
 
             def read_text(self, ctx_id):
                 return "".join(f"chunk{i}\n" for i in range(n_chunks))

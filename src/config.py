@@ -156,6 +156,13 @@ _DEFAULTS: dict[str, Any] = {
     "budget_stop_fraction": 0.95,     # stop a run at this share of the window budget
     "budget_ledger": "~/.rlm/usage.jsonl",   # append-only per-call spend record
     "budget_state": "~/.rlm/budget.json",    # learned ceiling + last observed limit
+    # ---- Content-addressed answer cache (see results.py) -------------------------------
+    # Keyed by (chunk bytes, prompt, model), so a re-loaded file or a re-bundled repo reuses
+    # every answer whose chunk is byte-identical. No TTL: an entry stays correct for as
+    # long as those three match. Disk is bounded by bytes with LRU eviction instead.
+    "cache_dir": "~/.rlm/cache",
+    "cache_max_bytes": 256 * 1024 * 1024,   # ~32k answers at the 2048-token map cap
+    "cache_sweep_cooldown_s": 300,          # one sweep per window across the daemon pool
     # Structured file logging + bounded retention (see logsetup.py). Per-PID rotated
     # files in log_dir; a startup sweep caps total files/bytes/age across ALL processes
     # so many churning server processes can never fill the disk.
@@ -243,6 +250,9 @@ class Config:
     budget_stop_fraction: float
     budget_ledger: Path
     budget_state: Path
+    cache_dir: Path
+    cache_max_bytes: int
+    cache_sweep_cooldown_s: int
     log_level: str
     log_to_file: bool
     log_max_bytes: int
@@ -309,6 +319,9 @@ def load_config() -> Config:
         budget_stop_fraction=float(m["budget_stop_fraction"]),
         budget_ledger=Path(os.path.expanduser(str(m["budget_ledger"]))),
         budget_state=Path(os.path.expanduser(str(m["budget_state"]))),
+        cache_dir=Path(os.path.expanduser(str(m["cache_dir"]))),
+        cache_max_bytes=int(m["cache_max_bytes"]),
+        cache_sweep_cooldown_s=int(m["cache_sweep_cooldown_s"]),
         log_level=str(m["log_level"]).upper(),
         log_to_file=bool(m["log_to_file"]),
         log_max_bytes=int(m["log_max_bytes"]),

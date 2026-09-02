@@ -22,7 +22,7 @@ from collections.abc import Callable
 from functools import partial
 
 from . import budget, models, results, transport
-from .chunking import chunk_text
+from .chunking import chunk_text, looks_like_file_bundle
 from .config import estimate_tokens
 from .deps import Deps
 from .logsetup import log_event
@@ -36,6 +36,78 @@ BATCH_MAX_TOKENS = 2048
 
 
 # --------------------------------------------------------------------------- #
+# Chunking default
+# --------------------------------------------------------------------------- #
+def default_strategy(d: Deps, meta) -> str:
+    """The chunk strategy to use when the caller did not pick one.
+
+    ``files`` for anything with file boundaries — a dir load, or a bundle built with the
+    documented ``===== FILE:`` separator — and the configured default otherwise. This is
+    not a stylistic preference: the answer cache is keyed by chunk bytes, and file
+    boundaries are the only ones that survive an edit elsewhere in the corpus. Under
+    ``lines``, editing 3 of 1,053 files shifts every later line boundary and nearly every
+    cached answer misses; under ``files`` it costs 3 calls. Content-defined chunking at
+    file granularity, which is what makes the cache worth having.
+    """
+    if getattr(meta, "source_type", "") == "dir":
+        return "files"
+    try:
+        with open(meta.content_path, encoding="utf-8", errors="replace") as fh:
+            if looks_like_file_bundle(fh.read(8192)):
+                return "files"
+    except (OSError, AttributeError, TypeError):
+        pass
+    return d.cfg.chunk_strategy
+
+
+def _ensure_chunked(d: Deps, ctx_id: str):
+    """Chunk the context with the default strategy if nobody has yet. Returns the meta."""
+    meta = d.store.get(ctx_id)
+    if meta.chunks:
+        return meta
+    strategy = default_strategy(d, meta)
+    text = d.store.read_text(ctx_id)
+    chunks = chunk_text(text, strategy, chunk_lines=d.cfg.chunk_lines,
+                        chunk_chars=d.cfg.chunk_chars, overlap=d.cfg.chunk_overlap)
+    d.store.set_chunks(ctx_id, strategy, [c.as_dict() for c in chunks],
+                       text=text)   # reuse this decode; don't make a second copy
+    del text   # the full decode has served chunking; don't hold it for the whole batch
+    return d.store.get(ctx_id)
+
+
+# --------------------------------------------------------------------------- #
+# Cache scan
+# --------------------------------------------------------------------------- #
+def _scan_cache(d: Deps, ctx_id: str, sel: list[int], prompt: str, model: str, *,
+                fresh: bool = False) -> tuple[dict[int, str], dict[int, results.Saved]]:
+    """Hash every selected chunk's text and look each one up in the answer cache.
+
+    Returns ``(keys, cached)``: the content key per chunk index (the run needs it to store
+    new answers under), and the answers already on disk. ``fresh`` deletes instead of
+    looking up — the deliberate way to re-ask.
+
+    This reads every selected chunk once, and the batch reads each un-cached one again
+    lazily inside its worker. Reads are seek-based and bounded to one chunk at a time, so
+    the cost is one extra pass over the file and the memory stays flat.
+    ponytail: if that double read ever shows in a profile, store the per-chunk hash in
+    the chunk meta at chunking time — then this scan needs no reads at all.
+    """
+    keys: dict[int, str] = {}
+    cached: dict[int, results.Saved] = {}
+    for i in sel:
+        text = d.store.read_chunk(ctx_id, i)
+        k = results.content_key(text, prompt, model)
+        keys[i] = k
+        if fresh:
+            results.cache_delete(d.cfg, k)
+            continue
+        hit = results.cache_get(d.cfg, k, index=i)
+        if hit is not None:
+            cached[i] = hit
+    return keys, cached
+
+
+# --------------------------------------------------------------------------- #
 # Estimate & budget (no model call)
 # --------------------------------------------------------------------------- #
 def estimate(d: Deps, ctx_id: str, prompt: str = "", max_chunks: int = 0,
@@ -44,8 +116,9 @@ def estimate(d: Deps, ctx_id: str, prompt: str = "", max_chunks: int = 0,
     headroom left in the session window. Makes no model call."""
     meta = d.store.get(ctx_id)
     chunks = meta.chunks
-    strategy = meta.chunk_strategy or d.cfg.chunk_strategy
-    if not chunks:
+    strategy = meta.chunk_strategy or default_strategy(d, meta)
+    chunked = bool(chunks)
+    if not chunked:
         # Chunk boundaries only — no store mutation, because an estimate must not change
         # the thing it is estimating. A later batch may legitimately chunk differently.
         text = d.store.read_text(ctx_id)
@@ -56,15 +129,23 @@ def estimate(d: Deps, ctx_id: str, prompt: str = "", max_chunks: int = 0,
     n = len(chunks)
     sel = list(range(n if max_chunks <= 0 else min(max_chunks, n)))
     sub_model = models.select(d.cfg, models.Role.SUB)
-    cached = results.load(d.cfg, ctx_id, results.key_for(prompt, sub_model, strategy, n))
+    # The cache scan needs the exact chunk text, which only a chunked context can serve;
+    # an unchunked one reports zero hits and says so rather than guess.
+    cached = _scan_cache(d, ctx_id, sel, prompt, sub_model)[1] if chunked else {}
     done_pos = {pos for pos, i in enumerate(sel) if i in cached}
     est = budget.estimate_batch(
         d.cfg, [int(chunks[i].get("est_tokens", 0)) for i in sel], prompt=prompt,
         max_output_tokens=BATCH_MAX_TOKENS, reduce=reduce, done=done_pos, now=d.clock)
+    cap, _src = budget.ceiling(d.cfg)
+    body = budget.render(budget.judge(d.cfg, est, now=d.clock),
+                         what=f"batch over {ctx_id} ({strategy}, {n} chunks)")
+    if not chunked:
+        body += ("\n\n_Not chunked yet: cached answers can only be counted once "
+                 "rlm_chunk_context has run; the count above assumes none._")
     return d.answer(
-        budget.render(budget.judge(d.cfg, est, now=d.clock),
-                      what=f"batch over {ctx_id} ({strategy}, {n} chunks)")
-        + f"\n\n_Sub-model: {sub_model}. Estimate only — no model call was made._"
+        body
+        + f"\n\n_Sub-model: {sub_model}. Estimate only — no model call was made._\n\n"
+        + budget.render_query_ceiling(budget.query_ceiling(d.cfg, now=d.clock), cap)
     )
 
 
@@ -135,29 +216,33 @@ def _mk_prompt(d: Deps, ctx_id: str, prompt: str, i: int, n: int) -> str:
     return f"{prompt}\n\n--- CHUNK {i + 1}/{n} ---\n{d.store.read_chunk(ctx_id, i)}"
 
 
+def _persist(d: Deps, ctx_id: str, rkey: str, ckey: str, r: SubResult) -> None:
+    """Store one answer the moment it lands: in the content cache (for any future context
+    holding these bytes) and in this run's manifest (for the human, and for the over-cap
+    reply to point at). The run that motivated all of this died holding 40 finished
+    answers it had already paid for."""
+    saved = results.Saved(r.index, r.answer, r.input_tokens, r.output_tokens, r.model)
+    results.cache_put(d.cfg, ckey, saved, now=d.clock)
+    results.manifest_append(d.cfg, ctx_id, rkey, saved, now=d.clock)
+
+
 def run(d: Deps, ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = True,
         fresh: bool = False) -> str:
     """Map ``prompt`` over the chunks of a context, resuming what is already answered and
     stopping at the session-window budget line rather than being killed at it."""
-    meta = d.store.get(ctx_id)
-    if not meta.chunks:
-        text = d.store.read_text(ctx_id)
-        chunks = chunk_text(text, d.cfg.chunk_strategy, chunk_lines=d.cfg.chunk_lines,
-                            chunk_chars=d.cfg.chunk_chars, overlap=d.cfg.chunk_overlap)
-        d.store.set_chunks(ctx_id, d.cfg.chunk_strategy, [c.as_dict() for c in chunks],
-                           text=text)   # reuse this decode; don't make a second copy
-        meta = d.store.get(ctx_id)
-        del text   # the full decode has served chunking; don't hold it for the whole batch
+    meta = _ensure_chunked(d, ctx_id)
     n = len(meta.chunks)
     sel = list(range(n if max_chunks <= 0 else min(max_chunks, n)))
     sub_model = models.select(d.cfg, models.Role.SUB)
     strategy = meta.chunk_strategy or d.cfg.chunk_strategy
 
     # --- what is already answered? ------------------------------------------------
-    key = results.key_for(prompt, sub_model, strategy, n)
+    # Keyed by chunk CONTENT, so a re-loaded file or a re-bundled repo hits on every
+    # byte-identical chunk. The manifest is per run and only for the human.
+    rkey = results.run_key(prompt, sub_model, strategy, n)
     if fresh:
-        results.clear(d.cfg, ctx_id, key)
-    cached = results.load(d.cfg, ctx_id, key)
+        results.manifest_clear(d.cfg, ctx_id, rkey)
+    keys, cached = _scan_cache(d, ctx_id, sel, prompt, sub_model, fresh=fresh)
     todo = [i for i in sel if i not in cached]
 
     # --- what will the REMAINDER cost? --------------------------------------------
@@ -174,14 +259,18 @@ def run(d: Deps, ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = T
         merged = [SubResult(i, cached[i].answer, cached[i].itok, cached[i].otok,
                             model=cached[i].model) for i in sel]
         return _render(d, ctx_id, prompt, merged, sub_model, reduce=reduce, n=n,
-                       max_chunks=max_chunks, from_cache=len(sel), deferred=0, key=key)
+                       max_chunks=max_chunks, from_cache=len(sel), deferred=0, key=rkey)
 
-    # Refuse ONLY when not even one chunk fits — running then would defer every chunk and
-    # report nothing but noise. Anything merely large is allowed to start: the gate stops
-    # it cleanly at the budget line and the answers it bought are already on disk.
-    one_call = ((max(sel_tokens) if sel_tokens else 0)
-                + estimate_tokens(prompt) + BATCH_MAX_TOKENS)
-    if verdict.headroom_tokens is not None and one_call > verdict.headroom_tokens:
+    # Two different refusals, because they call for different actions. A chunk larger
+    # than the stop line can NEVER be sent — waiting is useless, re-chunk. A chunk larger
+    # than what is LEFT can be sent next window — wait, and resume. The first version of
+    # this code told both cases to wait.
+    if not verdict.possible:
+        return d.answer(
+            "ERROR: a single chunk can never fit the session window — re-chunk smaller.\n\n"
+            + budget.render(verdict, what=f"{len(todo)} chunk(s) of {ctx_id}")
+        )
+    if verdict.headroom_tokens is not None and est.max_call_tokens > verdict.headroom_tokens:
         wait = (f" Headroom returns in ~{budget.fmt_dur(verdict.spend.oldest_expires_in_s)}."
                 if verdict.spend.oldest_expires_in_s else "")
         return d.answer(
@@ -211,12 +300,7 @@ def run(d: Deps, ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = T
     fresh_results = sub_query_batch(
         d.cfg, prompts, sub_model, concurrency=d.cfg.subquery_concurrency,
         max_tokens=BATCH_MAX_TOKENS, indices=todo, gate=gate,
-        # Persist as each answer lands, NOT at the end: the run that motivated all of
-        # this died holding 40 finished answers it had already paid for.
-        on_result=lambda r: results.append(
-            d.cfg, ctx_id, key,
-            results.Saved(r.index, r.answer, r.input_tokens, r.output_tokens, r.model),
-            now=d.clock),
+        on_result=lambda r: _persist(d, ctx_id, rkey, keys[r.index], r),
     )
     deferred = sum(1 for r in fresh_results if (r.error or "").startswith("deferred"))
     by_index = {r.index: r for r in fresh_results}
@@ -230,7 +314,7 @@ def run(d: Deps, ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = T
         else:
             merged.append(SubResult(i, "", 0, 0, error="not run"))
     return _render(d, ctx_id, prompt, merged, sub_model, reduce=reduce, n=n,
-                   max_chunks=max_chunks, from_cache=len(cached), deferred=deferred, key=key)
+                   max_chunks=max_chunks, from_cache=len(cached), deferred=deferred, key=rkey)
 
 
 def _render(d: Deps, ctx_id: str, prompt: str, res_list: list[SubResult], sub_model: str, *,
@@ -307,7 +391,7 @@ def _render(d: Deps, ctx_id: str, prompt: str, res_list: list[SubResult], sub_mo
         # refused by the client outright and the whole 30-call batch read back as an error.
         full = head + per_chunk
         if key and encoded_len(full) > d.cfg.answer_cap_bytes:
-            path = results.path_for(d.cfg, ctx_id, key)
+            path = results.manifest_path(d.cfg, ctx_id, key)
             shown, kept, room = [], 0, d.cfg.answer_cap_bytes // 3
             for r in res_list:
                 block = f"### chunk {r.index}\n" + (r.error or r.answer.strip())

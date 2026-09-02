@@ -389,7 +389,12 @@ def test_max_chunks_caps_how_many_prompts_get_built(monkeypatch, batch_ctx):
     seen: list = []
 
     def fake_batch(cfg, prompts, model, concurrency=1, **kw):
-        assert builds == [], "a prompt was built before the pool ran"
+        # The answer cache is keyed by chunk bytes, so run() now reads and hashes each
+        # SELECTED chunk before the pool -- one at a time, discarded at once. The memory
+        # property this test guards is unchanged and asserted directly: no prompt STRING
+        # exists before the pool, and a chunk max_chunks excluded is never read at all.
+        assert all(callable(p) for p in prompts), "prompts must reach the pool as lazy builders"
+        assert 2 not in builds, "a chunk beyond max_chunks was read"
         seen.extend(prompts)
         return [sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))]
 
@@ -397,7 +402,9 @@ def test_max_chunks_caps_how_many_prompts_get_built(monkeypatch, batch_ctx):
     bt.run(d, "ctx_x", "audit", max_chunks=2, reduce=False)
 
     assert len(seen) == 2, "max_chunks must cap the builder list, not just the results"
-    assert [p() for p in seen] and builds == [0, 1], "built a chunk max_chunks excluded"
+    # Each selected chunk is read twice (cache scan, then the lazy build); the set is what
+    # proves max_chunks bounded both passes.
+    assert [p() for p in seen] and sorted(set(builds)) == [0, 1], "built a chunk max_chunks excluded"
 
 
 def test_a_failed_reduce_falls_back_to_the_raw_findings(monkeypatch, batch_ctx):

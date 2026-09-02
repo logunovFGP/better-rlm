@@ -23,6 +23,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 
+from . import results
 from .config import Clock, Config, cost_usd, load_config
 from .context_store import ContextStore
 from .logsetup import LOGGER_NAME, configure_logging
@@ -55,6 +56,10 @@ class Deps:
         side effect of wanting a temp store.
         """
         c = cfg or load_config()
+        # The answer cache's LRU sweep belongs with the other startup housekeeping (log
+        # retention runs inside configure_logging). Cooldown-gated, so the pool of spare
+        # daemons does not each walk the cache directory on start.
+        results.sweep(c)
         return cls(cfg=c, store=ContextStore(c), log=configure_logging(c))
 
     @classmethod

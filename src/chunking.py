@@ -89,6 +89,14 @@ def _split_points_to_spans(text: str, points: list[int], max_chars: int) -> list
     return _cap_spans([(s, e, "") for s, e in zip(points, points[1:])], max_chars)
 
 
+def looks_like_file_bundle(head: str) -> bool:
+    """True if ``head`` (the first few KB of a context) carries a FILE marker -- a dir load,
+    or a bundle someone built with the documented separator. The ``files`` strategy is
+    then the right default: file boundaries survive edits elsewhere, so the answer cache
+    keeps hitting; ``lines`` boundaries shift on every edit above them and nothing does."""
+    return _FILE_MARK.search(head) is not None
+
+
 def chunk_text(text: str, strategy: str, *, chunk_lines: int, chunk_chars: int, overlap: int) -> list[Chunk]:
     if strategy not in STRATEGIES:
         raise ValueError(f"Unknown strategy '{strategy}'. Choose from {STRATEGIES}.")
