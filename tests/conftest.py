@@ -1,27 +1,44 @@
 import dataclasses
 import logging
-import sys
 from pathlib import Path
 
 import pytest
 
 import src.config as config_mod
-# Imported HERE, at conftest module scope, and not left to whichever test imports it
-# first: the redirect fixture below can only patch a module that is already in
-# sys.modules, and src.server is imported inside test function bodies. That made the
-# redirect conditional on import order — it silently skipped, tests wrote chunk answers
-# into the operator's real ~/.rlm/contexts, and a resume test then PASSED by reading its
-# own leftovers from a previous run. A test that passes because of pollution is worse
-# than one that fails.
-import src.server  # noqa: F401 - imported for its side effect on sys.modules
-
+from src.deps import Deps
 
 
 @pytest.fixture
 def cfg(tmp_path: Path):
-    """Config with store/log dirs redirected to a tmp path."""
-    base = config_mod.load_config()
-    return dataclasses.replace(base, store_dir=tmp_path / "contexts", log_dir=tmp_path / "logs")
+    """Config with every on-disk path redirected under this test's tmp_path.
+
+    All four paths, not just the store: logs, the persisted chunk answers, the spend
+    ledger and the learned-ceiling state. Each was written into the operator's real
+    ``~/.rlm`` at some point during development, and the ledger was the worst of them —
+    fake spend recorded there skews the budget gate of a REAL run afterwards.
+    """
+    return dataclasses.replace(
+        config_mod.load_config(),
+        store_dir=tmp_path / "contexts",
+        log_dir=tmp_path / "logs",
+        budget_ledger=tmp_path / "usage.jsonl",
+        budget_state=tmp_path / "budget.json",
+    )
+
+
+@pytest.fixture
+def deps(cfg):
+    """Injected dependencies over a temp config — the reason there is no longer a fixture
+    that reaches into module globals.
+
+    What used to be here: a fixture that monkeypatched ``server.CFG``, ``subquery._CFG``
+    and ``ratelimit._CFG``, and could only patch modules already in ``sys.modules``. That
+    made the redirect conditional on import order, so it silently skipped for tests whose
+    first server import happened later — and a resume test then passed by reading its own
+    leftovers out of the real store. The logic now takes ``Deps`` as an argument, so a
+    test hands it a temp one and nothing global is touched at all.
+    """
+    return Deps.for_test(cfg)
 
 
 @pytest.fixture(autouse=True)
@@ -51,79 +68,85 @@ def _no_test_starts_a_real_container(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
-def _no_test_writes_to_the_real_rlm_dir(tmp_path, monkeypatch):
-    """Redirect every on-disk path the server writes to into this test's tmp_path.
+def _no_test_spends_a_real_model_call(monkeypatch, request):
+    """No test may reach the live transport. Same shape as the Docker guard above, and
+    for a sharper reason: a real call costs the operator's session-window budget.
 
-    Modules resolve their config ONCE at import (``server.CFG``, ``subquery._CFG``,
-    ``ratelimit._CFG``), so a test that exercises a tool writes wherever the operator's
-    real config points — ``~/.rlm/contexts`` for persisted chunk answers and
-    ``~/.rlm/usage.jsonl`` for the spend ledger. The log dir already showed what that
-    costs: 18 of 20 files in the live log dir were pytest debris. The ledger would be
-    worse, because fake spend recorded there then skews the budget gate of a REAL run.
+    This caught one. ``test_probe_reports_ok_on_a_live_transport`` patched sub_query on
+    the wrong module — ``batch``, while ``_auth_probe_line`` calls the one imported into
+    ``server`` — so every suite run made a live Haiku call and the test PASSED because
+    the real transport genuinely replied "ok". Green for the wrong reason, and billed.
+    Cheap to detect (one stub) and invisible otherwise (the ledger only grew by ~80
+    bytes a run), which is exactly the combination that earns a permanent guard.
 
-    Redirected at the module globals rather than by passing a tmp config to each test:
-    these paths are read through the globals from inside worker threads and result
-    callbacks, where no fixture argument reaches.
+    A test that truly wants the network marks itself @pytest.mark.live.
     """
-    tmp_cfg = dataclasses.replace(
-        config_mod.load_config(),
-        store_dir=tmp_path / "contexts",
-        log_dir=tmp_path / "logs",
-        budget_ledger=tmp_path / "usage.jsonl",
-        budget_state=tmp_path / "budget.json",
-    )
-    for mod_name, attr in (("src.server", "CFG"), ("src.subquery", "_CFG"),
-                           ("src.ratelimit", "_CFG")):
-        mod = sys.modules.get(mod_name)
-        assert mod is not None, (
-            f"{mod_name} is not imported, so its paths were NOT redirected and this test "
-            "would write into the operator's real ~/.rlm. Import it at conftest scope."
+    if "live" in request.keywords:
+        return
+    import src.subquery as sq
+
+    def refuse(*_a, **_k):
+        raise AssertionError(
+            "this test reached the real completion transport, which spends the operator's "
+            "session budget. Stub the sub_query the code under test actually calls (check "
+            "WHICH module imported it), or mark the test @pytest.mark.live."
         )
-        monkeypatch.setattr(mod, attr, tmp_cfg, raising=False)
+
+    monkeypatch.setattr(sq, "_call", refuse)
 
 
 @pytest.fixture(autouse=True)
-def _no_test_writes_to_the_real_log_dir():
+def _no_test_writes_to_the_real_log_dir(monkeypatch):
     """Keep pytest out of the operator's ~/.rlm/logs.
 
-    src/server.py installs a RotatingFileHandler on the process-global "rlm-mcp"
-    logger at IMPORT time (``LOG = configure_logging(CFG)``) against the REAL config,
-    so every test that imports it logged into the user's live log dir. Measured: 18 of
-    20 files there were pytest debris (ctx_x, root-m, the mock "OAuth session expired"),
-    which also supplied 25 of the 26 outcome=error records — and since one run creates
-    ~15 files against a retention cap of 20, a single `pytest` evicted the real session
-    logs it was supposed to sit beside.
+    Still needed after the Deps refactor, because importing src.server runs the
+    composition root (``Deps.create()``), which installs a RotatingFileHandler on the
+    process-global "rlm-mcp" logger against the REAL config. Any test that drives a
+    @logged_tool-wrapped tool then logs into the live dir: measured 18 of 20 files there
+    as pytest debris, which also supplied 25 of the 26 outcome=error records, and one run
+    evicted the real session logs under a 20-file retention cap.
 
-    Stripping the handler is enough because it is opened with ``delay=True``: no record
-    emitted through it means no file is ever created. Function-scoped so it also undoes
-    a re-install by an earlier test; a test that wants a file handler adds its own
-    inside the test body (test_logsetup.py), which runs after this.
+    Stripping is not sufficient on its own, and that gap cost three stray log files: most
+    test modules ``import src.server`` INSIDE the test body, so the composition root runs
+    AFTER this fixture and installs a fresh handler mid-test. (Same import-order shape as
+    the config-global bug that motivated Deps — the lesson is that a fixture which only
+    cleans up before the test loses to anything the test imports.) So neutralize the
+    cause as well: ``deps.configure_logging`` is the name ``Deps.create`` resolves, and
+    patching it there leaves ``logsetup``'s own tests free to exercise the real thing.
     """
+    import src.deps as deps_mod
+
     logger = logging.getLogger("rlm-mcp")
     for h in [h for h in logger.handlers if isinstance(h, logging.FileHandler)]:
         logger.removeHandler(h)
         h.close()
+    monkeypatch.setattr(deps_mod, "configure_logging", lambda cfg: logger)
 
 
 @pytest.fixture
-def batch_ctx(monkeypatch):
-    """Factory for a stub context wired into the batch tools, with captured log events.
+def batch_ctx(deps, monkeypatch):
+    """Factory for a stub context wired into a batch Deps, with captured log events.
 
     Lesson taken from the clinemm suite (mock factories with captured spies; fixture
     builders with partial overrides) after this repo paid for its absence: the same
     ``_Meta``/``_Store`` pair was hand-copied into eight tests, so adding one field the
     production path had always read — ``chunk_strategy`` — meant editing eight stubs, and
-    missing one would have failed as a confusing AttributeError inside a tool rather than
-    as a missing-stub error. One factory makes that class of drift impossible.
+    missing one failed as a confusing AttributeError inside a tool rather than as a
+    missing-stub error. One factory makes that class of drift impossible.
 
-    Returns ``(srv, events)``: the server module with STORE/models/transport/log_event
-    stubbed, and the list every log_event call lands in. Tests that do not care about the
-    log simply ignore the second element — capturing unconditionally costs nothing and
-    means a test can start asserting on it without rewiring its setup.
+    Returns ``(deps, events)``: a Deps whose store is the stub, and the list every
+    log_event call lands in. Tests that do not care about the log ignore the second
+    element — capturing unconditionally costs nothing and means a test can start
+    asserting on the log without rewiring its setup.
+
+    Note what is NOT patched any more: no module-level configuration. The stub store is
+    swapped by building a new frozen Deps, and ``batch.log_event`` is patched because it
+    is a function in the module under test — a different thing from reaching into another
+    module's config.
     """
     def _make(n_chunks: int = 3, *, est_tokens: int = 1000, strategy: str = "lines",
               on_read=None):
-        import src.server as srv
+        import src.batch as batch_mod
 
         class _Meta:
             chunks = [{"i": i, "est_tokens": est_tokens} for i in range(n_chunks)]
@@ -142,12 +165,12 @@ def batch_ctx(monkeypatch):
                 return "".join(f"chunk{i}\n" for i in range(n_chunks))
 
         events: list[tuple[str, dict]] = []
-        monkeypatch.setattr(srv, "STORE", _Store())
-        monkeypatch.setattr(srv, "log_event", lambda log, evt, **f: events.append((evt, f)))
+        monkeypatch.setattr(batch_mod, "log_event",
+                            lambda log, evt, **f: events.append((evt, f)))
         # models.select resolves the auth mode, which raises on a machine with no CLI and
         # no key — every CI runner. Pin it, as the suite's other fixtures do.
-        monkeypatch.setattr(srv.models, "select", lambda cfg, role: "claude-haiku-4-5")
-        monkeypatch.setattr(srv.transport, "auth_label", lambda cfg: "test")
-        return srv, events
+        monkeypatch.setattr(batch_mod.models, "select", lambda cfg, role: "claude-haiku-4-5")
+        monkeypatch.setattr(batch_mod.transport, "auth_label", lambda cfg: "test")
+        return dataclasses.replace(deps, store=_Store()), events
 
     return _make

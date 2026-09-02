@@ -11,6 +11,7 @@ import time
 
 import pytest
 
+import src.batch as bt
 import src.budget as budget
 import src.results as results
 from src.config import load_config
@@ -245,21 +246,21 @@ def test_a_second_run_pays_only_for_the_chunks_it_is_missing(monkeypatch, batch_
     have cost the same again. Here the second call must make model calls only for what
     the first did not finish."""
     import src.subquery as sq
-    srv, _events = batch_ctx(4)
+    d, _events = batch_ctx(4)
     asked: list[list[int]] = []
 
-    def fake_batch(prompts, model, concurrency=1, indices=None, on_result=None, **kw):
+    def fake_batch(cfg, prompts, model, concurrency=1, indices=None, on_result=None, **kw):
         asked.append(list(indices))
         out = [sq.SubResult(i, f"finding {i}", 10, 5, model=model) for i in indices]
         for r in out:                     # the real batch persists as answers land
             on_result(r)
         return out
 
-    monkeypatch.setattr(srv, "sub_query_batch", fake_batch)
-    srv.rlm_sub_query_batch("ctx_1", "audit every file", reduce=False)
+    monkeypatch.setattr(bt, "sub_query_batch", fake_batch)
+    bt.run(d, "ctx_1", "audit every file", reduce=False)
     assert asked == [[0, 1, 2, 3]], "the first run should ask about every chunk"
 
-    out = srv.rlm_sub_query_batch("ctx_1", "audit every file", reduce=False)
+    out = bt.run(d, "ctx_1", "audit every file", reduce=False)
     assert len(asked) == 1, "the second run spent model calls on already-answered chunks"
     assert "RESUMED: 4 chunk(s) reused from disk" in out
     assert "finding 2" in out, "a cached answer was dropped from the report"
@@ -269,10 +270,10 @@ def test_a_budget_stop_leaves_a_resumable_gap_not_a_lost_run(monkeypatch, batch_
     """A stopped run must (a) keep what it bought, (b) say it is partial, and (c) resume
     at the gap. Losing any of the three reproduces the original incident."""
     import src.subquery as sq
-    srv, _events = batch_ctx(4)
+    d, _events = batch_ctx(4)
     asked: list[list[int]] = []
 
-    def stop_after_two(prompts, model, concurrency=1, indices=None, on_result=None, **kw):
+    def stop_after_two(cfg, prompts, model, concurrency=1, indices=None, on_result=None, **kw):
         asked.append(list(indices))
         out = []
         for pos, i in enumerate(indices):
@@ -284,20 +285,20 @@ def test_a_budget_stop_leaves_a_resumable_gap_not_a_lost_run(monkeypatch, batch_
             out.append(r)
         return out
 
-    monkeypatch.setattr(srv, "sub_query_batch", stop_after_two)
-    first = srv.rlm_sub_query_batch("ctx_1", "audit every file", reduce=False)
+    monkeypatch.setattr(bt, "sub_query_batch", stop_after_two)
+    first = bt.run(d, "ctx_1", "audit every file", reduce=False)
     assert "STOPPED AT THE BUDGET LINE" in first
     assert "2 chunk(s) deferred" in first
     assert "resumes at chunk 2" in first
     assert not first.lstrip().startswith("ERROR"), "a clean budget stop is not a failure"
 
     # Resume: only the deferred chunks are re-asked.
-    monkeypatch.setattr(srv, "sub_query_batch",
-                        lambda prompts, model, concurrency=1, indices=None,
+    monkeypatch.setattr(bt, "sub_query_batch",
+                        lambda cfg, prompts, model, concurrency=1, indices=None,
                         on_result=None, **kw: [
                             sq.SubResult(i, f"finding {i}", 10, 5, model=model)
                             for i in indices])
-    srv.rlm_sub_query_batch("ctx_1", "audit every file", reduce=False)
+    bt.run(d, "ctx_1", "audit every file", reduce=False)
     assert asked[0] == [0, 1, 2, 3] and len(asked) == 1
 
 

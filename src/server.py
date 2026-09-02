@@ -27,35 +27,31 @@ from itertools import islice
 
 from mcp.server.fastmcp import FastMCP
 
-from . import auth, budget, models, results, sources, transport
+from . import auth, batch, models, sources, transport
 from .chunking import STRATEGIES, chunk_text
-from .config import (
-    PROVIDER_KEY_ENV,
-    cost_usd,
-    estimate_tokens,
-    load_config,
-)
-from .context_store import ContextStore
+from .config import PROVIDER_KEY_ENV
+from .deps import Deps
 from .engine import ReplSession, run_query
-from .logsetup import configure_logging, log_event, logged_tool, note_startup
+from .subquery import sub_query
+from .logsetup import log_event, logged_tool, note_startup
 # meta_block keeps its old private name: tests reach for srv._meta_block. It and
 # skipped_block are pure ContextMeta presentation, moved to output.py to keep this file
 # under 800 lines; skipped_block is called from meta_block there, not from here.
-from .output import bound_output, encoded_len
 from .output import meta_block as _meta_block
 from .sandbox_reap import container_image_status
 from .shutdown import install_shutdown_hooks
-from .subquery import SubResult, sub_query, sub_query_batch
 
-CFG = load_config()
-#: Per-chunk output ceiling for a batch map call. Named because the pre-flight estimate
-#: and the call that spends the tokens MUST use the same number — an estimate computed
-#: against a different cap is not an estimate of this run.
-_BATCH_MAX_TOKENS = 2048
-# stdout is the JSON-RPC channel; detailed logs go to a per-PID file in log_dir with
-# bounded retention, and stderr stays WARNING-only (see logsetup.py).
-LOG = configure_logging(CFG)
-STORE = ContextStore(CFG)
+#: THE COMPOSITION ROOT. The one place in this package that resolves real config, opens
+#: real log handlers and points at the real store — built once, at import, and passed
+#: down explicitly from here. Nothing below reaches for config on its own, which is what
+#: lets a test construct its own Deps over tmp_path instead of patching these globals
+#: (see deps.py for the pollution bug that motivated it).
+#: stdout stays the JSON-RPC channel; logs go to a per-PID file with bounded retention
+#: and stderr stays WARNING-only (see logsetup.py).
+DEPS = Deps.create()
+CFG = DEPS.cfg      # read-only aliases, kept because ~20 call sites below are plain
+LOG = DEPS.log      # presentation over these and reading DEPS.cfg everywhere adds noise
+STORE = DEPS.store  # without adding a seam — the seam is DEPS itself.
 mcp = FastMCP("rlm")
 
 _repl: ReplSession | None = None
@@ -68,26 +64,14 @@ def _get_repl() -> ReplSession:
     return _repl
 
 
+# Output bounding lives on Deps so batch.py can reach it without importing server.
+# These stay as one-liners because the raw-content tools below read better with them.
 def _bound(text: str) -> str:
-    # Raw-content tools (load/inspect/chunk/grep/read/list/exec/status): keep the tiny cap so
-    # raw file content never floods the root context.
-    return bound_output(text, CFG.output_cap_bytes)
+    return DEPS.bound(text)
 
 
 def _answer(text: str) -> str:
-    # Synthesis tools (rlm_query / rlm_sub_query[_batch]): the answer IS the
-    # deliverable (already bounded by the model's max_output_tokens), so bound it
-    # generously, not at the raw-content cap.
-    return bound_output(text, CFG.answer_cap_bytes)
-
-
-def _cost_note(model: str, itok: int, otok: int) -> str:
-    """`  |  cost: $x.xxxx` when report_cost is on, else nothing. Off by default: the
-    rate table is Anthropic-only and the CLI path under-counts input tokens, so a
-    printed figure would be confidently wrong."""
-    if not CFG.report_cost:
-        return ""
-    return f"  |  cost: ${cost_usd(model, itok, otok):.4f}"
+    return DEPS.answer(text)
 
 
 def _resolve_root_model(model_override: str) -> str:
@@ -426,29 +410,7 @@ def rlm_estimate(ctx_id: str, prompt: str = "", max_chunks: int = 0, reduce: boo
     the work that remains — and a run that does not fit this window is not a dead end:
     start it, let it stop at the budget line, and call the batch again next window.
     """
-    meta = STORE.get(ctx_id)
-    chunks = meta.chunks
-    strategy = meta.chunk_strategy or CFG.chunk_strategy
-    if not chunks:
-        # Chunk boundaries only — no store mutation, because an estimate must not change
-        # the thing it is estimating. A later batch may legitimately chunk differently.
-        text = STORE.read_text(ctx_id)
-        chunks = [c.as_dict() for c in chunk_text(
-            text, strategy, chunk_lines=CFG.chunk_lines,
-            chunk_chars=CFG.chunk_chars, overlap=CFG.chunk_overlap)]
-        del text
-    n = len(chunks)
-    sel = list(range(n if max_chunks <= 0 else min(max_chunks, n)))
-    sub_model = models.select(CFG, models.Role.SUB)
-    cached = results.load(CFG, ctx_id, results.key_for(prompt, sub_model, strategy, n))
-    done_pos = {pos for pos, i in enumerate(sel) if i in cached}
-    est = budget.estimate_batch(
-        CFG, [int(chunks[i].get("est_tokens", 0)) for i in sel], prompt=prompt,
-        max_output_tokens=_BATCH_MAX_TOKENS, reduce=reduce, done=done_pos)
-    return _answer(
-        budget.render(budget.judge(CFG, est), what=f"batch over {ctx_id} ({strategy}, {n} chunks)")
-        + f"\n\n_Sub-model: {sub_model}. Estimate only — no model call was made._"
-    )
+    return batch.estimate(DEPS, ctx_id, prompt, max_chunks, reduce)
 
 
 @mcp.tool()
@@ -457,34 +419,7 @@ def rlm_budget() -> str:
     """Show the session-window token budget: what this server has spent inside the
     rolling window, the ceiling it is gating against (configured, learned, or unknown),
     and when headroom next grows. No model call."""
-    cap, source = budget.ceiling(CFG)
-    s = budget.spent(CFG)
-    lines = [
-        f"## Session budget — rolling {s.window_h:g}h window",
-        "",
-        f"- spent by this server: **~{s.tokens:,} tokens** over {s.calls} calls",
-    ]
-    if cap is None:
-        lines += [
-            "- ceiling: **unknown**",
-            "",
-            "No `session_budget_tokens` is set and no usage limit has been hit yet, so runs "
-            "are measured but not gated. Set `session_budget_tokens` in config.yaml to gate "
-            "from the first run; otherwise the ceiling is learned the first time a usage "
-            "limit is hit.",
-        ]
-    else:
-        usable = int(cap * CFG.budget_stop_fraction)
-        lines += [
-            f"- ceiling ({source}): **~{cap:,}**",
-            f"- stop line ({round(CFG.budget_stop_fraction * 100)}%): ~{usable:,}",
-            f"- headroom: **~{max(0, usable - s.tokens):,}**",
-        ]
-    if s.oldest_expires_in_s:
-        lines.append(f"- headroom next grows in ~{budget.fmt_dur(s.oldest_expires_in_s)}")
-    lines.append("\n_This server's own spend only — other Claude sessions on the same "
-                 "account are invisible here, so headroom is an upper bound._")
-    return _bound("\n".join(lines))
+    return batch.budget_report(DEPS)
 
 
 @mcp.tool()
@@ -504,17 +439,17 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
     Models are resolved by the selection strategy (closest OAuth sibling when on OAuth).
     """
     root_model = _resolve_root_model(model_override)
-    sub_model = models.select(CFG, models.Role.SUB)
-    text = STORE.read_text(ctx_id)
-    res = run_query(CFG, text, question, root_model, sub_model)
+    sub_model = models.select(DEPS.cfg, models.Role.SUB)
+    text = DEPS.store.read_text(ctx_id)
+    res = run_query(DEPS.cfg, text, question, root_model, sub_model)
     if res.get("limit"):
         # ERROR-prefixed so logsetup records outcome=error; the partial answer still
         # travels, because a stopped run that found something is not a dead loss.
-        partial = res["answer"]
-        return _answer(
+        partial_answer = res["answer"]
+        return DEPS.answer(
             f"ERROR: rlm_query stopped on {res['limit']} — {res['limit_detail']}\n"
-            + (f"\n--- best answer before the limit ---\n{partial}\n" if partial
-               else "\nNo partial answer was available.\n")
+            + (f"\n--- best answer before the limit ---\n{partial_answer}\n"
+               if partial_answer else "\nNo partial answer was available.\n")
             + "\nRaise query_timeout_s / query_max_errors in config.yaml, or narrow the "
               "question. rlm_exec and rlm_grep need no model call at all."
         )
@@ -525,9 +460,9 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
         for r in res["usage"]
     )
     total = res["cost_usd"]
-    return _answer(
+    return DEPS.answer(
         f"## RLM answer (root: {res['root_model']}, sub: {res['sub_model']}"
-        f" · auth: {transport.auth_label(CFG)})\n\n{res['answer']}\n\n"
+        f" · auth: {transport.auth_label(DEPS.cfg)})\n\n{res['answer']}\n\n"
         f"---\n**Model routing / usage:**\n{rows}\n"
         + (f"**Total cost:** ${total:.4f}  |  " if total is not None else "")
         + f"**Time:** {res['execution_time']}s"
@@ -541,30 +476,7 @@ def rlm_sub_query(ctx_id: str, prompt: str, chunk_index: int = -1) -> str:
     Use for targeted questions. If chunk_index < 0 the whole context is used — only do
     that when it fits the sub-model's context window (config: sub_context_tokens),
     else chunk first."""
-    meta = STORE.get(ctx_id)
-    if chunk_index >= 0:
-        body = STORE.read_chunk(ctx_id, chunk_index)
-    else:
-        if meta.est_tokens > 0.9 * CFG.sub_context_tokens:
-            return _bound(
-                f"ERROR: context ~{meta.est_tokens:,} tokens exceeds Haiku's "
-                f"{CFG.sub_context_tokens:,}-token window. Run rlm_chunk_context then "
-                f"rlm_sub_query_batch, or use rlm_query."
-            )
-        body = STORE.read_text(ctx_id)
-    sub_model = models.select(CFG, models.Role.SUB)
-    res = sub_query(f"{prompt}\n\n--- CONTEXT ---\n{body}", sub_model)
-    if res.error:
-        return _bound(f"ERROR ({sub_model}): {res.error}")
-    return _answer(
-        f"## Sub-query answer ({res.model or sub_model}"
-        f" · auth: {transport.auth_label(CFG)})\n\n{res.answer}\n\n---\n"
-        f"tokens: {res.input_tokens:,} in / {res.output_tokens:,} out"
-    )
-
-
-def _mk_batch_prompt(ctx_id: str, prompt: str, i: int, n: int) -> str:
-    return f"{prompt}\n\n--- CHUNK {i + 1}/{n} ---\n{STORE.read_chunk(ctx_id, i)}"
+    return batch.one(DEPS, ctx_id, prompt, chunk_index)
 
 
 @mcp.tool()
@@ -589,249 +501,8 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
                  best for "summarize / aggregate / what's the overall picture".
     reduce=False: the raw per-chunk findings concatenated — when you want every piece.
     """
-    meta = STORE.get(ctx_id)
-    if not meta.chunks:
-        text = STORE.read_text(ctx_id)
-        chunks = chunk_text(text, CFG.chunk_strategy, chunk_lines=CFG.chunk_lines,
-                            chunk_chars=CFG.chunk_chars, overlap=CFG.chunk_overlap)
-        STORE.set_chunks(ctx_id, CFG.chunk_strategy, [c.as_dict() for c in chunks],
-                         text=text)   # reuse this decode; don't make a second copy
-        meta = STORE.get(ctx_id)
-        del text   # the full decode has served chunking; don't hold it for the whole batch
-    n = len(meta.chunks)
-    sel = list(range(n if max_chunks <= 0 else min(max_chunks, n)))
-    sub_model = models.select(CFG, models.Role.SUB)
-    strategy = meta.chunk_strategy or CFG.chunk_strategy
+    return batch.run(DEPS, ctx_id, prompt, max_chunks, reduce, fresh)
 
-    # --- what is already answered? ------------------------------------------------
-    key = results.key_for(prompt, sub_model, strategy, n)
-    if fresh:
-        results.clear(CFG, ctx_id, key)
-    cached = results.load(CFG, ctx_id, key)
-    todo = [i for i in sel if i not in cached]
-
-    # --- what will the REMAINDER cost? --------------------------------------------
-    sel_tokens = [int(meta.chunks[i].get("est_tokens", 0)) for i in sel]
-    done_pos = {pos for pos, i in enumerate(sel) if i in cached}
-    est = budget.estimate_batch(CFG, sel_tokens, prompt=prompt,
-                                max_output_tokens=_BATCH_MAX_TOKENS, reduce=reduce,
-                                done=done_pos)
-    verdict = budget.judge(CFG, est)
-
-    if not todo:
-        # Everything asked for is already answered. This is the payoff of persistence:
-        # repeating the 30-minute run that returned nothing now costs zero model calls.
-        merged = [SubResult(i, cached[i].answer, cached[i].itok, cached[i].otok,
-                            model=cached[i].model) for i in sel]
-        return _render_batch(ctx_id, prompt, merged, sub_model, reduce=reduce, n=n,
-                             max_chunks=max_chunks, from_cache=len(sel), deferred=0, key=key)
-
-    # Refuse ONLY when not even one chunk fits — running then would defer every chunk and
-    # report nothing but noise. Anything merely large is allowed to start: the gate stops
-    # it cleanly at the budget line and the answers it bought are already on disk.
-    one_call = (max(sel_tokens) if sel_tokens else 0) + estimate_tokens(prompt) + _BATCH_MAX_TOKENS
-    if verdict.headroom_tokens is not None and one_call > verdict.headroom_tokens:
-        wait = (f" Headroom returns in ~{budget.fmt_dur(verdict.spend.oldest_expires_in_s)}."
-                if verdict.spend.oldest_expires_in_s else "")
-        return _answer(
-            "ERROR: session budget exhausted — not enough headroom for even one chunk."
-            + wait + "\n\n"
-            + budget.render(verdict, what=f"{len(todo)} chunk(s) of {ctx_id}")
-            + f"\n\n_{len(cached)} chunk(s) already answered are safe on disk; re-run this "
-              "tool once the window has rolled and it resumes there._"
-        )
-
-    gate = budget.Gate(CFG)
-    # Built lazily, one at a time inside each pool worker (sub_query_batch), not here —
-    # holding all N prompt strings at once is ~= the whole context in RAM for the entire
-    # multi-minute batch. Leaf 2's seek-based read_chunk is what makes per-worker reads
-    # cheap enough that this stays lazy without re-introducing slow reads serially.
-    prompts = [partial(_mk_batch_prompt, ctx_id, prompt, i, n) for i in todo]
-    # BEFORE the map, not only after it: this batch runs for tens of minutes on a
-    # large context, and until it returns the only trace is N indistinguishable
-    # cli_spawn lines under one rid — no ctx_id, and no denominator to count them
-    # against. That is the difference between "377 of 408" and "possibly hung".
-    # est_tokens/headroom ride along so the log says what the run was expected to cost.
-    log_event(LOG, "sub_batch", phase="map_start", ctx_id=ctx_id,
-              chunks=len(prompts), total_chunks=n, cached=len(cached) or None,
-              est_tokens=est.total_tokens, est_s=round(est.seconds),
-              headroom=verdict.headroom_tokens, ceiling=verdict.ceiling_tokens,
-              concurrency=CFG.subquery_concurrency)
-    fresh_results = sub_query_batch(
-        prompts, sub_model, concurrency=CFG.subquery_concurrency,
-        max_tokens=_BATCH_MAX_TOKENS, indices=todo, gate=gate,
-        # Persist as each answer lands, NOT at the end: the run that motivated all of
-        # this died holding 40 finished answers it had already paid for.
-        on_result=lambda r: results.append(
-            CFG, ctx_id, key,
-            results.Saved(r.index, r.answer, r.input_tokens, r.output_tokens, r.model)),
-    )
-    deferred = sum(1 for r in fresh_results if (r.error or "").startswith("deferred"))
-    by_index = {r.index: r for r in fresh_results}
-    merged = []
-    for i in sel:
-        if i in by_index:
-            merged.append(by_index[i])
-        elif i in cached:
-            c = cached[i]
-            merged.append(SubResult(i, c.answer, c.itok, c.otok, model=c.model))
-        else:
-            merged.append(SubResult(i, "", 0, 0, error="not run"))
-    return _render_batch(ctx_id, prompt, merged, sub_model, reduce=reduce, n=n,
-                         max_chunks=max_chunks, from_cache=len(cached), deferred=deferred,
-                         key=key)
-
-
-def _render_batch(ctx_id: str, prompt: str, res_list: list[SubResult], sub_model: str, *,
-                  reduce: bool, n: int, max_chunks: int, from_cache: int,
-                  deferred: int, key: str = "") -> str:
-    """Render a (possibly resumed, possibly budget-stopped) batch.
-
-    Split out of the tool because there are now three ways to arrive here — everything
-    already cached, a full run, and a run the gate stopped — and all three must produce
-    the SAME report shape. Rendering them at three call sites is how a resumed run comes
-    to read as though it had done the work.
-    """
-    itok = sum(r.input_tokens for r in res_list)
-    otok = sum(r.output_tokens for r in res_list)
-    # Deferral is not failure — it is scheduled work — so it is counted separately
-    # everywhere: in the log, in the all-failed check, and in the notes.
-    hard_errs = [r for r in res_list if r.error and not r.error.startswith("deferred")]
-    # Models as REPORTED BY THE TRANSPORT, not the id we asked for: on OAuth
-    # models.select maps a configured id to its closest subscription sibling.
-    used = sorted({r.model for r in res_list if r.model}) or [sub_model]
-    used_label = ", ".join(used)
-    # Unconditional, not only on failure: the parent tool_call record carries neither
-    # a chunk count nor token counts, so without this a successful batch is just N
-    # indistinguishable cli_spawn lines under one rid. Same rid ties it back.
-    log_event(LOG, "sub_batch", phase="map", ctx_id=ctx_id, chunks=len(res_list),
-              errors=len(hard_errs), deferred=deferred or None, cached=from_cache or None,
-              itok=itok, otok=otok,
-              err_sample=hard_errs[0].error if hard_errs else None)
-    # Every chunk failed for a REAL reason: that is a failed tool call, not a result with
-    # notes. Returning the usual success string here is exactly how a dead login reads
-    # back as "no findings". The ERROR prefix is what logsetup maps to outcome=error.
-    if hard_errs and len(hard_errs) == len(res_list):
-        return _bound(f"ERROR: all {len(res_list)} chunk(s) failed — {hard_errs[0].error}")
-
-    note = ""
-    if max_chunks > 0 and max_chunks < n:
-        note += f"\n_NOTE: limited to first {max_chunks} of {n} chunks._"
-    if from_cache:
-        note += (f"\n_RESUMED: {from_cache} chunk(s) reused from disk — no model call and "
-                 "no tokens spent on them._")
-    if hard_errs:
-        note += f"\n_NOTE: {len(hard_errs)} of {len(res_list)} chunk(s) errored and were skipped._"
-    if deferred:
-        first = min((r.index for r in res_list
-                     if (r.error or "").startswith("deferred")), default=0)
-        note += (
-            f"\n_**STOPPED AT THE BUDGET LINE**: {deferred} chunk(s) deferred to protect the "
-            f"session window. Everything answered so far is on disk. Call this tool again with "
-            f"the same ctx_id and prompt once the window has rolled — it resumes at chunk "
-            f"{first} and re-pays for nothing._"
-        )
-    # A deferred chunk is NOT an error — it is work the budget gate postponed — so it
-    # loses the ERROR marker a genuine failure keeps. Reading "[ERROR: deferred]" would
-    # tell an operator to investigate a healthy stop.
-    per_chunk = "\n".join(
-        f"### chunk {r.index}\n" + (
-            "" if not r.error
-            else f"[{r.error}]" if r.error.startswith("deferred")
-            else f"[ERROR: {r.error}]"
-        ) + ("" if r.error else r.answer.strip())
-        for r in res_list
-    )
-
-    def _raw(extra: str = "") -> str:
-        head = (f"## Batch sub-query — map over {len(res_list)} chunks ({used_label}"
-                f" · auth: {transport.auth_label(CFG)})\n"
-                f"tokens: {itok:,} in / {otok:,} out{_cost_note(sub_model, itok, otok)}"
-                f"{note}{extra}\n\n")
-        # Silently truncating here discards findings the caller ALREADY PAID FOR — and
-        # with reduce=False they asked for every piece by name. Every answer is already on
-        # disk, so hand back the path instead of half the report: 30 chunks of findings is
-        # ~240 KB against a 128 KB cap, making this the normal case for a wide batch rather
-        # than an edge one. The observed failure was worse still — the over-cap payload was
-        # refused by the client outright and the whole 30-call batch read back as an error.
-        full = head + per_chunk
-        if key and encoded_len(full) > CFG.answer_cap_bytes:
-            path = results.path_for(CFG, ctx_id, key)
-            shown, kept, room = [], 0, CFG.answer_cap_bytes // 3
-            for r in res_list:
-                block = f"### chunk {r.index}\n" + (r.error or r.answer.strip())
-                if kept + len(block) > room:
-                    break
-                shown.append(block)
-                kept += len(block)
-            return _answer(
-                head
-                + f"_**{len(res_list)} findings ({len(per_chunk):,} bytes) exceed the "
-                  f"{CFG.answer_cap_bytes:,}-byte reply cap — none are lost.** Every one is "
-                  f"on disk, one JSON line per chunk:_\n`{path}`\n\n"
-                  "_Read that file, or re-run with `reduce=True` for a synthesis. Showing "
-                  f"the first {len(shown)} of {len(res_list)} below._\n\n"
-                + "\n".join(shown))
-        return _answer(full)
-        return _answer(full)
-
-    # findings = just the successful answers, for the reduce pass
-    findings = "\n".join(f"[chunk {r.index}] {r.answer.strip()}"
-                         for r in res_list if not r.error and r.answer.strip())
-    if not reduce:
-        return _raw()
-    if not findings:
-        return _raw("\n_(no findings to reduce)_")
-    if estimate_tokens(findings) > 0.9 * CFG.sub_context_tokens:
-        return _raw("\n_(findings too large to reduce in one pass — showing raw; use "
-                    "fewer/larger chunks, or rlm_query for engine-side reduction)_")
-    if deferred:
-        # A reduce over a partial map IS a partial answer. Saying so is the difference
-        # between a synthesis and a synthesis that implies it read the whole document.
-        note += (f"\n_The synthesis below covers {len(res_list) - deferred} of {n} chunks "
-                 "— it is PARTIAL._")
-    return _reduce_findings(findings, prompt, sub_model, ctx_id=ctx_id, note=note,
-                            n_prompts=len(res_list), n_errors=len(hard_errs),
-                            used_label=used_label, itok=itok, otok=otok, raw=_raw)
-
-
-def _reduce_findings(findings: str, prompt: str, sub_model: str, *, ctx_id: str, note: str,
-                     n_prompts: int, n_errors: int, used_label: str, itok: int, otok: int,
-                     raw: Callable[[str], str]) -> str:
-    """Fold the per-chunk findings into one synthesis (one more sub-model call), and
-    render it. Falls back to ``raw(extra)`` — the caller's per-chunk report — when the
-    reduce call fails, so a failed synthesis never discards the findings it was given.
-
-    The parameter list is wide because every item is load-bearing: findings/prompt/
-    sub_model drive the call, ctx_id/n_errors the log record, and note/n_prompts/
-    used_label/itok/otok the report header. ``itok``/``otok`` are locals here on purpose —
-    the reduce call's tokens are added to them for the success header and the log, while
-    ``raw`` still renders the caller's map-only totals on the failure path.
-    """
-    reduce_prompt = (
-        "Reduce these independent per-chunk findings from one large document into a "
-        "single answer.\n"
-        f"Original request: {prompt}\n\n"
-        f"Per-chunk findings:\n{findings}\n\n"
-        "Synthesize ONE coherent, de-duplicated answer to the original request across "
-        "all chunks. Use only what the findings contain; do not invent anything."
-    )
-    red = sub_query(reduce_prompt, sub_model, max_tokens=4096)
-    if not red.error:
-        itok += red.input_tokens
-        otok += red.output_tokens
-    # On success too: a reduce that works still spends a call and tokens, and the map
-    # totals would otherwise understate every reduce batch. itok/otok are map+reduce.
-    log_event(LOG, "sub_batch", phase="reduce", ctx_id=ctx_id, chunks=n_prompts,
-              errors=n_errors, itok=itok, otok=otok, reduce_error=red.error)
-    if red.error:
-        return raw(f"\n_(reduce pass failed: {red.error}; showing raw findings)_")
-    return _answer(
-        f"## Batch sub-query — map+reduce over {n_prompts} chunks ({used_label}"
-        f" · auth: {transport.auth_label(CFG)})\n"
-        f"tokens: {itok:,} in / {otok:,} out{_cost_note(sub_model, itok, otok)}{note}\n\n"
-        f"{red.answer.strip()}"
-    )
 
 
 # ============================================================================
@@ -966,8 +637,8 @@ def _auth_probe_line() -> str:
         if st is not None and not st.get("loggedIn"):
             return "\n- auth probe: SKIPPED — cli login is dead, a probe would only confirm it"
     try:
-        res = sub_query("Reply with exactly: ok",
-                        models.select(CFG, models.Role.SUB), max_tokens=16)
+        res = sub_query(DEPS.cfg, "Reply with exactly: ok",
+                        models.select(DEPS.cfg, models.Role.SUB), max_tokens=16)
     except Exception as exc:                      # noqa: BLE001 - report, never raise
         return f"\n- auth probe: FAILED — {type(exc).__name__}: {exc}"
     if res.error:

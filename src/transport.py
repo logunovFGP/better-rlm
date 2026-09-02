@@ -574,16 +574,37 @@ class _LedgeredTransport(CompletionTransport):
         return estimate_tokens(n)
 
     def complete(self, messages, system, model, max_tokens) -> CompletionResult:
-        res = self._inner.complete(messages, system, model, max_tokens)
+        try:
+            res = self._inner.complete(messages, system, model, max_tokens)
+        except Exception as exc:
+            self._note_if_limit(exc)
+            raise
         budget.record(self._cfg, res.model or model,
                       self._est_in(messages, system), res.output_tokens)
         return res
 
     async def acomplete(self, messages, system, model, max_tokens) -> CompletionResult:
-        res = await self._inner.acomplete(messages, system, model, max_tokens)
+        try:
+            res = await self._inner.acomplete(messages, system, model, max_tokens)
+        except Exception as exc:
+            self._note_if_limit(exc)
+            raise
         budget.record(self._cfg, res.model or model,
                       self._est_in(messages, system), res.output_tokens)
         return res
+
+    def _note_if_limit(self, exc: BaseException) -> None:
+        """A rate/usage limit IS the wall: the window ledger's value right now is an upper
+        bound on the subscription's real ceiling, so record it and stop reporting the
+        ceiling as "unknown".
+
+        Learned HERE rather than in ratelimit's retry decision, which is where it first
+        lived: that decorator also wraps engine methods whose first argument is ``self``,
+        so it has no cfg to write with and had to read a module global. This wrapper
+        already holds the cfg whose ledger is being measured.
+        """
+        if _looks_rate_limited(str(exc)) or getattr(exc, "is_rate_limit", False)                 or getattr(exc, "status_code", None) == 429:
+            budget.note_limit_hit(self._cfg)
 
 
 def get_transport(auth_mode: str, cfg: Config) -> CompletionTransport:
@@ -592,12 +613,15 @@ def get_transport(auth_mode: str, cfg: Config) -> CompletionTransport:
     reused across calls. Every transport is wrapped so its spend reaches the ledger."""
     provider = (cfg.provider or "anthropic").strip().lower()
     ckey = f"{provider}:{auth_mode}"
-    transport = _CACHE.get(ckey)
-    if transport is None:
+    inner = _CACHE.get(ckey)
+    if inner is None:
         if provider != "anthropic":
-            transport = EngineClientTransport(cfg)
+            inner = EngineClientTransport(cfg)
         else:
-            transport = CliTransport(cfg) if auth_mode == "oauth" else ApiTransport(cfg)
-        transport = _LedgeredTransport(transport, cfg)
-        _CACHE[ckey] = transport
-    return transport
+            inner = CliTransport(cfg) if auth_mode == "oauth" else ApiTransport(cfg)
+        _CACHE[ckey] = inner
+    # The INNER transport is cached (it owns the client and the neutral cwd); the wrapper
+    # is rebuilt per call because it binds a cfg. Caching the wrapper would hand the first
+    # caller's config to every later one -- with a test and the server holding different
+    # configs, that writes one's spend into the other's ledger.
+    return _LedgeredTransport(inner, cfg)

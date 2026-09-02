@@ -13,14 +13,11 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from . import budget
 from .auth import resolve_auth_mode
-from .config import estimate_tokens, load_config
+from .config import Config, estimate_tokens
 from .logsetup import bind_rid, current_rid
 from .ratelimit import is_fatal_auth, retry_and_queue_retries
 from .transport import get_transport
-
-_CFG = load_config()
 
 
 @dataclass
@@ -38,18 +35,18 @@ class SubResult:
 
 
 @retry_and_queue_retries
-def _call(model: str, prompt: str, max_tokens: int,
+def _call(cfg: Config, model: str, prompt: str, max_tokens: int,
           system: str | None) -> tuple[str, int, int, str]:
-    transport = get_transport(resolve_auth_mode(_CFG), _CFG)
+    transport = get_transport(resolve_auth_mode(cfg), cfg)
     res = transport.complete(
         [{"role": "user", "content": prompt}], system, model, max_tokens)
     return res.text, res.input_tokens, res.output_tokens, res.model
 
 
-def sub_query(prompt: str, model: str, *, max_tokens: int = 4096,
+def sub_query(cfg: Config, prompt: str, model: str, *, max_tokens: int = 4096,
               system: str | None = None) -> SubResult:
     try:
-        text, itok, otok, used = _call(model, prompt, max_tokens, system)
+        text, itok, otok, used = _call(cfg, model, prompt, max_tokens, system)
         # No budget.record here: transport._LedgeredTransport records EVERY completion,
         # including the engine's, so recording again would double-count this one.
         return SubResult(0, text, itok, otok, model=used)
@@ -57,7 +54,8 @@ def sub_query(prompt: str, model: str, *, max_tokens: int = 4096,
         return SubResult(0, "", 0, 0, error=str(exc))
 
 
-def sub_query_batch(prompts: Sequence[str | Callable[[], str]], model: str, *, concurrency: int,
+def sub_query_batch(cfg: Config, prompts: Sequence[str | Callable[[], str]], model: str, *,
+                    concurrency: int,
                     max_tokens: int = 2048, system: str | None = None,
                     indices: Sequence[int] | None = None,
                     gate: "budget.Gate | None" = None,
@@ -107,7 +105,7 @@ def sub_query_batch(prompts: Sequence[str | Callable[[], str]], model: str, *, c
             return SubResult(idx, "", 0, 0, error="deferred — session budget reached")
         with bind_rid(parent_rid):
             try:
-                text, itok, otok, used = _call(model, prompt, max_tokens, system)
+                text, itok, otok, used = _call(cfg, model, prompt, max_tokens, system)
                 res = SubResult(idx, text, itok, otok, model=used)   # ledgered in transport
                 if on_result is not None:
                     try:

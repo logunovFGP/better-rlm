@@ -86,7 +86,11 @@ def test_get_transport_selects_by_provider(cfg, monkeypatch):
         other = dataclasses.replace(cfg, provider=provider)
         t = get_transport("apikey", other)
         assert isinstance(inner_of(t), tp.EngineClientTransport), provider
-        assert get_transport("apikey", other) is t          # cached per provider
+        # The INNER transport is what gets cached (it owns the client and the neutral
+        # cwd). The ledger wrapper is rebuilt per call ON PURPOSE, because it binds a
+        # cfg -- caching it would hand the first caller's config, and its spend
+        # ledger, to every later caller.
+        assert inner_of(get_transport("apikey", other)) is inner_of(t)
     # the anthropic entry must not have been clobbered by the shared "apikey" mode
     assert isinstance(inner_of(get_transport("oauth", cfg)), CliTransport)
     tp._CACHE.clear()

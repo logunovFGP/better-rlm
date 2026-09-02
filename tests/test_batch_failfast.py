@@ -11,6 +11,7 @@ import json
 
 import pytest
 
+import src.batch as bt
 import src.subquery as sq
 from src.ratelimit import is_fatal_auth
 from src.transport import (
@@ -54,8 +55,8 @@ def test_the_shared_context_stub_still_matches_the_real_ContextMeta(batch_ctx):
     """
     from src.context_store import ContextMeta
 
-    srv, _events = batch_ctx(2)
-    stub = srv.STORE.get("ctx_x")
+    d, _events = batch_ctx(2)
+    stub = d.store.get("ctx_x")
     for field in ("chunks", "chunk_strategy"):
         assert hasattr(stub, field), f"the shared stub is missing {field!r}"
         assert field in ContextMeta.__dataclass_fields__, (
@@ -74,27 +75,27 @@ def test_only_auth_counts_as_fatal():
     assert not is_fatal_auth(CliRateLimitError("429"))
 
 
-def _run_batch(monkeypatch, exc, n=10):
+def _run_batch(monkeypatch, cfg, exc, n=10):
     calls: list[str] = []
 
-    def fake_call(model, prompt, max_tokens, system):
+    def fake_call(cfg, model, prompt, max_tokens, system):
         calls.append(prompt)
         raise exc
 
     monkeypatch.setattr(sq, "_call", fake_call)
-    results = sq.sub_query_batch([f"p{i}" for i in range(n)], "m", concurrency=1)
+    results = sq.sub_query_batch(cfg, [f"p{i}" for i in range(n)], "m", concurrency=1)
     return calls, results
 
 
-def test_auth_failure_stops_the_fan_out(monkeypatch, batch_ctx):
-    calls, results = _run_batch(monkeypatch, CliAuthError("OAuth session expired"))
+def test_auth_failure_stops_the_fan_out(monkeypatch, cfg):
+    calls, results = _run_batch(monkeypatch, cfg, CliAuthError("OAuth session expired"))
     assert len(calls) == 1, "chunks after the first re-ran a call already known dead"
     assert len(results) == 10 and all(r.error for r in results)
     assert results[-1].error.startswith("skipped —")
 
 
-def test_ordinary_failure_does_not_discard_the_other_chunks(monkeypatch, batch_ctx):
-    calls, _ = _run_batch(monkeypatch, CliCompletionError("just this chunk"))
+def test_ordinary_failure_does_not_discard_the_other_chunks(monkeypatch, cfg):
+    calls, _ = _run_batch(monkeypatch, cfg, CliCompletionError("just this chunk"))
     assert len(calls) == 10, "a chunk-local failure must not abort the whole batch"
 
 
@@ -107,42 +108,42 @@ def _counting_builder(build_counts: list[int], i: int):
     return _build
 
 
-def test_batch_builds_prompts_lazily_one_per_worker(monkeypatch, batch_ctx):
+def test_batch_builds_prompts_lazily_one_per_worker(monkeypatch, cfg, batch_ctx):
     calls: list[str] = []
-    monkeypatch.setattr(sq, "_call", lambda model, prompt, max_tokens, system: (
+    monkeypatch.setattr(sq, "_call", lambda cfg, model, prompt, max_tokens, system: (
         calls.append(prompt), ("ok", 1, 1, "m"))[1])
 
     build_counts: list[int] = []
     builders = [_counting_builder(build_counts, i) for i in range(5)]
     assert build_counts == [], "constructing the builders must not build any prompt"
 
-    results = sq.sub_query_batch(builders, "m", concurrency=2)
+    results = sq.sub_query_batch(cfg, builders, "m", concurrency=2)
     assert sorted(build_counts) == list(range(5)), "every item should be built exactly once"
     assert len(calls) == 5
     assert all(not r.error for r in results)
 
 
-def test_batch_reports_prompt_build_failure_without_aborting(monkeypatch, batch_ctx):
+def test_batch_reports_prompt_build_failure_without_aborting(monkeypatch, cfg, batch_ctx):
     calls: list[str] = []
-    monkeypatch.setattr(sq, "_call", lambda model, prompt, max_tokens, system: (
+    monkeypatch.setattr(sq, "_call", lambda cfg, model, prompt, max_tokens, system: (
         calls.append(prompt), ("ok", 1, 1, "m"))[1])
 
     def boom() -> str:
         raise ValueError("cannot build")
 
-    results = sq.sub_query_batch(["p0", boom, "p2"], "m", concurrency=1)
+    results = sq.sub_query_batch(cfg, ["p0", boom, "p2"], "m", concurrency=1)
     assert "prompt build failed" in results[1].error
     assert results[0].answer == "ok" and results[2].answer == "ok"
     assert calls == ["p0", "p2"], "the failing builder must not reach _call"
 
 
-def test_fatal_auth_skip_happens_before_building(monkeypatch, batch_ctx):
+def test_fatal_auth_skip_happens_before_building(monkeypatch, cfg, batch_ctx):
     build_counts: list[int] = []
     builders = [_counting_builder(build_counts, i) for i in range(10)]
     monkeypatch.setattr(sq, "_call", lambda *a: (_ for _ in ()).throw(
         CliAuthError("OAuth session expired")))
 
-    results = sq.sub_query_batch(builders, "m", concurrency=1)
+    results = sq.sub_query_batch(cfg, builders, "m", concurrency=1)
     assert build_counts == [0], "only the item already in flight when the flag tripped should build"
     assert results[-1].error.startswith("skipped —")
 
@@ -214,13 +215,13 @@ def test_status_says_nothing_about_cli_login_on_the_sdk_path(monkeypatch, batch_
 def test_all_chunks_failing_is_reported_as_a_failed_tool_call(monkeypatch, batch_ctx):
     """100% failure is not a result with notes. Returning the ordinary success
     string here is how a dead login reads back as 'no findings'."""
-    srv, events = batch_ctx(2)
+    d, events = batch_ctx(2)
 
-    monkeypatch.setattr(srv, "sub_query_batch", lambda *a, **k: [
+    monkeypatch.setattr(bt, "sub_query_batch", lambda *a, **k: [
         sq.SubResult(0, "", 0, 0, error="OAuth session expired"),
         sq.SubResult(1, "", 0, 0, error="skipped — OAuth session expired"),
     ])
-    out = srv.rlm_sub_query_batch("ctx_x", "label everything")
+    out = bt.run(d, "ctx_x", "label everything")
     assert out.lstrip().startswith("ERROR"), out[:200]
     assert "all 2 chunk(s) failed" in out
 
@@ -312,17 +313,17 @@ def test_map_start_is_logged_before_the_fan_out(monkeypatch, batch_ctx):
     ctx_id and no denominator — indistinguishable from hung. The record has to land
     before sub_query_batch is entered, not after it comes back.
     """
-    srv, events = batch_ctx(3)
+    d, events = batch_ctx(3)
 
 
     seen_at_fan_out: list[list[str]] = []
 
-    def fake_batch(prompts, model, concurrency=1, **kw):
+    def fake_batch(cfg, prompts, model, concurrency=1, **kw):
         seen_at_fan_out.append([f.get("phase") for e, f in events if e == "sub_batch"])
         return [sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))]
 
-    monkeypatch.setattr(srv, "sub_query_batch", fake_batch)
-    srv.rlm_sub_query_batch("ctx_x", "audit every file", max_chunks=2, reduce=False)
+    monkeypatch.setattr(bt, "sub_query_batch", fake_batch)
+    bt.run(d, "ctx_x", "audit every file", max_chunks=2, reduce=False)
 
     assert seen_at_fan_out == [["map_start"]], "map_start did not land before the fan-out"
     phase, fields = next((e, f) for e, f in events if f.get("phase") == "map_start")
@@ -334,13 +335,13 @@ def test_map_start_is_logged_before_the_fan_out(monkeypatch, batch_ctx):
 def _logged_batch(monkeypatch, batch_ctx, reduce, reduce_result=None):
     """Drive rlm_sub_query_batch over a 2-chunk stub context, returning the sub_batch
     records it logged. Each chunk reports 10 in / 3 out, so the totals are checkable."""
-    srv, events = batch_ctx(2)
+    d, events = batch_ctx(2)
 
-    monkeypatch.setattr(srv, "sub_query_batch", lambda prompts, model, concurrency=1, **kw: [
+    monkeypatch.setattr(bt, "sub_query_batch", lambda cfg, prompts, model, concurrency=1, **kw: [
         sq.SubResult(i, f"finding {i}", 10, 3) for i in range(len(prompts))])
     if reduce_result is not None:
-        monkeypatch.setattr(srv, "sub_query", lambda *a, **k: reduce_result)
-    srv.rlm_sub_query_batch("ctx_x", "audit every file", reduce=reduce)
+        monkeypatch.setattr(bt, "sub_query", lambda *a, **k: reduce_result)
+    bt.run(d, "ctx_x", "audit every file", reduce=reduce)
     return [f for e, f in events if e == "sub_batch"]
 
 
@@ -360,16 +361,16 @@ def test_rlm_sub_query_batch_passes_builders_not_strings(monkeypatch, batch_ctx)
     """Leaf 3: the server must hand sub_query_batch lazy builders, not a materialized
     list of full prompt strings — that list is ~= the whole context held in RAM for
     the entire batch (the defect this plan fixes)."""
-    srv, events = batch_ctx(3)
+    d, events = batch_ctx(3)
 
     seen: list = []
 
-    def fake_batch(prompts, model, concurrency=1, **kw):
+    def fake_batch(cfg, prompts, model, concurrency=1, **kw):
         seen.extend(prompts)
         return [sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))]
 
-    monkeypatch.setattr(srv, "sub_query_batch", fake_batch)
-    srv.rlm_sub_query_batch("ctx_x", "audit every file", reduce=False)
+    monkeypatch.setattr(bt, "sub_query_batch", fake_batch)
+    bt.run(d, "ctx_x", "audit every file", reduce=False)
 
     assert all(callable(p) for p in seen), "prompts must be lazy builders, not strings"
     assert [p() for p in seen] == [
@@ -383,17 +384,17 @@ def test_max_chunks_caps_how_many_prompts_get_built(monkeypatch, batch_ctx):
     """The other half of laziness: with max_chunks set, only the SELECTED chunks may be
     built -- and none of them before the pool runs."""
     builds: list[int] = []
-    srv, _events = batch_ctx(3, on_read=builds.append)
+    d, _events = batch_ctx(3, on_read=builds.append)
 
     seen: list = []
 
-    def fake_batch(prompts, model, concurrency=1, **kw):
+    def fake_batch(cfg, prompts, model, concurrency=1, **kw):
         assert builds == [], "a prompt was built before the pool ran"
         seen.extend(prompts)
         return [sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))]
 
-    monkeypatch.setattr(srv, "sub_query_batch", fake_batch)
-    srv.rlm_sub_query_batch("ctx_x", "audit", max_chunks=2, reduce=False)
+    monkeypatch.setattr(bt, "sub_query_batch", fake_batch)
+    bt.run(d, "ctx_x", "audit", max_chunks=2, reduce=False)
 
     assert len(seen) == 2, "max_chunks must cap the builder list, not just the results"
     assert [p() for p in seen] and builds == [0, 1], "built a chunk max_chunks excluded"
@@ -411,14 +412,14 @@ def test_a_failed_reduce_falls_back_to_the_raw_findings(monkeypatch, batch_ctx):
     no-op with real inputs (verified by mutation: removing the `if not red.error` guard
     breaks nothing). That guard is defensive, not load-bearing.
     """
-    srv, events = batch_ctx(2)
+    d, events = batch_ctx(2)
 
-    monkeypatch.setattr(srv, "sub_query_batch", lambda prompts, model, concurrency=1, **kw: [
+    monkeypatch.setattr(bt, "sub_query_batch", lambda cfg, prompts, model, concurrency=1, **kw: [
         sq.SubResult(i, f"finding {i}", 10, 3) for i in range(len(prompts))])
-    monkeypatch.setattr(srv, "sub_query",
+    monkeypatch.setattr(bt, "sub_query",
                         lambda *a, **k: sq.SubResult(0, "", 0, 0, error="reduce blew up"))
 
-    out = srv.rlm_sub_query_batch("ctx_x", "audit every file", reduce=True)
+    out = bt.run(d, "ctx_x", "audit every file", reduce=True)
 
     assert "reduce pass failed: reduce blew up" in out
     assert "finding 0" in out and "finding 1" in out, "map findings were discarded"
@@ -445,17 +446,17 @@ def test_a_successful_reduce_is_logged_with_the_batch_total(monkeypatch, batch_c
 
 def _batch_over(monkeypatch, batch_ctx, results, *, n_chunks=3, reduce=True, sub_context_tokens=None):
     """Drive rlm_sub_query_batch over a stub context whose map returns `results`."""
-    srv, events = batch_ctx(n_chunks)
+    d, events = batch_ctx(n_chunks)
 
-    monkeypatch.setattr(srv, "sub_query_batch",
-                        lambda prompts, model, concurrency=1, **kw: results)
-    monkeypatch.setattr(srv, "sub_query",
+    monkeypatch.setattr(bt, "sub_query_batch",
+                        lambda cfg, prompts, model, concurrency=1, **kw: results)
+    monkeypatch.setattr(bt, "sub_query",
                         lambda *a, **k: sq.SubResult(0, "synthesis", 1, 1))
     if sub_context_tokens is not None:
-        # Config is a frozen dataclass: swap the whole object, do not poke a field.
-        monkeypatch.setattr(
-            srv, "CFG", dataclasses.replace(srv.CFG, sub_context_tokens=sub_context_tokens))
-    return srv.rlm_sub_query_batch("ctx_x", "audit every file", reduce=reduce)
+        # Config is frozen, so build the variant and hand it in -- no global to patch.
+        d = dataclasses.replace(
+            d, cfg=dataclasses.replace(d.cfg, sub_context_tokens=sub_context_tokens))
+    return bt.run(d, "ctx_x", "audit every file", reduce=reduce)
 
 
 def test_a_partly_failed_map_notes_the_skipped_chunks_and_keeps_the_rest(monkeypatch, batch_ctx):

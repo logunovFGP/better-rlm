@@ -32,10 +32,23 @@ from contextlib import contextmanager
 
 import anthropic
 
-from . import budget
 from .config import load_config
 from .logsetup import log_event
 
+#: Module-level ON PURPOSE, and the one place in this package where that is the right
+#: answer. This module owns two things, and neither belongs to a caller:
+#:
+#:  * _THROTTLE is a PROCESS resource. Its whole job is "at most N calls in flight across
+#:    this process"; handing each caller its own would multiply the vendor's limit by the
+#:    number of callers, which is the opposite of a throttle. It must be shared.
+#:  * _CFG supplies only the backoff SCHEDULE (oauth_retry_waits / apikey_retry_waits) and
+#:    the throttle's shape. It touches no filesystem path, so unlike the config globals
+#:    that were removed elsewhere, a test cannot pollute anything through it -- and the
+#:    ceiling-learning that DID write to disk now lives in transport, next to its cfg.
+#:
+#: The retry decorator also wraps engine methods whose first argument is `self`
+#: (src/auth.py patches AnthropicClient.completion), so cfg cannot be threaded in
+#: positionally the way subquery's was.
 _CFG = load_config()
 _LOG = logging.getLogger("rlm-mcp")
 
@@ -92,16 +105,9 @@ def _next_delay(exc: BaseException, attempt: int, waits: list[float]) -> float |
     """Seconds to wait before retrying ``exc``, or None if it must propagate.
 
     The single home of the retry decision, so the sync and async wrappers below
-    cannot drift apart — which is also why the budget's ceiling is learned here.
+    cannot drift apart. Ceiling-learning lives in transport, next to the cfg it writes with.
     """
-    rate_limited = _is_rate_limit(exc)
-    if rate_limited and attempt == 0:
-        # First 429 of this call IS the wall: whatever the window ledger holds right now
-        # is an upper bound on the subscription's real ceiling. Recording it here — the
-        # one place every transport's rate-limit error passes through — is what lets the
-        # next run gate against a real number instead of "unknown".
-        budget.note_limit_hit(_CFG)
-    if not rate_limited or attempt >= len(waits):
+    if not _is_rate_limit(exc) or attempt >= len(waits):
         return None
     return max(waits[attempt], _retry_after_seconds(exc))
 
