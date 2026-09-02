@@ -1,0 +1,186 @@
+# Review brief — `leaf/feat/session-budget-and-resume`
+
+Status: **ready for self-on-green review, 2026-09-02.** Written for a reviewer with no
+other conversation context. Everything below is verifiable from the branch; where a claim
+was NOT verified it says so.
+
+| | |
+|---|---|
+| Branch | `leaf/feat/session-budget-and-resume` (8 commits, forked from `main`, unpushed) |
+| Leaf age | first commit 2026-09-02 21:35 +04 — ~2 h at time of writing (24 h cap) |
+| Rebase | no-op — `origin/main` has not moved since the fork |
+| Verify | `uv run --extra dev pytest -q` → **354 passed, 1 skipped** (was 288 on `main`) |
+| Diff | 29 files, +3393 / −407 |
+| Merge | `git merge --no-ff` per `TRUNK-BASED-PATTERNS.md`; a reconnect of the MCP server is part of "deploy" |
+
+## 1. What this leaf is for
+
+One incident: a `rlm_sub_query_batch` over a 103-chunk context made 104 model calls, ran
+30 minutes, drew ~60% of a 4-hour subscription window, was interrupted during a second
+pass, and returned nothing. The spend bought no result and the obvious next move — run it
+again — would have spent the same for the same nothing.
+
+Three sub-causes, each now closed for **every** model call the server makes:
+
+| Sub-cause | Mechanism | Where |
+|---|---|---|
+| No forecast before spending | `rlm_estimate` / `budget.estimate_batch` + a **ceiling** for `rlm_query` (which cannot be forecast) | `src/budget.py`, `src/batch.py` |
+| Nothing stopped the run before the wall | a **floor** under every completion at 95% of the window, plus the batch's polite early-stop `Gate` | `src/transport.py`, `src/budget.py` |
+| Completed work lived only in memory | content-addressed **answer cache** (batch) and **checkpoint/resume** (`rlm_query`) | `src/results.py`, `rlm/core/rlm.py`, `src/engine.py` |
+
+Plus a `~/.rlm/usage.jsonl` **ledger** of every completion so the next forecast sees
+what the last run spent.
+
+## 2. Commit map (oldest first)
+
+| Commit | What | Read first |
+|---|---|---|
+| `fd95a61` feat | Ledger, estimate, `Gate`, per-chunk persistence, `rlm_estimate`/`rlm_budget`, skill routing; tests stopped writing into the real `~/.rlm` | `src/budget.py` |
+| `ab3d161` fix | `bound_output` measured raw bytes; the MCP client counts JSON-encoded chars. A 131,072-byte reply arrived as 134,245 and was refused — a finished 30-call batch surfaced as an error | `src/output.py::encoded_len` |
+| `505c333` test | Eight hand-copied `_Meta`/`_Store` stubs → one `batch_ctx` factory | `tests/conftest.py` |
+| `8d44108` fix | Ledger moved to the transport (engine calls were invisible to it); the test-isolation redirect had been conditional on import order and a resume test passed by reading its own leftovers from the real store | `src/transport.py::_LedgeredTransport` |
+| `e783141` refactor | `Deps(cfg, store, log, clock)` injected; map-reduce logic → `src/batch.py`; `server.py` 996 → 667 lines, tools are one-line adapters | `src/deps.py`, `src/batch.py` |
+| `7dd9676` test | `Clock` injected for wall-clock positions only; 11 tests for arithmetic that had zero coverage | `src/config.py::Clock`, `tests/conftest.py::FrozenClock` |
+| `2928c59` feat | Cache re-keyed by `(chunk bytes, prompt, model)`; `files`-first chunking; "never fits" vs "wait"; `rlm_query` ceiling | `src/results.py` |
+| `c9a9a0c` feat | Floor at the transport; engine converts a refused call into a resumable `SessionBudgetError`; `rlm_query` checkpoints transcript + `state.dill` and resumes | `rlm/core/rlm.py::completion`, `src/engine.py::run_query` |
+
+## 3. Where to look first — risk-ranked
+
+1. **`rlm/core/rlm.py`** (vendored engine, upstream-merge sensitive). `completion(resume=)`,
+   the three `except` blocks, `_attach_checkpoint`, `_restore_repl_state`. Check: the
+   transcript is cut at `ckpt_len` (BEFORE the failed turn's user prompt) so a resume shows
+   no duplicated message; `ckpt_len`/`ckpt_iter` are updated at the top of every turn;
+   `state.dill` is read *inside* the `with` (the env is torn down as the exception leaves).
+   All local edits carry `# better-rlm:`; `rlm/UPSTREAM.md` now lists them.
+2. **`src/transport.py::_LedgeredTransport`**. `check_or_raise` runs *before* dispatch on
+   both sync and async paths; the wrapper is rebuilt per call (it binds a cfg) and only the
+   inner transport is cached. Check the refusal is not ledgered.
+3. **`src/results.py`**. Key = `sha256(chunk_text ⧺ prompt ⧺ model)`; chunk *position* is
+   deliberately excluded. Entries are atomic (tmp + `os.replace`); a hit touches mtime;
+   `sweep` is LRU by mtime under `cache_max_bytes` with a cooldown sentinel. No TTL.
+4. **`src/budget.py::judge`**. `possible = max_call_tokens <= usable`; `fits` requires
+   `possible`. `render` has three branches: unknown ceiling, impossible, fits/does-not-fit.
+5. **`src/batch.py::run`**. Order: ensure chunked → `_scan_cache` → estimate → refuse
+   (impossible) → refuse (no headroom) → `Gate` → fan-out with `on_result=_persist`.
+6. **`src/deps.py`** — the only place real config is loaded and log handlers installed.
+7. **`tests/conftest.py`** — four autouse guards: no Docker, no live model call, no real log
+   dir, plus `cfg` redirecting every `Path` field (enforced by
+   `test_config.py::test_every_config_path_is_redirected_by_the_cfg_fixture`).
+
+## 4. Design decisions a reviewer should challenge
+
+- **The ceiling is a local estimate, not the real quota.** Anthropic exposes no endpoint
+  for remaining window balance. The ledger counts *this server's* spend; other Claude
+  sessions on the account are invisible, so headroom is an upper bound. Stated in every
+  rendered output. `config.yaml` seeds `session_budget_tokens: 5800000` from ONE data point
+  (the incident: ~3.5M tokens ≈ the user's reported 60%). The server also *learns* a
+  ceiling from the window spend at the first 429 (`budget.note_limit_hit`, lowest wins).
+- **Input tokens are estimated locally (~4 chars/token), never taken from the transport.**
+  The CLI path reported `itok=1027` for ~3M tokens of real input.
+- **Stop at 95%, not 100%.** The last 5% buys a couple of chunks; being killed mid-call
+  costs the exit path. The floor is read-and-compare, not reserve, so overshoot is bounded
+  by concurrency × one call (~3 × 32k vs a ~290k margin). The batch `Gate` *does* reserve.
+- **No TTL on the cache.** Same bytes + prompt + model ⇒ same answer; model id is in the
+  key. Disk is bounded by bytes with LRU. A 1-hour TTL was proposed and rejected on purpose.
+- **Chunk position is not in the cache key.** `_mk_prompt` frames each chunk as
+  `CHUNK i/n`; identical content at a new position reuses the answer. Small fidelity trade.
+- **`files` is the automatic chunking default for dir loads and marker-bearing bundles.**
+  Content-defined chunking at file granularity: editing 3 of 1,053 files re-asks 3 chunks
+  under `files`, nearly all under `lines`. With no markers `files` falls back to a capped
+  fixed split, so the default is safe.
+- **`Deps` is threaded explicitly; the tools are the composition root.** A tool signature
+  *is* its MCP schema, so it cannot take `Deps`; `server.py` holds one `DEPS`. The
+  `ratelimit` throttle stays module-global on purpose (it is a process resource).
+- **Only wall-clock *positions* take a `Clock`.** `time.monotonic()` durations (tool
+  `dur_ms`, throttle spacing, `cli_spawn` timing) deliberately do not — freezing them makes
+  every measurement zero and would break the throttle.
+- **`rlm_query` is bounded, not forecast.** The root model decides fan-out at run time.
+  `rlm_estimate` prints what config permits (~8.7M tokens worst case with current settings)
+  and what the timeout allows (~1.3M at default latency). The floor and the checkpoint are
+  what make that acceptable.
+- **`rlm_query` resume carries `state.dill`.** DockerREPL bind-mounts a host temp dir at
+  `/workspace`; the exec runner reloads `state.dill` on every call, so writing the
+  checkpointed blob into the fresh container's dir before the first turn restores every
+  REPL variable. LocalREPL exposes no `temp_dir` → transcript-only resume. `state.dill`
+  includes the `context` variable, so it is roughly context-sized (12.7 MB for the
+  clinemm bundle) and is carried in memory on the exception for the moment of the raise.
+
+## 5. Known limitations — please weigh these
+
+- **No retention on `<store>/<ctx>/results/*.jsonl` (manifests) or
+  `<store>/<ctx>/query/*` (checkpoints of runs never resumed).** Checkpoints are deleted on
+  success and on `fresh=True`; an abandoned stop persists indefinitely. The answer cache
+  and log dir have sweeps; these two do not.
+- **`_scan_cache` reads every selected chunk to hash it, then the batch reads un-cached
+  ones again lazily.** One extra pass over the file; flat memory. The upgrade (store the
+  hash in chunk meta at chunking time) is noted in the code and not done.
+- **The floor's read-not-reserve overshoot** (see §4). Acceptable at the configured
+  ceiling; would matter more with a small `session_budget_tokens`.
+- **`query_ceiling` omits root-turn *input*** (the REPL transcript grows per turn in a way
+  config cannot bound). Stated in its docstring and output.
+- **The lessons doc's coverage** — the clinemm analysis it reports read 15 of 30 chunks
+  because of the `bound_output` bug this leaf fixes; the doc says so.
+
+## 6. Verification record
+
+**Automated.** `uv run --extra dev pytest -q` — 354 passed, 1 skipped. Two consecutive
+full runs add **no** file to the real `~/.rlm` (cache, contexts, logs, ledger, state).
+
+**Mutation checks** — each mutant fails exactly the test written for it, nothing else:
+
+| Mutant | Caught by |
+|---|---|
+| window boundary `>=` → `>` | `test_the_window_boundary_is_inclusive_at_exactly_one_window_ago` |
+| latency drops the concurrency factor | `test_observed_call_latency_is_measured_from_the_ledger_spacing` |
+| log age cutoff off by one day | `test_the_age_cap_keeps_a_file_one_second_inside_the_window` |
+| `model` dropped from the content key | `test_the_key_separates_text_prompt_and_model` |
+| `possible = True` forced | `test_a_chunk_larger_than_the_stop_line_is_impossible_not_waitable`, `..._refuses_an_impossible_chunk...` |
+| dir → `files` default removed | `test_a_dir_load_defaults_to_files_chunking` |
+| transport floor removed | `test_the_transport_refuses_a_call_that_would_cross_the_line_without_spending` |
+| `stops_run` returns False | `test_the_loop_converts_a_backend_budget_stop_into_a_resumable_limit`, `test_resume_replays_...` |
+| checkpoint history not trimmed | same two |
+| checkpoint not cleared on success | `test_a_stopped_query_saves_a_checkpoint_and_the_next_call_resumes_from_it` |
+
+**Live (reconnected server, code as of `7dd9676` — before the cache and floor commits).**
+`rlm_budget` reported the configured ceiling; `rlm_estimate` on the 128-file sample
+returned 30 calls / ~574k tokens / ~8 min / "fits — 10%", matching the offline forecast.
+
+**NOT verified — do before or right after landing:**
+
+- `scripts/validate.py` — the repo's rule: run by hand before anything touching the sandbox
+  or context-store path. This leaf touches both. Needs Docker up; takes minutes:
+  ```
+  uv run --extra dev python scripts/validate.py C:\Users\Logun\AppData\Local\Temp\rlm-val
+  ```
+- A real end-to-end `rlm_query` stop → resume against Docker (the engine path is tested
+  with a fake environment; `state.dill` restore against a live container is not).
+- A real floor hit against the live transport (tested with a fake backend only).
+- The MCP server has **not** been reconnected since `2928c59`; the running one predates the
+  cache, the `files` default, the floor and resume.
+
+## 7. Surface changes
+
+| Kind | Change |
+|---|---|
+| New tools | `rlm_estimate(ctx_id, prompt, max_chunks, reduce)`, `rlm_budget()` |
+| Changed signatures | `rlm_sub_query_batch(+fresh)`, `rlm_query(+fresh)`, `rlm_chunk_context` (empty strategy → content-aware default) |
+| `config.yaml` | `session_window_h: 5`, `session_budget_tokens: 5800000` (seed), `budget_stop_fraction: 0.95` |
+| `config.py` defaults | `budget_ledger`, `budget_state`, `cache_dir`, `cache_max_bytes` (256 MB), `cache_sweep_cooldown_s` (300) |
+| `pyproject.toml` | pytest marker `live` (opt out of the no-live-call guard) |
+| New on-disk files | `~/.rlm/usage.jsonl` `{ts, model, itok, otok}` · `~/.rlm/budget.json` `{learned_ceiling_tokens, observed_at}` · `~/.rlm/cache/<k[:2]>/<k>.json` `{answer, itok, otok, model, ts}` + `.sweep` · `<store>/<ctx>/results/<run>.jsonl` (+`index`) · `<store>/<ctx>/query/<h>.json` `{question, root_model, sub_model, history, next_iteration, partial_answer, stopped_on}` + `.state.dill` |
+| Engine (`rlm/`) | `SessionBudgetError`, `STOPS_RUN_ATTR`/`stops_run`; `completion(resume=)`; checkpoints on every limit. Listed in `rlm/UPSTREAM.md` |
+| Skill | `skills/rlm-large-context/SKILL.md` — estimate-first workflow, Budget section, `files` default, `rlm_query` ceiling/resume |
+| Docs | Lessons write-up published as an artifact: https://claude.ai/code/artifact/24397e12-c99b-40c7-8324-48c4b6338c7a |
+
+## 8. Landing checklist (the loop from `TRUNK-BASED-PATTERNS.md`)
+
+- [ ] SYNC — `git switch main && git pull --ff-only` (origin/main unchanged; no-op)
+- [ ] FRESHEN — `git rebase main` on the leaf (no-op today)
+- [ ] VERIFY — `uv run --extra dev pytest -q` green
+- [ ] `scripts/validate.py` run against Docker (see §6)
+- [ ] GATE — nothing here needs to land dark; every new path is on by default and gated by config where it spends
+- [ ] REVIEW — self-on-green with this brief
+- [ ] LAND — `git switch main && git merge --no-ff leaf/feat/session-budget-and-resume && git push`
+- [ ] DELETE — `git branch -d leaf/feat/session-budget-and-resume`
+- [ ] CONFIRM — `main` green; **reconnect the MCP server**
+- [ ] After reconnect: `rlm_budget` → ceiling shown; `rlm_estimate` on an existing ctx → includes the `rlm_query` ceiling section
