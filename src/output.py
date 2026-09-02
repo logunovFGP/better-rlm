@@ -8,6 +8,22 @@ a ContextMeta -- no config, no store, no transport -- and server.py sits against
 
 from __future__ import annotations
 
+import json
+
+
+def encoded_len(text: str) -> int:
+    """Size of ``text`` AS THE CLIENT WILL COUNT IT — JSON-encoded, not raw UTF-8.
+
+    An MCP tool result travels as ``{"result": "..."}``, and JSON escaping is not free:
+    every newline becomes two characters, as does every quote and backslash. Markdown
+    findings are newline-dense, so the inflation is real and predictable — a payload
+    trimmed to exactly 131,072 raw bytes arrived as 134,245 characters and the client
+    REFUSED it, turning a completed 30-call batch into an error with its result dumped
+    to a temp file. Counting raw bytes against a limit the client enforces on encoded
+    characters is simply the wrong measurement.
+    """
+    return len(json.dumps(text, ensure_ascii=False))
+
 _NOTICE = (
     "\n…[truncated: {hidden} of {total} bytes withheld — "
     "narrow your query or use rlm_inspect_context]"
@@ -15,14 +31,26 @@ _NOTICE = (
 
 
 def bound_output(text: str, cap_bytes: int) -> str:
-    """Return ``text`` unchanged if within ``cap_bytes`` (UTF-8), else a capped
-    head with a truncation notice. Never returns more than ~cap_bytes."""
-    raw = text.encode("utf-8", errors="replace")
-    if len(raw) <= cap_bytes:
+    """Return ``text`` unchanged if it fits ``cap_bytes`` ONCE JSON-ENCODED, else a
+    capped head plus a truncation notice. Never exceeds ``cap_bytes`` as the client
+    measures it — see ``encoded_len`` for why that differs from raw bytes."""
+    if encoded_len(text) <= cap_bytes:
         return text
-    notice = _NOTICE.format(hidden=len(raw) - cap_bytes, total=len(raw))
-    keep = max(0, cap_bytes - len(notice.encode("utf-8")))
-    return raw[:keep].decode("utf-8", errors="ignore") + notice
+    raw = text.encode("utf-8", errors="replace")
+    # Shrink by the OBSERVED escape ratio rather than guessing a fixed margin: the
+    # ratio depends on the content (a JSON dump escapes far more than prose). Two
+    # passes suffice in practice; the loop is bounded so pathological input cannot spin.
+    keep = cap_bytes
+    notice = ""
+    for _ in range(8):
+        keep = max(0, keep)
+        notice = _NOTICE.format(hidden=len(raw) - keep, total=len(raw))
+        out = raw[:keep].decode("utf-8", errors="ignore") + notice
+        over = encoded_len(out) - cap_bytes
+        if over <= 0:
+            return out
+        keep -= over + 16   # -16: room for the notice text to grow as it shrinks
+    return raw[:max(0, keep)].decode("utf-8", errors="ignore") + notice
 
 
 #: Skips that are the POINT of the skip lists, not a surprise (node_modules, .env).

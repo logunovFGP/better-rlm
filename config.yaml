@@ -28,6 +28,20 @@ sandbox_image: rlm-sandbox
 sandbox_timeout_s: 300
 max_concurrent_subcalls: 2             # engine rlm_query_batched parallelism
 subquery_concurrency: 3                # our map-reduce parallelism
+
+# ---- Session-window token budget (see src/budget.py) --------------------------------
+session_window_h: 5                    # the rolling window the subscription enforces
+session_budget_tokens: 5800000         # tokens per window. SEED VALUE, calibrated from one
+                                       # observed incident: a 103-chunk batch spending ~3.5M
+                                       # tokens was reported as ~60% of a window, so ~5.8M.
+                                       # It is a starting point, not a measurement — adjust it
+                                       # if your plan differs. 0 disables gating entirely (the
+                                       # server then estimates but cannot refuse), and any real
+                                       # usage limit the server hits overrides this downward on
+                                       # its own via budget.note_limit_hit.
+budget_stop_fraction: 0.95             # stop a run at this share of the window budget, so it
+                                       # ends by choice with its results on disk instead of
+                                       # being killed mid-call with nothing to show.
 report_cost: false                     # OFF by default. The rate table covers Anthropic models only,
                                        # and the claude-CLI path under-counts input tokens — so a "$"
                                        # figure would be confidently wrong. Enable only when your

@@ -41,7 +41,7 @@ from .logsetup import configure_logging, log_event, logged_tool, note_startup
 # meta_block keeps its old private name: tests reach for srv._meta_block. It and
 # skipped_block are pure ContextMeta presentation, moved to output.py to keep this file
 # under 800 lines; skipped_block is called from meta_block there, not from here.
-from .output import bound_output
+from .output import bound_output, encoded_len
 from .output import meta_block as _meta_block
 from .sandbox_reap import container_image_status
 from .shutdown import install_shutdown_hooks
@@ -624,7 +624,7 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
         merged = [SubResult(i, cached[i].answer, cached[i].itok, cached[i].otok,
                             model=cached[i].model) for i in sel]
         return _render_batch(ctx_id, prompt, merged, sub_model, reduce=reduce, n=n,
-                             max_chunks=max_chunks, from_cache=len(sel), deferred=0)
+                             max_chunks=max_chunks, from_cache=len(sel), deferred=0, key=key)
 
     # Refuse ONLY when not even one chunk fits — running then would defer every chunk and
     # report nothing but noise. Anything merely large is allowed to start: the gate stops
@@ -678,12 +678,13 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
         else:
             merged.append(SubResult(i, "", 0, 0, error="not run"))
     return _render_batch(ctx_id, prompt, merged, sub_model, reduce=reduce, n=n,
-                         max_chunks=max_chunks, from_cache=len(cached), deferred=deferred)
+                         max_chunks=max_chunks, from_cache=len(cached), deferred=deferred,
+                         key=key)
 
 
 def _render_batch(ctx_id: str, prompt: str, res_list: list[SubResult], sub_model: str, *,
                   reduce: bool, n: int, max_chunks: int, from_cache: int,
-                  deferred: int) -> str:
+                  deferred: int, key: str = "") -> str:
     """Render a (possibly resumed, possibly budget-stopped) batch.
 
     Split out of the tool because there are now three ways to arrive here — everything
@@ -747,7 +748,32 @@ def _render_batch(ctx_id: str, prompt: str, res_list: list[SubResult], sub_model
                 f" · auth: {transport.auth_label(CFG)})\n"
                 f"tokens: {itok:,} in / {otok:,} out{_cost_note(sub_model, itok, otok)}"
                 f"{note}{extra}\n\n")
-        return _answer(head + per_chunk)
+        # Silently truncating here discards findings the caller ALREADY PAID FOR — and
+        # with reduce=False they asked for every piece by name. Every answer is already on
+        # disk, so hand back the path instead of half the report: 30 chunks of findings is
+        # ~240 KB against a 128 KB cap, making this the normal case for a wide batch rather
+        # than an edge one. The observed failure was worse still — the over-cap payload was
+        # refused by the client outright and the whole 30-call batch read back as an error.
+        full = head + per_chunk
+        if key and encoded_len(full) > CFG.answer_cap_bytes:
+            path = results.path_for(CFG, ctx_id, key)
+            shown, kept, room = [], 0, CFG.answer_cap_bytes // 3
+            for r in res_list:
+                block = f"### chunk {r.index}\n" + (r.error or r.answer.strip())
+                if kept + len(block) > room:
+                    break
+                shown.append(block)
+                kept += len(block)
+            return _answer(
+                head
+                + f"_**{len(res_list)} findings ({len(per_chunk):,} bytes) exceed the "
+                  f"{CFG.answer_cap_bytes:,}-byte reply cap — none are lost.** Every one is "
+                  f"on disk, one JSON line per chunk:_\n`{path}`\n\n"
+                  "_Read that file, or re-run with `reduce=True` for a synthesis. Showing "
+                  f"the first {len(shown)} of {len(res_list)} below._\n\n"
+                + "\n".join(shown))
+        return _answer(full)
+        return _answer(full)
 
     # findings = just the successful answers, for the reduce pass
     findings = "\n".join(f"[chunk {r.index}] {r.answer.strip()}"
