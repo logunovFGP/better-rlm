@@ -66,17 +66,10 @@ def _sub_ctx(m: dict) -> int:
     # sub_context_tokens explicitly to override in either direction.
     return min(limit, SUB_CONTEXT_CAP)
 
-# Provider → env var holding its API key. The engine (rlm.clients.get_client) already
-# routes these backends; this map is only how we locate the credential. Anthropic is
-# listed but special: it is the ONE provider that can authenticate with no key at all,
-# through the local `claude` CLI login — see auth.resolve_auth_mode.
-PROVIDER_KEY_ENV: dict[str, str] = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "gemini": "GEMINI_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "azure_openai": "AZURE_OPENAI_API_KEY",
-    "portkey": "PORTKEY_API_KEY",
-}
+# There is no provider → API-key map any more. Anthropic is the only supported provider
+# (auth.require_anthropic refuses the rest, because only its transport passes through the
+# session-window ledger and floor), and it reads ANTHROPIC_API_KEY directly on the `api`
+# path — or needs no key at all on the default one, through the local `claude` CLI login.
 
 _DEFAULTS: dict[str, Any] = {
     "root_model": MODEL_SONNET_5,
