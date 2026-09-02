@@ -43,7 +43,11 @@ The largest local additions, so a merge conflict there is recognised for what it
   state; every deliberate stop (timeout, error threshold, cancellation, session budget)
   attaches `history` / `next_iteration` / `state_dill` via `_attach_checkpoint`; a
   backend exception flagged `is_session_budget_stop` is converted to `SessionBudgetError`
-  instead of escaping as a traceback.
+  instead of escaping as a traceback. The iteration loop starts at `start_iter`, the
+  checkpoint cursor advances at the TOP of each turn (so a stop in the timeout check or in
+  `_compact_history` does not discard the turn before it), and the closing
+  `_default_answer` synthesis is INSIDE the try, so a refusal there checkpoints like any
+  other stop instead of escaping every handler.
 - `utils/exceptions.py` — `SessionBudgetError`, `STOPS_RUN_ATTR`, `stops_run()`;
   earlier `FATAL_SUBCALL_ATTR`, `aborts_batch()`.
 - `environments/docker_repl.py` — the hardened exec protocol (see the repo CLAUDE.md).

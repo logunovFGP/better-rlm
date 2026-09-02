@@ -3,11 +3,14 @@ mode: auto                             # auto | claude-cli | api. auto: prefer t
                                        # (reuses your Claude Code login — no token/API key needed),
                                        # else fall back to ANTHROPIC_API_KEY. Override per-launch
                                        # with the RLM_MODE env var. claude-cli forces the CLI; api forces the SDK.
-provider: anthropic                    # anthropic | gemini | openai | azure_openai | portkey
-                                       # anthropic is the ONLY one needing no API key (it uses
-                                       # the local `claude` CLI login) — keep it for local runs.
-                                       # Others need <PROVIDER>_API_KEY and the model ids below
-                                       # replaced with that vendor's. Override: RLM_PROVIDER.
+provider: anthropic                    # anthropic — and only anthropic. Any other value raises
+                                       # NotImplementedError at the first model call: the session
+                                       # budget (ledger, 95% floor, resumable stop) lives in the
+                                       # Anthropic transport, and the other providers kept the
+                                       # engine's own client, which bypassed all three. A budget
+                                       # that silently does not apply is worse than none.
+                                       # anthropic also needs no API key — it uses the local
+                                       # `claude` CLI login. Override: RLM_PROVIDER.
 root_model: claude-sonnet-5            # default root/orchestrator (1M ctx)
 root_model_override: claude-opus-4-8   # override for the hardest tasks (1M ctx)
 sub_model: claude-haiku-4-5            # cheap sub-LLM for chunk work (200K ctx)
@@ -35,10 +38,16 @@ session_budget_tokens: 5800000         # tokens per window. SEED VALUE, calibrat
                                        # observed incident: a 103-chunk batch spending ~3.5M
                                        # tokens was reported as ~60% of a window, so ~5.8M.
                                        # It is a starting point, not a measurement — adjust it
-                                       # if your plan differs. 0 disables gating entirely (the
-                                       # server then estimates but cannot refuse), and any real
-                                       # usage limit the server hits overrides this downward on
-                                       # its own via budget.note_limit_hit.
+                                       # if your plan differs. This number IS the ceiling: it is
+                                       # the only thing that gates, and nothing overrides it.
+                                       # 0 turns gating off — the server still estimates, logs
+                                       # and reports, but refuses nothing.
+                                       # When the server does hit a real usage limit it records
+                                       # its own window spend at that moment and reports it
+                                       # (rlm_budget). That is a FLOOR under your true ceiling,
+                                       # not the ceiling — other Claude sessions spend against
+                                       # the same window and are invisible here — so it is
+                                       # offered as the number to set, never applied on its own.
 budget_stop_fraction: 0.95             # stop a run at this share of the window budget, so it
                                        # ends by choice with its results on disk instead of
                                        # being killed mid-call with nothing to show.

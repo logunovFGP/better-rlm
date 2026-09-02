@@ -37,20 +37,25 @@ def bound_output(text: str, cap_bytes: int) -> str:
     if encoded_len(text) <= cap_bytes:
         return text
     raw = text.encode("utf-8", errors="replace")
-    # Shrink by the OBSERVED escape ratio rather than guessing a fixed margin: the
-    # ratio depends on the content (a JSON dump escapes far more than prose). Two
-    # passes suffice in practice; the loop is bounded so pathological input cannot spin.
+    # Shrink by the OBSERVED escape RATIO, not by the overshoot. Subtracting the overshoot
+    # assumes one encoded character per raw byte, which holds only for plain prose. A
+    # control character costs six (\uXXXX) and a quote or newline two, so content that at
+    # least doubles under encoding drove `keep` negative on the first correction and
+    # returned the truncation notice with NOTHING in front of it — measured at the 4096
+    # cap: 1 body character for control-character input, against 3,985 for prose. Scaling
+    # by cap/encoded converges from either ratio in a couple of passes.
     keep = cap_bytes
-    notice = ""
     for _ in range(8):
         keep = max(0, keep)
         notice = _NOTICE.format(hidden=len(raw) - keep, total=len(raw))
         out = raw[:keep].decode("utf-8", errors="ignore") + notice
-        over = encoded_len(out) - cap_bytes
-        if over <= 0:
+        enc = encoded_len(out)
+        if enc <= cap_bytes:
             return out
-        keep -= over + 16   # -16: room for the notice text to grow as it shrinks
-    return raw[:max(0, keep)].decode("utf-8", errors="ignore") + notice
+        keep = keep * cap_bytes // enc - 16   # -16: room for the notice as it grows
+    # Defensive only: the loop converges well inside 8 passes for any ratio JSON can
+    # produce. The bare notice is the one length guaranteed to fit.
+    return _NOTICE.format(hidden=len(raw), total=len(raw))
 
 
 #: Skips that are the POINT of the skip lists, not a surprise (node_modules, .env).

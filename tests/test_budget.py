@@ -79,26 +79,50 @@ def test_an_unknown_ceiling_is_reported_as_unknown_not_unlimited(bcfg):
     assert "unlimited" not in text.lower()
 
 
-def test_hitting_a_usage_limit_teaches_the_ceiling(bcfg):
+def test_hitting_a_usage_limit_is_recorded_as_evidence(bcfg):
     budget.record(bcfg, "m", 500_000, 100_000)
     budget.note_limit_hit(bcfg)
 
-    cap, source = budget.ceiling(bcfg)
-    assert cap == 600_000 and source == "learned"
+    assert budget.observed_wall(bcfg)[0] == 600_000
 
 
-def test_a_later_higher_wall_never_raises_a_learned_ceiling(bcfg):
-    """A limit hit at 600K proves the ceiling is not 900K. Taking the newest observation
-    would let one lucky window inflate the budget and re-authorise the original failure."""
+def test_a_wall_seen_at_a_higher_local_spend_raises_the_recorded_floor(bcfg):
+    """The local ledger sees only OUR spend; other sessions on the account spent the rest,
+    so a wall at 600K proves the ceiling is AT LEAST 600K, never that it is exactly that.
+    A quieter window gives a tighter floor, so the highest observation is the useful one."""
     budget.record(bcfg, "m", 600_000, 0)
     budget.note_limit_hit(bcfg)
-    budget.record(bcfg, "m", 300_000, 0)   # window now shows 900K
+    budget.record(bcfg, "m", 300_000, 0)   # a quieter window: 900K reached before a wall
     budget.note_limit_hit(bcfg)
 
-    assert budget.ceiling(bcfg)[0] == 600_000
+    assert budget.observed_wall(bcfg)[0] == 900_000
 
 
-def test_a_configured_ceiling_beats_a_learned_one(bcfg):
+def test_a_hit_usage_limit_never_becomes_the_gate_by_itself(bcfg):
+    """The failure this rules out. Treating the observed spend AS the ceiling put the stop
+    line at 95% of it — below the spend that produced it — so the next call and every call
+    after it was refused. In a large batch a transient 429 that the retry layer then
+    handles successfully is routine, which turned one blip into a dead server for the rest
+    of the window (and, while the lowest observation won, for the life of the state file).
+    """
+    budget.record(bcfg, "m", 40_000, 0)
+    budget.note_limit_hit(bcfg)                      # a blip, retried successfully
+
+    assert budget.observed_wall(bcfg)[0] == 40_000   # recorded...
+    assert budget.ceiling(bcfg) == (None, "unknown")  # ...but not promoted to a gate
+    budget.check_or_raise(bcfg, 1_000)               # so the next call still goes
+
+
+def test_an_observed_wall_is_reported_as_the_number_to_configure(bcfg):
+    budget.record(bcfg, "m", 600_000, 0)
+    budget.note_limit_hit(bcfg)
+    text = budget.render(budget.judge(bcfg, budget.estimate_batch(
+        bcfg, [1000] * 3, prompt="p", max_output_tokens=2048, reduce=False)), what="x")
+
+    assert "600,000" in text and "session_budget_tokens" in text
+
+
+def test_a_configured_ceiling_is_the_only_gate(bcfg):
     budget.record(bcfg, "m", 100, 0)
     budget.note_limit_hit(bcfg)
     cfg = dataclasses.replace(bcfg, session_budget_tokens=2_000_000)
@@ -128,6 +152,48 @@ def test_reduce_adds_a_call_that_re_reads_every_map_answer(bcfg):
 
     assert with_reduce.calls == no_reduce.calls + 1
     assert with_reduce.input_tokens >= no_reduce.input_tokens + no_reduce.output_tokens
+
+
+def test_the_reduce_call_counts_as_the_largest_call_when_it_is(bcfg):
+    """max_call_tokens answers "can this be sent at all", and the reduce pass reads every
+    map answer back in one call. Deriving it from the map chunks alone hid the single
+    biggest call in the run from the only check that could refuse it: at 103 chunks the
+    synthesis is ~211K tokens against ~32K for the largest chunk."""
+    est = budget.estimate_batch(bcfg, [8_000] * 103, prompt="p",
+                                max_output_tokens=2048, reduce=True)
+
+    assert est.max_map_call_tokens < 40_000, "a single chunk call should stay small"
+    assert est.max_call_tokens > 200_000, (
+        "the synthesis call is missing from the largest-call figure: "
+        f"max_call={est.max_call_tokens} map_max={est.max_map_call_tokens}")
+    assert est.max_call_tokens >= est.max_map_call_tokens
+
+
+def test_the_smallest_call_is_reported_separately_from_the_largest(bcfg):
+    """"Is there room for even one" is a question about the SMALLEST call. Under `files`
+    chunking a 200-token file sits beside a 30,000-token one, and answering it with the
+    largest refused whole batches that would mostly have fitted."""
+    est = budget.estimate_batch(bcfg, [200, 30_000], prompt="p",
+                                max_output_tokens=2048, reduce=False)
+
+    assert est.min_call_tokens < est.max_call_tokens
+    assert est.min_call_tokens < 5_000
+
+
+def test_the_reduce_call_is_priced_at_the_cap_it_actually_runs_with(bcfg):
+    """BATCH_MAX_TOKENS' own comment: the estimate and the call that spends the tokens
+    must use the same number. The synthesis is issued at REDUCE_MAX_TOKENS, so a forecast
+    that priced it at the per-chunk cap was not a forecast of this run."""
+    from src.batch import BATCH_MAX_TOKENS, REDUCE_MAX_TOKENS
+
+    assert REDUCE_MAX_TOKENS != BATCH_MAX_TOKENS, "otherwise this test proves nothing"
+    at_map_cap = budget.estimate_batch(bcfg, [1_000] * 3, prompt="p",
+                                       max_output_tokens=BATCH_MAX_TOKENS, reduce=True)
+    honest = budget.estimate_batch(bcfg, [1_000] * 3, prompt="p",
+                                   max_output_tokens=BATCH_MAX_TOKENS, reduce=True,
+                                   reduce_output_tokens=REDUCE_MAX_TOKENS)
+
+    assert honest.output_tokens - at_map_cap.output_tokens == REDUCE_MAX_TOKENS - BATCH_MAX_TOKENS
 
 
 def test_a_resumed_estimate_prices_only_the_gaps(bcfg):

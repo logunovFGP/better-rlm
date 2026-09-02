@@ -151,11 +151,18 @@ def test_fatal_auth_skip_happens_before_building(monkeypatch, cfg, batch_ctx):
 # --- rlm_status(probe=True): the line that separates "configured" from "working" ---
 def _login_ok(monkeypatch):
     """Pin the free login check to 'logged in' so these tests exercise the probe
-    itself, not whatever auth state the machine running them happens to be in."""
+    itself, not whatever auth state the machine running them happens to be in.
+
+    The budget pre-check is pinned for the same reason and it matters more: it reads the
+    SERVER's Deps, whose ledger is the operator's real ~/.rlm/usage.jsonl. Left alone,
+    every probe assertion below would quietly depend on how much the person running the
+    suite had spent in the last five hours.
+    """
     import src.server as srv
 
     monkeypatch.setattr(srv.transport, "cli_auth_status",
                         lambda cfg: {"loggedIn": True, "authMethod": "oauth"})
+    monkeypatch.setattr(srv.budget, "check_or_raise", lambda *a, **k: None)
     return srv
 
 
@@ -193,6 +200,32 @@ def test_probe_is_skipped_when_the_free_check_already_knows_it_is_dead(monkeypat
     monkeypatch.setattr(srv, "sub_query", lambda *a, **k: called.append(1))
     assert "SKIPPED" in srv._auth_probe_line()
     assert called == [], "spent a model call it already knew would fail"
+
+
+def test_probe_blames_the_budget_not_the_login_when_the_floor_refuses_it(monkeypatch,
+                                                                        batch_ctx):
+    """Past the stop line the transport refuses the probe before dispatch, and the refusal
+    was printed as "auth probe: FAILED — session budget stop", sending an operator to
+    re-authenticate a login that was fine. rlm_status is what people reach for when
+    something looks broken, so it must not misname what is broken."""
+    import src.budget as budget
+    import src.server as srv
+
+    monkeypatch.setattr(srv.transport, "cli_auth_status",
+                        lambda cfg: {"loggedIn": True, "authMethod": "oauth"})
+
+    def _refuse(*a, **k):
+        raise budget.BudgetStopError(spent=5_600_000, usable=5_510_000, next_call=16)
+
+    monkeypatch.setattr(srv.budget, "check_or_raise", _refuse)
+    called = []
+    monkeypatch.setattr(srv, "sub_query", lambda *a, **k: called.append(1))
+
+    line = srv._auth_probe_line()
+
+    assert "SKIPPED" in line and "budget" in line.lower()
+    assert "FAILED" not in line, line
+    assert called == [], "spent a call the floor had already refused"
 
 
 def test_status_names_the_fix_when_the_cli_is_not_logged_in(monkeypatch, batch_ctx):
@@ -434,6 +467,71 @@ def test_a_failed_reduce_falls_back_to_the_raw_findings(monkeypatch, batch_ctx):
     rec = next(f for e, f in events if f.get("phase") == "reduce")
     assert (rec["itok"], rec["otok"]) == (20, 6)
     assert rec["reduce_error"] == "reduce blew up"
+
+
+def test_a_failed_reduce_after_a_deferred_chunk_promises_no_synthesis(monkeypatch, batch_ctx):
+    """The partial-run note was appended to the same `note` the raw fallback had already
+    closed over, so a reduce that then failed handed back per-chunk findings under the
+    line "The synthesis below covers 1 of 2 chunks" — with no synthesis below it."""
+    d, _events = batch_ctx(2)
+
+    monkeypatch.setattr(bt, "sub_query_batch", lambda cfg, prompts, model, concurrency=1, **kw: [
+        sq.SubResult(0, "finding 0", 10, 3),
+        sq.SubResult(1, "", 0, 0, error="deferred — session budget reached"),
+    ])
+    monkeypatch.setattr(bt, "sub_query",
+                        lambda *a, **k: sq.SubResult(0, "", 0, 0, error="reduce blew up"))
+
+    out = bt.run(d, "ctx_x", "audit every file", reduce=True)
+
+    assert "reduce pass failed" in out
+    assert "finding 0" in out, "the map findings must survive a failed synthesis"
+    assert "synthesis below" not in out, (
+        "the raw fallback promised a synthesis that is not in the reply:\n" + out[:400])
+
+
+def test_a_batch_still_runs_when_only_its_biggest_chunk_will_not_fit(monkeypatch, batch_ctx):
+    """The headroom refusal compared the LARGEST remaining call and then announced that
+    not even one chunk fitted. Under `files` chunking a 200-token file sits beside a huge
+    one, so any headroom between them threw away every chunk that would have fitted. The
+    Gate admits what fits and defers the rest; that is the honest stop."""
+    import src.budget as budget
+
+    d, _events = batch_ctx(2)
+
+    class _Mixed:
+        chunks = [{"i": 0, "est_tokens": 200}, {"i": 1, "est_tokens": 300_000}]
+        chunk_strategy = "files"
+
+    d.store.get = lambda ctx_id: _Mixed()
+    d = dataclasses.replace(d, cfg=dataclasses.replace(d.cfg,
+                                                       session_budget_tokens=1_000_000))
+    budget.record(d.cfg, "m", 900_000, 0)        # headroom 50k: fits the small, not the big
+
+    fanned = []
+    monkeypatch.setattr(bt, "sub_query_batch",
+                        lambda cfg, prompts, model, concurrency=1, **kw: (
+                            fanned.append(len(prompts)) or [sq.SubResult(0, "ok", 1, 1)]))
+
+    out = bt.run(d, "ctx_x", "audit every file", reduce=False)
+
+    assert "not enough headroom for even one chunk" not in out, out[:300]
+    assert fanned, "the fan-out never ran, so the chunks that fitted were thrown away"
+
+
+def test_a_reduce_too_big_for_any_window_says_so_instead_of_blaming_the_chunks(batch_ctx):
+    """Both refusals used to read "a single chunk can never fit — re-chunk smaller". When
+    it is the synthesis that cannot fit, re-chunking makes it WORSE (more answers to fold
+    in); the remedy is reduce=False, which costs no chunk answers at all."""
+    d, _events = batch_ctx(400, est_tokens=1_000)
+    d = dataclasses.replace(d, cfg=dataclasses.replace(d.cfg,
+                                                       session_budget_tokens=500_000))
+
+    out = bt.run(d, "ctx_x", "audit every file", reduce=True)
+
+    assert out.lstrip().startswith("ERROR")
+    assert "reduce=False" in out, out[:300]
+    assert "re-chunk smaller" not in out, "blamed the chunks for the synthesis call"
 
 
 def test_a_successful_reduce_is_logged_with_the_batch_total(monkeypatch, batch_ctx):

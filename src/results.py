@@ -24,9 +24,12 @@ Disk is bounded the way the log dir is — a byte cap with LRU eviction in ``swe
 a cache HIT touches the entry's mtime so recently useful answers survive longest.
 
 THE MANIFEST is separate and per run: ``<store>/<ctx_id>/results/<run_key>.jsonl``, one
-line per chunk answered, in chunk order. It is not used for resume (the cache is). It is
-the human-readable record of what a run produced, and the file the over-cap reply points
-at when 30 chunks of findings will not fit in one tool result.
+line per chunk answered, in COMPLETION order — each line is appended by the pool worker
+that produced it, and the workers run concurrently, so the chunk indices arrive shuffled
+and a stopped run leaves gaps rather than a clean prefix. Read the ``index`` field; do not
+infer position from line number. It is not used for resume (the cache is). It is the
+human-readable record of what a run produced, and the file the over-cap reply points at
+when 30 chunks of findings will not fit in one tool result.
 """
 
 from __future__ import annotations

@@ -1,8 +1,11 @@
 # Review brief — `leaf/feat/session-budget-and-resume`
 
-Status: **ready for self-on-green review, 2026-09-02.** Written for a reviewer with no
-other conversation context. Everything below is verifiable from the branch; where a claim
-was NOT verified it says so.
+Status: **reviewed 2026-09-03; the 13 findings below the line are fixed on this branch.**
+Written for a reviewer with no other conversation context. Everything below is verifiable
+from the branch; where a claim was NOT verified it says so.
+
+> **Read §9 first.** It records what the self-review found and what changed in response,
+> including two corrections to claims this document originally made.
 
 | | |
 |---|---|
@@ -20,7 +23,9 @@ One incident: a `rlm_sub_query_batch` over a 103-chunk context made 104 model ca
 pass, and returned nothing. The spend bought no result and the obvious next move — run it
 again — would have spent the same for the same nothing.
 
-Three sub-causes, each now closed for **every** model call the server makes:
+Three sub-causes, each now closed for **every model call the server makes** — which, since
+the review, means every call it is willing to make at all: a non-Anthropic provider is
+refused outright rather than served by a path the budget cannot see (§9).
 
 | Sub-cause | Mechanism | Where |
 |---|---|---|
@@ -51,7 +56,8 @@ what the last run spent.
    transcript is cut at `ckpt_len` (BEFORE the failed turn's user prompt) so a resume shows
    no duplicated message; `ckpt_len`/`ckpt_iter` are updated at the top of every turn;
    `state.dill` is read *inside* the `with` (the env is torn down as the exception leaves).
-   All local edits carry `# better-rlm:`; `rlm/UPSTREAM.md` now lists them.
+   All local edits carry `# better-rlm:` (eight did not until the review — §9);
+   `rlm/UPSTREAM.md` lists them.
 2. **`src/transport.py::_LedgeredTransport`**. `check_or_raise` runs *before* dispatch on
    both sync and async paths; the wrapper is rebuilt per call (it binds a cfg) and only the
    inner transport is cached. Check the refusal is not ledgered.
@@ -73,8 +79,11 @@ what the last run spent.
   for remaining window balance. The ledger counts *this server's* spend; other Claude
   sessions on the account are invisible, so headroom is an upper bound. Stated in every
   rendered output. `config.yaml` seeds `session_budget_tokens: 5800000` from ONE data point
-  (the incident: ~3.5M tokens ≈ the user's reported 60%). The server also *learns* a
-  ceiling from the window spend at the first 429 (`budget.note_limit_hit`, lowest wins).
+  (the incident: ~3.5M tokens ≈ the user's reported 60%). A configured number is the ONLY
+  gate. The server records the local spend it saw at a real usage limit
+  (`budget.note_limit_hit`, highest wins) and reports it as the floor to configure from —
+  it is not promoted to a ceiling, because that put the stop line below the spend that
+  taught it and refused everything after (§9).
 - **Input tokens are estimated locally (~4 chars/token), never taken from the transport.**
   The CLI path reported `itok=1027` for ~3M tokens of real input.
 - **Stop at 95%, not 100%.** The last 5% buys a couple of chunks; being killed mid-call
@@ -184,3 +193,48 @@ returned 30 calls / ~574k tokens / ~8 min / "fits — 10%", matching the offline
 - [ ] DELETE — `git branch -d leaf/feat/session-budget-and-resume`
 - [ ] CONFIRM — `main` green; **reconnect the MCP server**
 - [ ] After reconnect: `rlm_budget` → ceiling shown; `rlm_estimate` on an existing ctx → includes the `rlm_query` ceiling section
+
+## 9. Self-review outcome (2026-09-03)
+
+Five parallel reviewers went over `main...HEAD` (project-instruction adherence, a shallow
+bug scan, git history, prior-PR comments, comment/doc compliance). Thirteen findings were
+confirmed by reading the code, two of them by executing it. All are fixed on this branch;
+each fix carries a test, and all 15 mutants written against those tests were caught.
+Verify is **368 passed, 1 skipped** (was 354).
+
+**Two claims this document made that were false, and are now corrected in place:**
+
+- §1 said the three sub-causes were closed "for **every** model call the server makes".
+  They were closed for Anthropic only. `src/auth.py` returned early for every other
+  provider into a throttle-only patch that never resolved our transport, so those runs
+  recorded no spend, passed no floor and learned no ceiling. **Non-Anthropic providers now
+  raise `NotImplementedError` at the first model call** (`auth.require_anthropic`), read-only
+  tools unaffected. `EngineClientTransport` and `_patch_throttle_only` are deleted.
+- §3 said "All local edits carry `# better-rlm:`". Eight did not, including the whole
+  `SessionBudgetError` class, which sat above the marker banner and so read as upstream
+  code to the `grep` recipe in `rlm/UPSTREAM.md`. All eight are marked now.
+
+**The rest, most severe first.** A transient 429 could pin the learned ceiling to local
+spend and refuse every later call — the observed wall is now recorded as EVIDENCE and
+reported as the number to configure, never promoted to a gate, because local spend at the
+wall is a floor under the account's real ceiling, not a cap on it (`budget.ceiling`). The
+engine's closing synthesis call sat outside the try, so a refusal there lost the whole run;
+it is inside now, with a cursor that resumes only the synthesis. `bound_output` returned
+one character of body for escape-heavy content, because it corrected by the overshoot
+rather than the ratio. `max_call_tokens` excluded the reduce call, whose input is every map
+answer at once. The headroom refusal compared the largest remaining chunk while announcing
+that not even one fitted. The checkpoint cursor advanced mid-turn, discarding a completed
+turn. `rlm_status` reported a budget stop as an auth failure. The reduce call was forecast
+at half the cap it runs with. The manifest was documented in chunk order and written in
+completion order. The partial-run note leaked into the reduce-failure fallback.
+
+**Fixed outside the diff.** `scripts/validate.py` could not run at all: the venv still
+contained `rlms 0.1.3`, whose `rlm` package shadowed the vendored `./rlm` for any entry
+point whose `sys.path[0]` was not the repo root. Every previous run of this mandated
+harness had therefore exercised the un-hardened upstream sandbox. `uv pip uninstall rlms`
+fixed it; the harness now passes against Docker. `CLAUDE.md`'s claim that `rlms` is no
+longer installed was false in that venv, and nothing detects it if it returns.
+
+**Not fixed, deliberately.** The retention gaps in §5 stand. So does the double read in
+`_scan_cache`. A live `rlm_query` stop→resume against Docker and a live floor hit are still
+unverified.

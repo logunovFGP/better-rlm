@@ -14,11 +14,15 @@ A NOTE ON WHAT WE CAN AND CANNOT KNOW. Anthropic publishes no token ceiling for 
 subscription and exposes no endpoint to read the remaining balance of the rolling window.
 So this module does NOT report "your real remaining quota" — it maintains a LOCAL ledger
 of what this server itself spent, over the same rolling window the vendor enforces, and
-compares that against a ceiling that is either configured or *learned by hitting the wall*
-(``note_limit_hit``). Spend from other Claude Code sessions on the same account is
-invisible here, which biases every estimate optimistic. That is stated in the rendered
-output rather than hidden, because a budget tool that quietly implies more headroom than
-exists is worse than none.
+compares that against a CONFIGURED ceiling. Spend from other Claude Code sessions on the
+same account is invisible here, which biases every estimate optimistic. That is stated in
+the rendered output rather than hidden, because a budget tool that quietly implies more
+headroom than exists is worse than none.
+
+That same blind spot is why a usage limit we actually hit (``note_limit_hit``) is recorded
+as EVIDENCE and reported, but never promoted to the ceiling on its own: it is a floor
+under the real one, and gating on a floor puts the stop line below the spend that taught
+it. See ``ceiling``.
 
 INPUT TOKENS ARE ESTIMATED LOCALLY, NEVER TAKEN FROM THE TRANSPORT. The claude-CLI path
 reports the piped prompt at a token count that is not merely low but useless: the failing
@@ -139,23 +143,51 @@ def _state(cfg: Config) -> dict:
 def ceiling(cfg: Config) -> tuple[int | None, str]:
     """The window token ceiling and where it came from: ``(tokens, source)``.
 
-    ``(None, "unknown")`` is a real and common answer — it means the server has never
-    been told a budget and has never hit a usage limit, so it can estimate but cannot
-    gate. Callers must render that as "unknown", never as "unlimited".
+    ``(None, "unknown")`` is a real and common answer — it means the server has not been
+    told a budget, so it can estimate but cannot gate. Callers must render that as
+    "unknown", never as "unlimited".
+
+    A CONFIGURED NUMBER IS THE ONLY GATE, and an observed wall is deliberately not one.
+    A limit hit tells us the account's ceiling C is at least our own window spend S
+    (other Claude sessions spent the invisible remainder, so C = S + other >= S). Using S
+    AS the ceiling puts the stop line at 0.95*S, below the very spend that produced it, so
+    the next call — and every call until the window rolls — is refused. In a large batch a
+    transient 429 that the retry layer then handles successfully is the normal case, so
+    that inference turned one retried blip into a dead server. The observation is kept and
+    reported by ``observed_wall`` as the number to put in ``session_budget_tokens``; it
+    does not silently become that number.
     """
     if cfg.session_budget_tokens > 0:
         return cfg.session_budget_tokens, "configured"
-    learned = _state(cfg).get("learned_ceiling_tokens")
-    if isinstance(learned, (int, float)) and learned > 0:
-        return int(learned), "learned"
     return None, "unknown"
 
 
-def note_limit_hit(cfg: Config, *, now: Clock = time.time) -> None:
-    """Record the window spend at the moment a usage limit was hit — that IS the ceiling.
+def observed_wall(cfg: Config) -> tuple[int | None, float | None]:
+    """The highest local window spend seen at a usage limit, and when — ``(tokens, ts)``.
 
-    Called from the rate-limit path. The lowest observed wall wins: a limit hit at 800K
-    proves the ceiling is not 1.2M, so a later, larger observation must not raise it.
+    Advice for a human, not a gate: this is a FLOOR under the real ceiling (see
+    ``ceiling``), which makes it a good starting value for ``session_budget_tokens`` and a
+    bad stop line.
+    """
+    st = _state(cfg)
+    tokens = st.get("learned_ceiling_tokens")
+    if not isinstance(tokens, (int, float)) or tokens <= 0:
+        return None, None
+    ts = st.get("observed_at")
+    return int(tokens), (float(ts) if isinstance(ts, (int, float)) else None)
+
+
+def note_limit_hit(cfg: Config, *, now: Clock = time.time) -> None:
+    """Record the window spend at the moment a usage limit was hit, as EVIDENCE.
+
+    Read ``ceiling`` for why this is not itself a ceiling. What it is: a floor under the
+    real one, and the only number about the account's true limit this server can ever
+    measure -- so it is reported back as the value to configure.
+
+    The HIGHEST observation wins. At the wall the account spent its ceiling C while this
+    ledger saw only our own S, the rest going to other Claude sessions, so C >= S and a
+    quieter window yields a tighter estimate. Keeping the lowest instead let one 429 in a
+    busy window pin the number far under the truth, permanently.
     """
     try:
         s = spent(cfg, now=now)
@@ -164,7 +196,7 @@ def note_limit_hit(cfg: Config, *, now: Clock = time.time) -> None:
         st = _state(cfg)
         prev = st.get("learned_ceiling_tokens")
         st["learned_ceiling_tokens"] = (
-            min(int(prev), s.tokens) if isinstance(prev, (int, float)) and prev > 0 else s.tokens
+            max(int(prev), s.tokens) if isinstance(prev, (int, float)) and prev > 0 else s.tokens
         )
         st["observed_at"] = now()
         cfg.budget_state.parent.mkdir(parents=True, exist_ok=True)
@@ -191,10 +223,18 @@ class Estimate:
     chunks_total: int
     chunks_todo: int
     chunks_done: int
-    #: The largest SINGLE call in the run. This is what decides "possible at all": a run
-    #: can always be split across windows, but one call cannot, so a chunk bigger than
-    #: the stop line can never be sent -- in this window or any other.
+    #: The largest SINGLE call in the run, reduce pass included. This is what decides
+    #: "possible at all": a run can always be split across windows, but one call cannot,
+    #: so a call bigger than the stop line can never be sent -- in this window or any other.
     max_call_tokens: int = 0
+    #: The largest single MAP call. Separate from the above because the two failures want
+    #: opposite advice: an oversized map call means re-chunk smaller, while an oversized
+    #: reduce call means drop the synthesis (reduce=False), which costs no chunk answers.
+    max_map_call_tokens: int = 0
+    #: The SMALLEST call still to be sent. What decides "is there room for even one" —
+    #: comparing the largest against the headroom refused whole batches of small chunks
+    #: because one big chunk did not fit, while claiming nothing fit at all.
+    min_call_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -207,7 +247,7 @@ _DEFAULT_CALL_S = 45.0
 
 
 def estimate_batch(cfg: Config, chunk_tokens: list[int], *, prompt: str,
-                   max_output_tokens: int, reduce: bool,
+                   max_output_tokens: int, reduce: bool, reduce_output_tokens: int = 0,
                    done: set[int] | None = None, now: Clock = time.time) -> Estimate:
     """Forecast a map(-reduce) batch over ``chunk_tokens`` (est_tokens per chunk).
 
@@ -216,8 +256,10 @@ def estimate_batch(cfg: Config, chunk_tokens: list[int], *, prompt: str,
     resumable run. It is a SET of indices, not a count: a run stopped by the budget gate
     leaves gaps rather than a clean prefix, because workers finish out of order.
 
-    Output is priced at the FULL ``max_output_tokens`` per call. A forecast that assumes
-    short answers is the one that walks into the wall.
+    Output is priced at the FULL cap per call. A forecast that assumes short answers is the
+    one that walks into the wall. ``reduce_output_tokens`` is the reduce call's own cap,
+    which is NOT the map cap — the caller passes both because the estimate is only an
+    estimate of this run if every number in it is the number that will actually be sent.
     """
     skip = done or set()
     todo = [t for i, t in enumerate(chunk_tokens) if i not in skip]
@@ -225,18 +267,27 @@ def estimate_batch(cfg: Config, chunk_tokens: list[int], *, prompt: str,
     itok = sum(todo) + per_prompt_overhead * len(todo)
     otok = max_output_tokens * len(todo)
     calls = len(todo)
+    per_call = per_prompt_overhead + max_output_tokens
+    biggest_map = (max(todo) + per_call) if todo else 0
+    smallest = (min(todo) + per_call) if todo else 0
+    biggest = biggest_map
     if reduce and calls:
-        # The reduce pass reads every map answer back in and emits one more.
+        # The reduce pass reads every map answer back in and emits one more. Its INPUT is
+        # therefore the whole map output — at 103 chunks that is one ~211K-token call
+        # against ~32K for the largest map call, so leaving it out of `biggest` hid the
+        # largest call in the run from the one check that asks "can this be sent at all".
+        red_out = reduce_output_tokens or max_output_tokens
+        biggest = max(biggest, otok + per_prompt_overhead + red_out)
         itok += otok
-        otok += max_output_tokens
+        otok += red_out
         calls += 1
     conc = max(1, cfg.subquery_concurrency)
-    biggest = ((max(todo) if todo else 0) + per_prompt_overhead + max_output_tokens) if todo else 0
     return Estimate(calls=calls, input_tokens=itok, output_tokens=otok,
                     seconds=(calls / conc) * _observed_call_s(cfg, now),
                     chunks_total=len(chunk_tokens), chunks_todo=len(todo),
                     chunks_done=len(chunk_tokens) - len(todo),
-                    max_call_tokens=biggest)
+                    max_call_tokens=biggest, max_map_call_tokens=biggest_map,
+                    min_call_tokens=smallest)
 
 
 def _observed_call_s(cfg: Config, now: Clock = time.time) -> float:
@@ -265,6 +316,9 @@ class Verdict:
     stop_pct: int
     spend: Spend
     estimate: Estimate
+    #: Highest local spend seen at a usage limit, or None. Reported as the floor to
+    #: configure from — never used as a ceiling. See ``ceiling``.
+    observed_wall_tokens: int | None = None
 
     def as_dict(self) -> dict:
         d = asdict(self)
@@ -277,18 +331,23 @@ def judge(cfg: Config, est: Estimate, *, now: Clock = time.time) -> Verdict:
 
     ``possible`` is False in exactly one case: the largest single call exceeds the stop
     line. A run can be split across windows -- durable per-chunk answers make any SIZE
-    completable -- but one call cannot be split, so a chunk bigger than the line can never
+    completable -- but one call cannot be split, so a call bigger than the line can never
     be sent, now or later. Everything else is SCHEDULED, not refused: "this takes three
     sittings, and each one keeps what it earned" is a different message from "this can
     never run", and the first version of this function could only say the first.
+
+    "Largest call" includes the reduce pass, whose input is every map answer at once. The
+    caller is expected to read ``max_map_call_tokens`` to tell the two apart, because an
+    oversized map call and an oversized synthesis call call for opposite remedies.
     """
     cap, source = ceiling(cfg)
     s = spent(cfg, now=now)
     stop_pct = round(cfg.budget_stop_fraction * 100)
     if cap is None:
+        wall, _ts = observed_wall(cfg)
         return Verdict(fits=True, possible=True, windows_needed=0.0, headroom_tokens=None,
                        ceiling_tokens=None, ceiling_source=source, stop_pct=stop_pct,
-                       spend=s, estimate=est)
+                       spend=s, estimate=est, observed_wall_tokens=wall)
     usable = cap * cfg.budget_stop_fraction
     headroom = int(max(0.0, usable - s.tokens))
     possible = est.max_call_tokens <= usable
@@ -496,14 +555,22 @@ def render(v: Verdict, *, what: str) -> str:
     ]
     if v.ceiling_tokens is None:
         lines += [
-            "**Window budget: unknown.** No `session_budget_tokens` is configured and no "
-            "usage limit has been hit yet, so this run cannot be gated against a ceiling — "
-            "only measured. Set `session_budget_tokens` in config.yaml to gate from the "
-            "first run; otherwise the server learns the ceiling the first time it hits one.",
+            "**Window budget: unknown.** No `session_budget_tokens` is configured, so this "
+            "run cannot be gated against a ceiling — only measured. Set "
+            "`session_budget_tokens` in config.yaml to gate it.",
             "",
             f"Spent in the last {v.spend.window_h:g}h by this server: "
             f"~{v.spend.tokens:,} tokens over {v.spend.calls} calls.",
         ]
+        if v.observed_wall_tokens:
+            lines += [
+                "",
+                f"_This server has hit a usage limit with ~{v.observed_wall_tokens:,} "
+                "tokens of its own spend inside the window. The account's real ceiling is "
+                "at least that (other Claude sessions spend against it too and are "
+                "invisible here), so that is the floor to start from when you set "
+                "`session_budget_tokens`._",
+            ]
         return "\n".join(lines)
 
     pct = 100.0 * e.total_tokens / max(1, v.headroom_tokens or 1)

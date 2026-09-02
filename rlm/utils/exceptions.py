@@ -73,6 +73,8 @@ class CancellationError(Exception):
         super().__init__(message or "Execution cancelled by user")
 
 
+# better-rlm: added by this fork. It sits beside the engine's own limit exceptions rather
+# than under the marker banner below because core/rlm.py catches it in the same tuple.
 class SessionBudgetError(Exception):
     """Raised when the backend refuses a call because the caller's SESSION budget --
     a rolling usage window, not a per-run dollar cap -- would be crossed.

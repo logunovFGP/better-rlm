@@ -327,3 +327,82 @@ def test_resume_replays_the_transcript_restarts_at_the_iteration_and_restores_re
         or seen["prompt"][3]["role"] == "user", "the loop did not restart at the resumed iteration"
     assert ei.value.next_iteration == 2, "a stop during the resumed turn must checkpoint THAT turn"
     assert ei.value.history == prior
+
+
+class _Silent:
+    """Swallow every verbose call; the loop prints, this test does not care."""
+
+    def __getattr__(self, _name):
+        return lambda *a, **k: None
+
+
+def test_a_stop_in_the_closing_synthesis_is_resumable_like_any_other(monkeypatch, tmp_path):
+    """The closing _default_answer is a MODEL CALL and used to sit outside the try. A run
+    that exhausted its iterations and was refused there -- every turn already paid for,
+    the most expensive moment there is -- raised past every handler: no conversion, no
+    checkpoint, no partial answer. The cursor points one past the last turn, so a resume
+    replays only the synthesis."""
+    from rlm.utils.exceptions import SessionBudgetError
+    from src.budget import BudgetStopError
+
+    import rlm.core.rlm as core
+
+    class _Turn:
+        code_blocks = ()
+        response = "turn output"
+        final_answer = None
+
+    r = _engine_with_fakes(monkeypatch, tmp_path, lambda **kw: _Turn())
+    r.max_iterations = 2                      # two real turns, THEN the synthesis
+    monkeypatch.setattr(r, "verbose", _Silent())
+    monkeypatch.setattr(r, "logger", None)
+    monkeypatch.setattr(r, "_check_iteration_limits", lambda *a, **k: None)
+    monkeypatch.setattr(r, "_check_timeout", lambda i, t0: None)
+    monkeypatch.setattr(core, "format_iteration",
+                        lambda it: [{"role": "assistant", "content": "a"}])
+    monkeypatch.setattr(r, "_default_answer", lambda hist, lm: (_ for _ in ()).throw(
+        BudgetStopError(spent=9, usable=5, next_call=1)))
+
+    with pytest.raises(SessionBudgetError) as ei:
+        r.completion("ctx", root_prompt="q")
+
+    assert ei.value.next_iteration == 2, (
+        "the checkpoint must point PAST the last turn so a resume replays only the "
+        "synthesis — pointing at the last turn re-pays for a turn that finished")
+    assert len(ei.value.history) == 5, (
+        f"both completed turns belong in the checkpoint: {ei.value.history}")
+    assert ei.value.state_dill == b"S", "REPL state not captured before teardown"
+
+
+def test_a_stop_at_the_top_of_a_turn_keeps_the_turn_before_it(monkeypatch, tmp_path):
+    """The checkpoint cursor used to advance in the MIDDLE of a turn, after the timeout
+    check and after _compact_history (itself a model call). A stop in either ran while the
+    cursor still named the PREVIOUS turn, so the checkpoint truncated away a turn that had
+    completed and been paid for -- and one root turn is the priciest unit in the system."""
+    import rlm.core.rlm as core
+
+    class _Turn:
+        code_blocks = ()
+        response = "turn output"
+        final_answer = None
+
+    r = _engine_with_fakes(monkeypatch, tmp_path, lambda **kw: _Turn())
+    monkeypatch.setattr(r, "verbose", _Silent())
+    monkeypatch.setattr(r, "logger", None)
+    monkeypatch.setattr(r, "_check_iteration_limits", lambda *a, **k: None)
+    monkeypatch.setattr(core, "format_iteration",
+                        lambda it: [{"role": "assistant", "content": "a0"}])
+
+    def _timeout(i, t0):
+        if i == 1:                       # turn 0 completed and was paid for
+            raise TimeoutExceededError(elapsed=9.0, timeout=5.0, partial_answer=None)
+
+    monkeypatch.setattr(r, "_check_timeout", _timeout)
+
+    with pytest.raises(TimeoutExceededError) as ei:
+        r.completion("ctx", root_prompt="q")
+
+    assert ei.value.next_iteration == 1, "the checkpoint named the turn before the stop"
+    assert len(ei.value.history) == 3, (
+        "turn 0's user prompt and answer were truncated away and would be re-paid for: "
+        f"{ei.value.history}")

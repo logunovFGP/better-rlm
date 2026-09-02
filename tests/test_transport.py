@@ -72,9 +72,10 @@ def test_get_transport_selects_by_mode(cfg):
     tp._CACHE.clear()
 
 
-def test_get_transport_selects_by_provider(cfg, monkeypatch):
-    """Anthropic keeps its two dedicated transports (the local path); every other
-    provider goes through the engine's own client."""
+def test_get_transport_refuses_every_provider_it_cannot_ledger(cfg, monkeypatch):
+    """Anthropic keeps its two dedicated transports (the local path). Every other provider
+    is refused HERE rather than handed the engine's own client, which resolved no
+    transport of ours and so recorded no spend, passed no floor and learned no ceiling."""
     import dataclasses
 
     tp._CACHE.clear()
@@ -84,15 +85,24 @@ def test_get_transport_selects_by_provider(cfg, monkeypatch):
 
     for provider in ("gemini", "openai", "azure_openai", "portkey"):
         other = dataclasses.replace(cfg, provider=provider)
-        t = get_transport("apikey", other)
-        assert isinstance(inner_of(t), tp.EngineClientTransport), provider
-        # The INNER transport is what gets cached (it owns the client and the neutral
-        # cwd). The ledger wrapper is rebuilt per call ON PURPOSE, because it binds a
-        # cfg -- caching it would hand the first caller's config, and its spend
-        # ledger, to every later caller.
-        assert inner_of(get_transport("apikey", other)) is inner_of(t)
-    # the anthropic entry must not have been clobbered by the shared "apikey" mode
+        with pytest.raises(NotImplementedError, match=provider):
+            get_transport("apikey", other)
+        assert not any(k.startswith(provider) for k in tp._CACHE), (
+            f"{provider} left a cached transport behind; a refusal must build nothing")
+    # the anthropic entry must not have been disturbed by the refusals
     assert isinstance(inner_of(get_transport("oauth", cfg)), CliTransport)
+    tp._CACHE.clear()
+
+
+def test_the_inner_transport_is_cached_but_the_ledger_wrapper_is_not(cfg):
+    """The INNER transport is cached (it owns the client and the neutral cwd). The ledger
+    wrapper is rebuilt per call ON PURPOSE, because it binds a cfg -- caching it would
+    hand the first caller's config, and its spend ledger, to every later caller."""
+    tp._CACHE.clear()
+    first = get_transport("oauth", cfg)
+    second = get_transport("oauth", cfg)
+    assert inner_of(first) is inner_of(second)
+    assert first is not second
     tp._CACHE.clear()
 
 

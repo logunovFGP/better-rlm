@@ -33,6 +33,10 @@ from .subquery import SubResult, sub_query, sub_query_batch
 #: and the call that spends the tokens MUST use the same number — an estimate computed
 #: against a different cap is not an estimate of this run.
 BATCH_MAX_TOKENS = 2048
+#: The synthesis pass gets more room than one chunk answer: it speaks for all of them.
+#: Named for the same reason, and threaded into estimate_batch for the same reason — it
+#: was 4096 at the call site while the forecast priced it at 2048.
+REDUCE_MAX_TOKENS = 4096
 
 
 # --------------------------------------------------------------------------- #
@@ -135,7 +139,8 @@ def estimate(d: Deps, ctx_id: str, prompt: str = "", max_chunks: int = 0,
     done_pos = {pos for pos, i in enumerate(sel) if i in cached}
     est = budget.estimate_batch(
         d.cfg, [int(chunks[i].get("est_tokens", 0)) for i in sel], prompt=prompt,
-        max_output_tokens=BATCH_MAX_TOKENS, reduce=reduce, done=done_pos, now=d.clock)
+        max_output_tokens=BATCH_MAX_TOKENS, reduce=reduce,
+        reduce_output_tokens=REDUCE_MAX_TOKENS, done=done_pos, now=d.clock)
     cap, _src = budget.ceiling(d.cfg)
     body = budget.render(budget.judge(d.cfg, est, now=d.clock),
                          what=f"batch over {ctx_id} ({strategy}, {n} chunks)")
@@ -250,6 +255,7 @@ def run(d: Deps, ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = T
     done_pos = {pos for pos, i in enumerate(sel) if i in cached}
     est = budget.estimate_batch(d.cfg, sel_tokens, prompt=prompt,
                                 max_output_tokens=BATCH_MAX_TOKENS, reduce=reduce,
+                                reduce_output_tokens=REDUCE_MAX_TOKENS,
                                 done=done_pos, now=d.clock)
     verdict = budget.judge(d.cfg, est, now=d.clock)
 
@@ -266,11 +272,24 @@ def run(d: Deps, ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = T
     # than what is LEFT can be sent next window — wait, and resume. The first version of
     # this code told both cases to wait.
     if not verdict.possible:
+        # Which call is too big decides the remedy, so say which. An oversized chunk needs
+        # re-chunking; an oversized synthesis needs dropping, and costs no chunk answers
+        # because the map pass runs and persists either way.
+        usable = verdict.ceiling_tokens and int(verdict.ceiling_tokens
+                                                * d.cfg.budget_stop_fraction)
+        blame = ("a single chunk can never fit the session window — re-chunk smaller"
+                 if usable and est.max_map_call_tokens > usable else
+                 "the reduce pass reads every chunk answer at once and can never fit the "
+                 "session window — re-run with reduce=False, or use fewer, larger chunks")
         return d.answer(
-            "ERROR: a single chunk can never fit the session window — re-chunk smaller.\n\n"
+            f"ERROR: {blame}.\n\n"
             + budget.render(verdict, what=f"{len(todo)} chunk(s) of {ctx_id}")
         )
-    if verdict.headroom_tokens is not None and est.max_call_tokens > verdict.headroom_tokens:
+    # The SMALLEST remaining call, not the largest: with `files` chunking one big file
+    # sits beside many small ones, and refusing the whole batch because the biggest does
+    # not fit — while announcing that not even one chunk fits — threw away the chunks that
+    # did. The Gate admits what fits and defers the rest, which is the honest stop.
+    if verdict.headroom_tokens is not None and est.min_call_tokens > verdict.headroom_tokens:
         wait = (f" Headroom returns in ~{budget.fmt_dur(verdict.spend.oldest_expires_in_s)}."
                 if verdict.spend.oldest_expires_in_s else "")
         return d.answer(
@@ -419,12 +438,15 @@ def _render(d: Deps, ctx_id: str, prompt: str, res_list: list[SubResult], sub_mo
     if estimate_tokens(findings) > 0.9 * d.cfg.sub_context_tokens:
         return _raw("\n_(findings too large to reduce in one pass — showing raw; use "
                     "fewer/larger chunks, or rlm_query for engine-side reduction)_")
-    if deferred:
-        # A reduce over a partial map IS a partial answer. Saying so is the difference
-        # between a synthesis and a synthesis that implies it read the whole document.
-        note += (f"\n_The synthesis below covers {len(res_list) - deferred} of {n} chunks "
-                 "— it is PARTIAL._")
-    return _reduce(d, findings, prompt, sub_model, ctx_id=ctx_id, note=note,
+    # A reduce over a partial map IS a partial answer. Saying so is the difference between
+    # a synthesis and a synthesis that implies it read the whole document. Bound to a NEW
+    # name rather than appended to `note`: `_raw` closed over `note`, so mutating it here
+    # made the reduce-failure fallback promise "the synthesis below" above raw findings
+    # with no synthesis below them.
+    reduce_note = note + (
+        f"\n_The synthesis below covers {len(res_list) - deferred} of {n} chunks "
+        "— it is PARTIAL._" if deferred else "")
+    return _reduce(d, findings, prompt, sub_model, ctx_id=ctx_id, note=reduce_note,
                    n_prompts=len(res_list), n_errors=len(hard_errs),
                    used_label=used_label, itok=itok, otok=otok, raw=_raw)
 
@@ -450,7 +472,7 @@ def _reduce(d: Deps, findings: str, prompt: str, sub_model: str, *, ctx_id: str,
         "Synthesize ONE coherent, de-duplicated answer to the original request across "
         "all chunks. Use only what the findings contain; do not invent anything."
     )
-    red = sub_query(d.cfg, reduce_prompt, sub_model, max_tokens=4096)
+    red = sub_query(d.cfg, reduce_prompt, sub_model, max_tokens=REDUCE_MAX_TOKENS)
     if not red.error:
         itok += red.input_tokens
         otok += red.output_tokens

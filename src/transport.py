@@ -482,59 +482,6 @@ def _parse_cli_output(returncode: int, stdout: str, stderr: str,
     )
 
 
-class EngineClientTransport(CompletionTransport):
-    """Any non-Anthropic provider, via the engine's own client.
-
-    ``rlm.clients.get_client`` already speaks openai / gemini / azure_openai / portkey,
-    so there is nothing per-vendor to write here — one adapter turns that registry into
-    a CompletionTransport. Anthropic keeps its two dedicated transports because it alone
-    has the keyless `claude` CLI path.
-    """
-
-    def __init__(self, cfg: Config):
-        self.cfg = cfg
-        self._clients: dict[str, Any] = {}
-
-    def _client(self, model: str, max_tokens: int):
-        from rlm.clients import get_client
-
-        from .auth import provider_key
-
-        key = f"{model}:{max_tokens}"
-        if key not in self._clients:
-            self._clients[key] = get_client(
-                self.cfg.provider,
-                {"model_name": model, "api_key": provider_key(self.cfg),
-                 "max_tokens": max_tokens},
-            )
-        return self._clients[key]
-
-    @staticmethod
-    def _prompt(messages: list[dict], system) -> list[dict]:
-        # Engine clients take the same message-list shape; re-attach `system` as a
-        # leading system message so no provider silently loses the instruction.
-        head = [{"role": "system", "content": _content_to_text(system)}] if system else []
-        return head + messages
-
-    @staticmethod
-    def _result(client, text: str, model: str) -> CompletionResult:
-        u = client.get_last_usage()
-        return CompletionResult(
-            text=text, model=model,
-            input_tokens=getattr(u, "total_input_tokens", 0) or 0,
-            output_tokens=getattr(u, "total_output_tokens", 0) or 0,
-            cost_usd=getattr(u, "total_cost", None),
-        )
-
-    def complete(self, messages, system, model, max_tokens) -> CompletionResult:
-        c = self._client(model, max_tokens)
-        return self._result(c, c.completion(self._prompt(messages, system)), model)
-
-    async def acomplete(self, messages, system, model, max_tokens) -> CompletionResult:
-        c = self._client(model, max_tokens)
-        return self._result(c, await c.acompletion(self._prompt(messages, system)), model)
-
-
 _CACHE: dict[str, CompletionTransport] = {}
 
 
@@ -599,31 +546,38 @@ class _LedgeredTransport(CompletionTransport):
         return res
 
     def _note_if_limit(self, exc: BaseException) -> None:
-        """A rate/usage limit IS the wall: the window ledger's value right now is an upper
-        bound on the subscription's real ceiling, so record it and stop reporting the
-        ceiling as "unknown".
+        """Record a rate/usage limit as EVIDENCE about the account's real ceiling.
 
-        Learned HERE rather than in ratelimit's retry decision, which is where it first
-        lived: that decorator also wraps engine methods whose first argument is ``self``,
-        so it has no cfg to write with and had to read a module global. This wrapper
-        already holds the cfg whose ledger is being measured.
+        A lower bound on it, not a cap: at the wall the account has spent its ceiling C,
+        of which this ledger saw S while other Claude sessions spent the invisible rest, so
+        C = S + other >= S. ``budget.ceiling`` therefore reports the observation rather
+        than gating on it — an earlier version gated on it, which put the stop line at
+        0.95*S, below the spend that produced it, and refused everything after.
+
+        That also makes recording here safe. This wrapper is inside the retry, so it sees
+        every attempt including the transient 429s the retry then handles; since the number
+        only ever advises, an over-eager observation costs nothing. Recorded HERE rather
+        than in ratelimit's retry decision because that decorator wraps engine methods
+        whose first argument is ``self`` and has no cfg to write with -- it had to read a
+        module global, which is exactly what wrote test spend into the operator's real
+        budget state. This wrapper already holds the cfg whose ledger is being measured.
         """
         if _looks_rate_limited(str(exc)) or getattr(exc, "is_rate_limit", False)                 or getattr(exc, "status_code", None) == 429:
             budget.note_limit_hit(self._cfg)
 
 
 def get_transport(auth_mode: str, cfg: Config) -> CompletionTransport:
-    """Strategy selector. Anthropic: OAuth → CLI, apikey → SDK. Every other provider →
-    the engine's own client. Cached per provider+mode so clients and the neutral cwd are
-    reused across calls. Every transport is wrapped so its spend reaches the ledger."""
-    provider = (cfg.provider or "anthropic").strip().lower()
-    ckey = f"{provider}:{auth_mode}"
+    """Strategy selector: OAuth → claude CLI, apikey → Anthropic SDK. Cached per mode so
+    clients and the neutral cwd are reused across calls. Every transport is wrapped so its
+    spend reaches the ledger — which is why a provider with no transport of ours is
+    refused here rather than silently routed around the budget (see auth.require_anthropic)."""
+    from .auth import require_anthropic          # lazy: auth imports this module
+
+    require_anthropic(cfg)
+    ckey = f"anthropic:{auth_mode}"
     inner = _CACHE.get(ckey)
     if inner is None:
-        if provider != "anthropic":
-            inner = EngineClientTransport(cfg)
-        else:
-            inner = CliTransport(cfg) if auth_mode == "oauth" else ApiTransport(cfg)
+        inner = CliTransport(cfg) if auth_mode == "oauth" else ApiTransport(cfg)
         _CACHE[ckey] = inner
     # The INNER transport is cached (it owns the client and the neutral cwd); the wrapper
     # is rebuilt per call because it binds a cfg. Caching the wrapper would hand the first

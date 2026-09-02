@@ -27,9 +27,8 @@ from itertools import islice
 
 from mcp.server.fastmcp import FastMCP
 
-from . import auth, batch, models, sources, transport
+from . import auth, batch, budget, models, sources, transport
 from .chunking import STRATEGIES, chunk_text
-from .config import PROVIDER_KEY_ENV
 from .deps import Deps
 from .engine import ReplSession, query_checkpoint_path, run_query
 from .subquery import sub_query
@@ -594,9 +593,9 @@ def rlm_status(probe: bool = False) -> str:
         src_line = f"UNREADABLE — {type(exc).__name__}: {exc}"
     return _bound(
         "## RLM MCP status\n"
-        f"- provider: {CFG.provider}   (anthropic needs no key — it uses the claude CLI login; "
-        f"any other needs its {PROVIDER_KEY_ENV.get(CFG.provider, '<PROVIDER>_API_KEY')}; "
-        "RLM_PROVIDER env overrides)\n"
+        f"- provider: {CFG.provider}   (anthropic is the only supported provider and needs "
+        "no key — it uses the claude CLI login; any other raises NotImplementedError at "
+        "the first model call, because only this one routes through the session budget)\n"
         f"- mode (configured): {CFG.mode}   (auto | claude-cli | api; RLM_MODE env overrides)\n"
         f"- transport (resolved): {transport_desc}\n"
         f"- claude CLI ({CFG.cli_path}): {'found at ' + claude_cli if claude_cli else 'NOT FOUND on PATH'}"
@@ -670,6 +669,15 @@ def _auth_probe_line() -> str:
         st = transport.cli_auth_status(CFG)
         if st is not None and not st.get("loggedIn"):
             return "\n- auth probe: SKIPPED — cli login is dead, a probe would only confirm it"
+    # The same reasoning one step further: past the stop line the transport refuses the
+    # probe before dispatch, and the refusal printed as "auth probe: FAILED — session
+    # budget stop", sending an operator to re-authenticate a login that was fine.
+    # rlm_status is what people reach for when something looks broken, so it must not
+    # misname what is broken.
+    try:
+        budget.check_or_raise(DEPS.cfg, 16, now=DEPS.clock)
+    except budget.BudgetStopError as stop:
+        return f"\n- auth probe: SKIPPED — session budget reached, not an auth problem ({stop})"
     try:
         res = sub_query(DEPS.cfg, "Reply with exactly: ok",
                         models.select(DEPS.cfg, models.Role.SUB), max_tokens=16)

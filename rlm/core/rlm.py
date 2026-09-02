@@ -1,4 +1,4 @@
-import os
+import os  # better-rlm: checkpointed REPL state is written next to the environment's temp dir
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -22,9 +22,9 @@ from rlm.utils.exceptions import (
     BudgetExceededError,
     CancellationError,
     ErrorThresholdExceededError,
-    SessionBudgetError,
+    SessionBudgetError,   # better-rlm: resumable session-window stop
     TimeoutExceededError,
-    stops_run,
+    stops_run,            # better-rlm: duck-typed "this stops the run" contract
     TokenLimitExceededError,
 )
 from rlm.utils.parsing import (
@@ -375,9 +375,10 @@ class RLM:
                 message_history = self._setup_prompt(prompt, root_prompt=root_prompt)
 
             compaction_count = 0
-            # Checkpoint cursor: the history length BEFORE this turn's user prompt was
-            # appended, and the iteration to retry. Captured per turn so a stop mid-turn
-            # resumes at the failed turn with a clean transcript (no duplicated prompt).
+            # better-rlm: checkpoint cursor — the history length BEFORE this turn's user
+            # prompt was appended, and the iteration to retry. Captured per turn so a stop
+            # mid-turn resumes at the failed turn with a clean transcript (no duplicated
+            # prompt).
             ckpt_len, ckpt_iter = len(message_history), start_iter
             try:
                 # better-rlm: on_iteration_start/complete were declared, documented and
@@ -394,7 +395,16 @@ class RLM:
                         except Exception:
                             pass  # Don't let callback errors break execution
 
+                # better-rlm: starts at start_iter, not 0 — a resumed run continues at the
+                # turn its checkpoint stopped on instead of replaying the whole trajectory.
                 for i in range(start_iter, self.max_iterations):
+                    # better-rlm: advance the checkpoint cursor FIRST, before anything in
+                    # this turn can raise. The timeout check below and _compact_history
+                    # (a model call, and exactly where a session-budget refusal lands at
+                    # the top of a turn) both ran while the cursor still named turn i-1,
+                    # so a stop there discarded a turn that had completed and been paid
+                    # for. Re-captured after compaction, which rebinds message_history.
+                    ckpt_len, ckpt_iter = len(message_history), i
                     # Check timeout before each iteration
                     self._check_timeout(i, time_start)
                     _iter_start = time.perf_counter()
@@ -425,6 +435,7 @@ class RLM:
                         if isinstance(environment, SupportsPersistence)
                         else 0
                     )
+                    # better-rlm: re-capture after compaction, which rebinds the history.
                     ckpt_len, ckpt_iter = len(message_history), i
                     # Fully prefixed trajectory: persist the per-turn user prompt
                     # into message_history so the model sees a single continuous
@@ -503,7 +514,39 @@ class RLM:
                     _fire(self.on_iteration_complete, self.depth, i,
                           time.perf_counter() - _iter_start)
 
+                # better-rlm: the closing synthesis is a MODEL CALL, and it used to sit
+                # outside this try. A run that exhausted its iterations and was then
+                # refused here — the most expensive moment there is, with every turn
+                # already paid for — raised past every handler: no conversion, no
+                # checkpoint, no partial answer. The cursor points one past the last turn
+                # so a resume replays only the synthesis, not the loop.
+                ckpt_len, ckpt_iter = len(message_history), self.max_iterations
+                # Default behavior: we run out of iterations, provide one final answer
+                time_end = time.perf_counter()
+                final_answer = self._default_answer(message_history, lm_handler)
+                usage = lm_handler.get_usage_summary()
+                self.verbose.print_final_answer(final_answer)
+                self.verbose.print_summary(self.max_iterations, time_end - time_start,
+                                           usage.to_dict())
+
+                # Store message history in persistent environment
+                if self.persistent and isinstance(environment, SupportsPersistence):
+                    environment.add_history(message_history)
+
+                return RLMChatCompletion(
+                    root_model=self.backend_kwargs.get("model_name", "unknown")
+                    if self.backend_kwargs
+                    else "unknown",
+                    prompt=prompt,
+                    response=final_answer,
+                    usage_summary=usage,
+                    execution_time=time_end - time_start,
+                    metadata=self.logger.get_trajectory() if self.logger else None,
+                )
+
             except KeyboardInterrupt:
+                # better-rlm: was a bare `raise CancellationError(...)`. Ctrl+C is a
+                # deliberate stop like any other limit, so it carries a checkpoint too.
                 self.verbose.print_limit_exceeded("cancelled", "User interrupted execution")
                 stop = CancellationError(
                     partial_answer=self._best_partial_answer,
@@ -532,28 +575,6 @@ class RLM:
                 stop = SessionBudgetError(partial_answer=self._best_partial_answer, message=str(exc))
                 self._attach_checkpoint(stop, message_history[:ckpt_len], ckpt_iter, environment)
                 raise stop from exc
-
-            # Default behavior: we run out of iterations, provide one final answer
-            time_end = time.perf_counter()
-            final_answer = self._default_answer(message_history, lm_handler)
-            usage = lm_handler.get_usage_summary()
-            self.verbose.print_final_answer(final_answer)
-            self.verbose.print_summary(self.max_iterations, time_end - time_start, usage.to_dict())
-
-            # Store message history in persistent environment
-            if self.persistent and isinstance(environment, SupportsPersistence):
-                environment.add_history(message_history)
-
-            return RLMChatCompletion(
-                root_model=self.backend_kwargs.get("model_name", "unknown")
-                if self.backend_kwargs
-                else "unknown",
-                prompt=prompt,
-                response=final_answer,
-                usage_summary=usage,
-                execution_time=time_end - time_start,
-                metadata=self.logger.get_trajectory() if self.logger else None,
-            )
 
     # --- better-rlm: resumable stops ------------------------------------------------
     def _attach_checkpoint(self, exc: BaseException, history: list[dict[str, Any]],

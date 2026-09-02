@@ -43,7 +43,7 @@ if not hasattr(_dr_probe, "RLM_RESULT_SENTINEL"):
         "Remove it:  uv pip uninstall rlms   (or: pip uninstall rlms)"
     )
 
-from .auth import patch_engine, provider_key
+from .auth import patch_engine
 from .sandbox_reap import reap_stale_sandboxes
 from .config import Config, cost_usd
 from .logsetup import log_event
@@ -89,8 +89,9 @@ def build_rlm(cfg: Config, root_model: str, sub_model: str) -> RLM:
     env_kwargs = ({"image": cfg.sandbox_image, "timeout_s": cfg.sandbox_timeout_s}
                   if cfg.use_docker else {})
     # Anthropic routes through our transport, which owns auth — hence the placeholder.
-    # Any other provider uses the engine's own client and needs the real key.
-    api_key = _PLACEHOLDER_KEY if cfg.provider == "anthropic" else (provider_key(cfg) or "")
+    # patch_engine() above has already refused every other provider, so there is no other
+    # case to key: an unbudgeted provider must not reach a model call at all.
+    api_key = _PLACEHOLDER_KEY
     return RLM(
         backend=cfg.provider,
         backend_kwargs={

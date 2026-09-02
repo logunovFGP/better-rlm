@@ -156,7 +156,7 @@ sittings rather than one. Its verdict is one of:
 |---|---|
 | **Fits** | Run it. |
 | **Does not fit this window** — needs ~N windows | Still run it. It stops cleanly at the budget line, keeps every answer it bought, and resumes from there on the next call. Tell the user it will take N sittings. |
-| **Window budget: unknown** | No ceiling is configured and none has been learned yet, so nothing can be gated. Either set `session_budget_tokens` in `config.yaml`, or accept that the first run is uninstrumented — the server learns the ceiling the first time it hits a usage limit. |
+| **Window budget: unknown** | No `session_budget_tokens` is configured, so spend is measured and reported but nothing is gated. Set it in `config.yaml` to gate. If the server has already hit a real usage limit it prints the local spend it saw at that moment — a floor under your true ceiling, and the number to start from. |
 
 **Answers are cached by CONTENT, not by context.** Every chunk answer is stored under a
 hash of `(chunk bytes, prompt, model)`. Call `rlm_sub_query_batch` again with the same

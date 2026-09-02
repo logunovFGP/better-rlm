@@ -60,3 +60,36 @@ def test_a_quote_heavy_payload_is_also_brought_under_the_cap():
     bounded = out.bound_output(payload, cap)
     assert out.encoded_len(bounded) <= cap
     assert "truncated" in bounded
+
+
+def _body(bounded: str) -> str:
+    """Everything before the truncation notice — the part the caller actually asked for."""
+    return bounded.split("\n…[truncated")[0]
+
+
+def test_escape_heavy_content_still_comes_back_with_content_in_it():
+    """Staying under the cap is half the job; the other half is not returning an empty
+    reply. Correcting by the OVERSHOOT assumes one encoded character per raw byte, so
+    content that at least doubles under encoding drove the kept length to zero and handed
+    back the truncation notice alone. A control character costs six characters, which is
+    enough on its own -- reachable through rlm_read_chunk or rlm_exec output.
+    """
+    cap = 4096
+    for name, payload in (
+        ("control chars", "\x01\x02\x03abc" * 20_000),
+        ("all quotes", '"' * 100_000),
+        ("all newlines", "\n" * 100_000),
+    ):
+        bounded = out.bound_output(payload, cap)
+        assert out.encoded_len(bounded) <= cap, name
+        assert len(_body(bounded)) > cap // 8, (
+            f"{name}: returned {len(_body(bounded))} characters of content out of a "
+            f"{cap} cap — effectively an empty reply")
+
+
+def test_prose_still_fills_most_of_the_cap():
+    """The proportional step must not overcorrect the ordinary case it never broke."""
+    bounded = out.bound_output("The quick brown fox jumps over the lazy dog. " * 2500, 4096)
+
+    assert out.encoded_len(bounded) <= 4096
+    assert len(_body(bounded)) > 3500, "prose lost most of its budget to the correction"
