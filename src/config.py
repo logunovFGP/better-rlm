@@ -139,6 +139,22 @@ _DEFAULTS: dict[str, Any] = {
     "cli_no_session_persistence": True,  # --no-session-persistence : stateless calls
     "cli_fallback_model": "",            # optional --fallback-model on overload
     "cli_extra_args": [],                # escape hatch: extra argv tokens
+    # ---- Session-window token budget (see budget.py) ----------------------------
+    # A subscription's usage limit is a ROLLING WINDOW, not a per-call cap: one 103-chunk
+    # batch drew 60% of a 4-hour window, was interrupted, and returned nothing — the whole
+    # spend bought no result. These knobs let the server estimate a run BEFORE it starts,
+    # refuse to walk off the cliff mid-run, and resume what a stopped run already paid for.
+    "session_window_h": 5.0,          # rolling usage window the vendor enforces
+    # 0 = UNKNOWN, and unknown is the honest default: Anthropic publishes no token
+    # ceiling for a subscription and exposes no endpoint to read one, so a baked-in
+    # number would be fiction. With 0 the server still estimates and still resumes; it
+    # just cannot gate on an absolute cap — until it LEARNS one by hitting a usage limit
+    # (budget.note_limit_hit records the window spend at the wall). Set it explicitly to
+    # gate from the first run.
+    "session_budget_tokens": 0,
+    "budget_stop_fraction": 0.95,     # stop a run at this share of the window budget
+    "budget_ledger": "~/.rlm/usage.jsonl",   # append-only per-call spend record
+    "budget_state": "~/.rlm/budget.json",    # learned ceiling + last observed limit
     # Structured file logging + bounded retention (see logsetup.py). Per-PID rotated
     # files in log_dir; a startup sweep caps total files/bytes/age across ALL processes
     # so many churning server processes can never fill the disk.
@@ -221,6 +237,11 @@ class Config:
     cli_no_session_persistence: bool
     cli_fallback_model: str
     cli_extra_args: tuple[str, ...]
+    session_window_h: float
+    session_budget_tokens: int
+    budget_stop_fraction: float
+    budget_ledger: Path
+    budget_state: Path
     log_level: str
     log_to_file: bool
     log_max_bytes: int
@@ -282,6 +303,11 @@ def load_config() -> Config:
         cli_no_session_persistence=bool(m["cli_no_session_persistence"]),
         cli_fallback_model=str(m["cli_fallback_model"]),
         cli_extra_args=tuple(str(x) for x in m["cli_extra_args"]),
+        session_window_h=float(m["session_window_h"]),
+        session_budget_tokens=int(m["session_budget_tokens"]),
+        budget_stop_fraction=float(m["budget_stop_fraction"]),
+        budget_ledger=Path(os.path.expanduser(str(m["budget_ledger"]))),
+        budget_state=Path(os.path.expanduser(str(m["budget_state"]))),
         log_level=str(m["log_level"]).upper(),
         log_to_file=bool(m["log_to_file"]),
         log_max_bytes=int(m["log_max_bytes"]),

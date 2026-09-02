@@ -197,6 +197,7 @@ def test_all_chunks_failing_is_reported_as_a_failed_tool_call(monkeypatch):
 
     class _Meta:
         chunks = [{"i": 0}, {"i": 1}]
+        chunk_strategy = "lines"
 
     class _Store:
         def get(self, ctx_id):
@@ -306,6 +307,7 @@ def test_map_start_is_logged_before_the_fan_out(monkeypatch):
 
     class _Meta:
         chunks = [{"i": 0}, {"i": 1}, {"i": 2}]
+        chunk_strategy = "lines"
 
     class _Store:
         def get(self, ctx_id):
@@ -320,7 +322,7 @@ def test_map_start_is_logged_before_the_fan_out(monkeypatch):
 
     seen_at_fan_out: list[list[str]] = []
 
-    def fake_batch(prompts, model, concurrency=1):
+    def fake_batch(prompts, model, concurrency=1, **kw):
         seen_at_fan_out.append([f.get("phase") for e, f in events if e == "sub_batch"])
         return [sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))]
 
@@ -341,6 +343,7 @@ def _logged_batch(monkeypatch, reduce, reduce_result=None):
 
     class _Meta:
         chunks = [{"i": 0}, {"i": 1}]
+        chunk_strategy = "lines"
 
     class _Store:
         def get(self, ctx_id):
@@ -352,7 +355,7 @@ def _logged_batch(monkeypatch, reduce, reduce_result=None):
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(srv, "STORE", _Store())
     monkeypatch.setattr(srv, "log_event", lambda log, evt, **f: events.append((evt, f)))
-    monkeypatch.setattr(srv, "sub_query_batch", lambda prompts, model, concurrency=1: [
+    monkeypatch.setattr(srv, "sub_query_batch", lambda prompts, model, concurrency=1, **kw: [
         sq.SubResult(i, f"finding {i}", 10, 3) for i in range(len(prompts))])
     if reduce_result is not None:
         monkeypatch.setattr(srv, "sub_query", lambda *a, **k: reduce_result)
@@ -380,6 +383,7 @@ def test_rlm_sub_query_batch_passes_builders_not_strings(monkeypatch):
 
     class _Meta:
         chunks = [{"i": 0}, {"i": 1}, {"i": 2}]
+        chunk_strategy = "lines"
 
     class _Store:
         def get(self, ctx_id):
@@ -390,7 +394,7 @@ def test_rlm_sub_query_batch_passes_builders_not_strings(monkeypatch):
 
     seen: list = []
 
-    def fake_batch(prompts, model, concurrency=1):
+    def fake_batch(prompts, model, concurrency=1, **kw):
         seen.extend(prompts)
         return [sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))]
 
@@ -413,6 +417,7 @@ def test_max_chunks_caps_how_many_prompts_get_built(monkeypatch):
 
     class _Meta:
         chunks = [{"i": 0}, {"i": 1}, {"i": 2}]
+        chunk_strategy = "lines"
 
     builds: list[int] = []
 
@@ -426,7 +431,7 @@ def test_max_chunks_caps_how_many_prompts_get_built(monkeypatch):
 
     seen: list = []
 
-    def fake_batch(prompts, model, concurrency=1):
+    def fake_batch(prompts, model, concurrency=1, **kw):
         assert builds == [], "a prompt was built before the pool ran"
         seen.extend(prompts)
         return [sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))]
@@ -455,6 +460,7 @@ def test_a_failed_reduce_falls_back_to_the_raw_findings(monkeypatch):
 
     class _Meta:
         chunks = [{"i": 0}, {"i": 1}]
+        chunk_strategy = "lines"
 
     class _Store:
         def get(self, ctx_id):
@@ -466,7 +472,7 @@ def test_a_failed_reduce_falls_back_to_the_raw_findings(monkeypatch):
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(srv, "STORE", _Store())
     monkeypatch.setattr(srv, "log_event", lambda log, evt, **f: events.append((evt, f)))
-    monkeypatch.setattr(srv, "sub_query_batch", lambda prompts, model, concurrency=1: [
+    monkeypatch.setattr(srv, "sub_query_batch", lambda prompts, model, concurrency=1, **kw: [
         sq.SubResult(i, f"finding {i}", 10, 3) for i in range(len(prompts))])
     monkeypatch.setattr(srv, "sub_query",
                         lambda *a, **k: sq.SubResult(0, "", 0, 0, error="reduce blew up"))
@@ -502,6 +508,7 @@ def _batch_over(monkeypatch, results, *, n_chunks=3, reduce=True, sub_context_to
 
     class _Meta:
         chunks = [{"i": i} for i in range(n_chunks)]
+        chunk_strategy = "lines"
 
     class _Store:
         def get(self, ctx_id):
@@ -512,7 +519,8 @@ def _batch_over(monkeypatch, results, *, n_chunks=3, reduce=True, sub_context_to
 
     monkeypatch.setattr(srv, "STORE", _Store())
     monkeypatch.setattr(srv, "log_event", lambda log, evt, **f: None)
-    monkeypatch.setattr(srv, "sub_query_batch", lambda prompts, model, concurrency=1: results)
+    monkeypatch.setattr(srv, "sub_query_batch",
+                        lambda prompts, model, concurrency=1, **kw: results)
     monkeypatch.setattr(srv, "sub_query",
                         lambda *a, **k: sq.SubResult(0, "synthesis", 1, 1))
     if sub_context_tokens is not None:

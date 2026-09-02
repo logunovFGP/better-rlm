@@ -1,4 +1,6 @@
 import dataclasses
+import logging
+import sys
 from pathlib import Path
 
 import pytest
@@ -37,3 +39,55 @@ def _no_test_starts_a_real_container(monkeypatch, request):
         )
 
     monkeypatch.setattr(DockerREPL, "setup", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _no_test_writes_to_the_real_rlm_dir(tmp_path, monkeypatch):
+    """Redirect every on-disk path the server writes to into this test's tmp_path.
+
+    Modules resolve their config ONCE at import (``server.CFG``, ``subquery._CFG``,
+    ``ratelimit._CFG``), so a test that exercises a tool writes wherever the operator's
+    real config points — ``~/.rlm/contexts`` for persisted chunk answers and
+    ``~/.rlm/usage.jsonl`` for the spend ledger. The log dir already showed what that
+    costs: 18 of 20 files in the live log dir were pytest debris. The ledger would be
+    worse, because fake spend recorded there then skews the budget gate of a REAL run.
+
+    Redirected at the module globals rather than by passing a tmp config to each test:
+    these paths are read through the globals from inside worker threads and result
+    callbacks, where no fixture argument reaches.
+    """
+    tmp_cfg = dataclasses.replace(
+        config_mod.load_config(),
+        store_dir=tmp_path / "contexts",
+        log_dir=tmp_path / "logs",
+        budget_ledger=tmp_path / "usage.jsonl",
+        budget_state=tmp_path / "budget.json",
+    )
+    for mod_name, attr in (("src.server", "CFG"), ("src.subquery", "_CFG"),
+                           ("src.ratelimit", "_CFG")):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, attr):
+            monkeypatch.setattr(mod, attr, tmp_cfg, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_test_writes_to_the_real_log_dir():
+    """Keep pytest out of the operator's ~/.rlm/logs.
+
+    src/server.py installs a RotatingFileHandler on the process-global "rlm-mcp"
+    logger at IMPORT time (``LOG = configure_logging(CFG)``) against the REAL config,
+    so every test that imports it logged into the user's live log dir. Measured: 18 of
+    20 files there were pytest debris (ctx_x, root-m, the mock "OAuth session expired"),
+    which also supplied 25 of the 26 outcome=error records — and since one run creates
+    ~15 files against a retention cap of 20, a single `pytest` evicted the real session
+    logs it was supposed to sit beside.
+
+    Stripping the handler is enough because it is opened with ``delay=True``: no record
+    emitted through it means no file is ever created. Function-scoped so it also undoes
+    a re-install by an earlier test; a test that wants a file handler adds its own
+    inside the test body (test_logsetup.py), which runs after this.
+    """
+    logger = logging.getLogger("rlm-mcp")
+    for h in [h for h in logger.handlers if isinstance(h, logging.FileHandler)]:
+        logger.removeHandler(h)
+        h.close()

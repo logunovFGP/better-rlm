@@ -32,6 +32,7 @@ from contextlib import contextmanager
 
 import anthropic
 
+from . import budget
 from .config import load_config
 from .logsetup import log_event
 
@@ -91,9 +92,16 @@ def _next_delay(exc: BaseException, attempt: int, waits: list[float]) -> float |
     """Seconds to wait before retrying ``exc``, or None if it must propagate.
 
     The single home of the retry decision, so the sync and async wrappers below
-    cannot drift apart.
+    cannot drift apart — which is also why the budget's ceiling is learned here.
     """
-    if not _is_rate_limit(exc) or attempt >= len(waits):
+    rate_limited = _is_rate_limit(exc)
+    if rate_limited and attempt == 0:
+        # First 429 of this call IS the wall: whatever the window ledger holds right now
+        # is an upper bound on the subscription's real ceiling. Recording it here — the
+        # one place every transport's rate-limit error passes through — is what lets the
+        # next run gate against a real number instead of "unknown".
+        budget.note_limit_hit(_CFG)
+    if not rate_limited or attempt >= len(waits):
         return None
     return max(waits[attempt], _retry_after_seconds(exc))
 

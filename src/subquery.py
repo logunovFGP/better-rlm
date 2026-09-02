@@ -13,8 +13,9 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
+from . import budget
 from .auth import resolve_auth_mode
-from .config import load_config
+from .config import estimate_tokens, load_config
 from .logsetup import bind_rid, current_rid
 from .ratelimit import is_fatal_auth, retry_and_queue_retries
 from .transport import get_transport
@@ -49,13 +50,33 @@ def sub_query(prompt: str, model: str, *, max_tokens: int = 4096,
               system: str | None = None) -> SubResult:
     try:
         text, itok, otok, used = _call(model, prompt, max_tokens, system)
+        # Ledger gets our LOCAL estimate of what we sent, not `itok`: the CLI transport
+        # reported 1027 input tokens for a batch whose real input was ~3M, so a budget
+        # built on the reported number would promise headroom that does not exist.
+        budget.record(_CFG, used or model, estimate_tokens(prompt), otok)
         return SubResult(0, text, itok, otok, model=used)
     except Exception as exc:  # surfaced to caller, not swallowed
         return SubResult(0, "", 0, 0, error=str(exc))
 
 
 def sub_query_batch(prompts: Sequence[str | Callable[[], str]], model: str, *, concurrency: int,
-                    max_tokens: int = 2048, system: str | None = None) -> list[SubResult]:
+                    max_tokens: int = 2048, system: str | None = None,
+                    indices: Sequence[int] | None = None,
+                    gate: "budget.Gate | None" = None,
+                    on_result: Callable[[SubResult], None] | None = None) -> list[SubResult]:
+    """Map ``prompts`` over the sub-model concurrently.
+
+    ``indices``  report each result under its ORIGINAL chunk index rather than its
+                 position in this list. A resumed batch submits only the unanswered
+                 chunks, so position and chunk index stop agreeing — and every caller
+                 that labels, persists or re-orders results keys on the chunk index.
+    ``gate``     budget.Gate consulted before each dispatch. When it closes, the
+                 remaining prompts come back marked ``deferred — …`` instead of being
+                 sent: a deferred chunk is resumable work, not a failure.
+    ``on_result`` called with each successful result as it lands, so the caller can
+                 persist it immediately. An interrupted run keeps what it paid for only
+                 if the answer reaches disk before the process dies.
+    """
     # Pool workers start with a fresh contextvars context, so capture the caller's
     # correlation id here and re-bind it inside each worker — otherwise the nested
     # cli_spawn/retry events lose the originating tool call's rid.
@@ -69,19 +90,34 @@ def sub_query_batch(prompts: Sequence[str | Callable[[], str]], model: str, *, c
     fatal: list[str] = []
 
     def work(item: tuple[int, str | Callable[[], str]]) -> SubResult:
-        idx, entry = item
+        pos, entry = item
+        idx = indices[pos] if indices is not None else pos
         if fatal:
             return SubResult(idx, "", 0, 0, error=f"skipped — {fatal[0]}")
+        if gate is not None and gate.closed:
+            return SubResult(idx, "", 0, 0, error="deferred — session budget reached")
         try:
             # Built here, not by the caller: a lazy builder keeps only `concurrency`
             # prompt strings live at once instead of the whole batch (Leaf 3 / option D).
             prompt = entry() if callable(entry) else entry
         except Exception as exc:
             return SubResult(idx, "", 0, 0, error=f"prompt build failed — {exc}")
+        # Asked AFTER the prompt is built because only then is its size known, and the
+        # gate reserves against the size of the call it is about to admit.
+        est_in = estimate_tokens(prompt)
+        if gate is not None and not gate.allow(est_in + max_tokens):
+            return SubResult(idx, "", 0, 0, error="deferred — session budget reached")
         with bind_rid(parent_rid):
             try:
                 text, itok, otok, used = _call(model, prompt, max_tokens, system)
-                return SubResult(idx, text, itok, otok, model=used)
+                budget.record(_CFG, used or model, est_in, otok)
+                res = SubResult(idx, text, itok, otok, model=used)
+                if on_result is not None:
+                    try:
+                        on_result(res)
+                    except Exception:  # persistence must not lose an answer we just paid for
+                        pass
+                return res
             except Exception as exc:
                 if is_fatal_auth(exc):
                     fatal.append(str(exc))
