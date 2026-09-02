@@ -50,10 +50,8 @@ def sub_query(prompt: str, model: str, *, max_tokens: int = 4096,
               system: str | None = None) -> SubResult:
     try:
         text, itok, otok, used = _call(model, prompt, max_tokens, system)
-        # Ledger gets our LOCAL estimate of what we sent, not `itok`: the CLI transport
-        # reported 1027 input tokens for a batch whose real input was ~3M, so a budget
-        # built on the reported number would promise headroom that does not exist.
-        budget.record(_CFG, used or model, estimate_tokens(prompt), otok)
+        # No budget.record here: transport._LedgeredTransport records EVERY completion,
+        # including the engine's, so recording again would double-count this one.
         return SubResult(0, text, itok, otok, model=used)
     except Exception as exc:  # surfaced to caller, not swallowed
         return SubResult(0, "", 0, 0, error=str(exc))
@@ -110,8 +108,7 @@ def sub_query_batch(prompts: Sequence[str | Callable[[], str]], model: str, *, c
         with bind_rid(parent_rid):
             try:
                 text, itok, otok, used = _call(model, prompt, max_tokens, system)
-                budget.record(_CFG, used or model, est_in, otok)
-                res = SubResult(idx, text, itok, otok, model=used)
+                res = SubResult(idx, text, itok, otok, model=used)   # ledgered in transport
                 if on_result is not None:
                     try:
                         on_result(res)

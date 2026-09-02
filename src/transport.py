@@ -34,7 +34,8 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from .config import Config
+from . import budget
+from .config import Config, estimate_tokens
 from .logsetup import log_event
 
 _LOG = logging.getLogger("rlm-mcp")
@@ -537,10 +538,58 @@ class EngineClientTransport(CompletionTransport):
 _CACHE: dict[str, CompletionTransport] = {}
 
 
+class _LedgeredTransport(CompletionTransport):
+    """Wraps a transport so every completion lands in the session-window spend ledger.
+
+    Placed HERE, at the one point all callers resolve a transport through, because the
+    alternative was recording per call site and the call sites are not equivalent: our
+    own map-reduce goes through subquery.py, but rlm_query's recursive fan-out goes
+    through the engine's client, which src/auth.py rebinds onto this same factory. With
+    the recording in subquery.py only, an rlm_query run — the most expensive tool here —
+    spent its entire window budget invisibly, and rlm_estimate would then report
+    headroom that had already been consumed.
+
+    Input tokens are the LOCAL estimate of the prompt, never the transport's report:
+    the CLI path reported 1,027 input tokens for a batch whose real input was ~3M.
+    """
+
+    def __init__(self, inner: CompletionTransport, cfg: Config):
+        self._inner = inner
+        self._cfg = cfg
+
+    @property
+    def inner(self) -> CompletionTransport:
+        """The wrapped transport. Public because WHICH backend got selected is a real
+        behaviour with its own tests, and wrapping must not hide it behind isinstance."""
+        return self._inner
+
+    def __getattr__(self, name):
+        # auth_label and friends are read off the concrete transport; forward anything
+        # this wrapper does not define so wrapping stays invisible to callers.
+        return getattr(self._inner, name)
+
+    @staticmethod
+    def _est_in(messages: list[dict], system) -> int:
+        n = sum(len(str(m.get("content", ""))) for m in messages) + len(str(system or ""))
+        return estimate_tokens(n)
+
+    def complete(self, messages, system, model, max_tokens) -> CompletionResult:
+        res = self._inner.complete(messages, system, model, max_tokens)
+        budget.record(self._cfg, res.model or model,
+                      self._est_in(messages, system), res.output_tokens)
+        return res
+
+    async def acomplete(self, messages, system, model, max_tokens) -> CompletionResult:
+        res = await self._inner.acomplete(messages, system, model, max_tokens)
+        budget.record(self._cfg, res.model or model,
+                      self._est_in(messages, system), res.output_tokens)
+        return res
+
+
 def get_transport(auth_mode: str, cfg: Config) -> CompletionTransport:
     """Strategy selector. Anthropic: OAuth → CLI, apikey → SDK. Every other provider →
     the engine's own client. Cached per provider+mode so clients and the neutral cwd are
-    reused across calls."""
+    reused across calls. Every transport is wrapped so its spend reaches the ledger."""
     provider = (cfg.provider or "anthropic").strip().lower()
     ckey = f"{provider}:{auth_mode}"
     transport = _CACHE.get(ckey)
@@ -549,5 +598,6 @@ def get_transport(auth_mode: str, cfg: Config) -> CompletionTransport:
             transport = EngineClientTransport(cfg)
         else:
             transport = CliTransport(cfg) if auth_mode == "oauth" else ApiTransport(cfg)
+        transport = _LedgeredTransport(transport, cfg)
         _CACHE[ckey] = transport
     return transport

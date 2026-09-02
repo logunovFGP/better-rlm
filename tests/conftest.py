@@ -6,6 +6,15 @@ from pathlib import Path
 import pytest
 
 import src.config as config_mod
+# Imported HERE, at conftest module scope, and not left to whichever test imports it
+# first: the redirect fixture below can only patch a module that is already in
+# sys.modules, and src.server is imported inside test function bodies. That made the
+# redirect conditional on import order — it silently skipped, tests wrote chunk answers
+# into the operator's real ~/.rlm/contexts, and a resume test then PASSED by reading its
+# own leftovers from a previous run. A test that passes because of pollution is worse
+# than one that fails.
+import src.server  # noqa: F401 - imported for its side effect on sys.modules
+
 
 
 @pytest.fixture
@@ -66,8 +75,11 @@ def _no_test_writes_to_the_real_rlm_dir(tmp_path, monkeypatch):
     for mod_name, attr in (("src.server", "CFG"), ("src.subquery", "_CFG"),
                            ("src.ratelimit", "_CFG")):
         mod = sys.modules.get(mod_name)
-        if mod is not None and hasattr(mod, attr):
-            monkeypatch.setattr(mod, attr, tmp_cfg, raising=False)
+        assert mod is not None, (
+            f"{mod_name} is not imported, so its paths were NOT redirected and this test "
+            "would write into the operator's real ~/.rlm. Import it at conftest scope."
+        )
+        monkeypatch.setattr(mod, attr, tmp_cfg, raising=False)
 
 
 @pytest.fixture(autouse=True)

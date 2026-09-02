@@ -299,3 +299,54 @@ def test_a_budget_stop_leaves_a_resumable_gap_not_a_lost_run(monkeypatch, batch_
                             for i in indices])
     srv.rlm_sub_query_batch("ctx_1", "audit every file", reduce=False)
     assert asked[0] == [0, 1, 2, 3] and len(asked) == 1
+
+
+def test_every_completion_reaches_the_ledger_including_the_engine_path(bcfg, monkeypatch):
+    """rlm_query's recursive fan-out must be as visible to the budget as our own batch.
+
+    Recording spend in subquery.py only left the single most expensive tool — rlm_query,
+    whose sub-calls go through the engine's client (rebound onto get_transport by
+    src/auth.py) — spending its whole window budget invisibly, so rlm_estimate would then
+    report headroom that had already been consumed. Recording in the transport is what
+    makes "all model calls" mean all of them.
+    """
+    import src.transport as tp
+
+    class _Backend:
+        def complete(self, messages, system, model, max_tokens):
+            return tp.CompletionResult(text="ok", input_tokens=1, output_tokens=64,
+                                       model="claude-haiku-4-5")
+
+        async def acomplete(self, messages, system, model, max_tokens):
+            return self.complete(messages, system, model, max_tokens)
+
+    monkeypatch.setattr(tp, "_CACHE", {})
+    monkeypatch.setattr(tp, "budget", budget)
+    ledgered = tp._LedgeredTransport(_Backend(), bcfg)
+
+    ledgered.complete([{"role": "user", "content": "x" * 4000}], None, "m", 512)
+
+    s = budget.spent(bcfg)
+    assert s.calls == 1
+    # Input is the LOCAL estimate of the prompt (~4000 chars / 4), not the backend's
+    # reported input_tokens=1 -- that under-count is the whole reason this exists.
+    assert s.tokens > 1000, f"input was taken from the transport's report: {s.tokens}"
+
+
+def test_the_ledger_wrapper_does_not_hide_which_backend_was_chosen(bcfg):
+    """Wrapping every transport must stay invisible to callers that ask what they got."""
+    import src.transport as tp
+
+    class _Backend:
+        def complete(self, *a):
+            raise AssertionError("not called")
+
+        async def acomplete(self, *a):
+            raise AssertionError("not called")
+
+        auth_label = "cli"
+
+    inner = _Backend()
+    w = tp._LedgeredTransport(inner, bcfg)
+    assert w.inner is inner
+    assert w.auth_label == "cli", "attribute forwarding broke; wrapping is not transparent"

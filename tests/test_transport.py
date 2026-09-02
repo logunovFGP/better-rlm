@@ -60,10 +60,15 @@ def test_content_blocks_join_to_text():
 
 
 # --------------------------- strategy selection --------------------------- #
+def inner_of(transport):
+    """Look through the ledger wrapper get_transport applies to every backend."""
+    return getattr(transport, "inner", transport)
+
+
 def test_get_transport_selects_by_mode(cfg):
     tp._CACHE.clear()
-    assert isinstance(get_transport("oauth", cfg), CliTransport)
-    assert isinstance(get_transport("apikey", cfg), ApiTransport)
+    assert isinstance(inner_of(get_transport("oauth", cfg)), CliTransport)
+    assert isinstance(inner_of(get_transport("apikey", cfg)), ApiTransport)
     tp._CACHE.clear()
 
 
@@ -75,15 +80,15 @@ def test_get_transport_selects_by_provider(cfg, monkeypatch):
     tp._CACHE.clear()
     monkeypatch.setenv("GEMINI_API_KEY", "dummy-not-a-real-key")
     assert cfg.provider == "anthropic"                      # default = the local run
-    assert isinstance(get_transport("oauth", cfg), CliTransport)
+    assert isinstance(inner_of(get_transport("oauth", cfg)), CliTransport)
 
     for provider in ("gemini", "openai", "azure_openai", "portkey"):
         other = dataclasses.replace(cfg, provider=provider)
         t = get_transport("apikey", other)
-        assert isinstance(t, tp.EngineClientTransport), provider
+        assert isinstance(inner_of(t), tp.EngineClientTransport), provider
         assert get_transport("apikey", other) is t          # cached per provider
     # the anthropic entry must not have been clobbered by the shared "apikey" mode
-    assert isinstance(get_transport("oauth", cfg), CliTransport)
+    assert isinstance(inner_of(get_transport("oauth", cfg)), CliTransport)
     tp._CACHE.clear()
 
 
