@@ -240,34 +240,12 @@ def test_fresh_clears_only_the_matching_question(bcfg):
 
 
 # --------------------------- end-to-end resume through the tool --------------------- #
-def _stub_batch_ctx(monkeypatch, n_chunks=4):
-    """A stub context of n_chunks, wired into rlm_sub_query_batch."""
-    import src.server as srv
-
-    class _Meta:
-        chunks = [{"i": i, "est_tokens": 1000} for i in range(n_chunks)]
-        chunk_strategy = "lines"
-
-    class _Store:
-        def get(self, ctx_id):
-            return _Meta()
-
-        def read_chunk(self, ctx_id, i):
-            return f"chunk{i}"
-
-    monkeypatch.setattr(srv, "STORE", _Store())
-    monkeypatch.setattr(srv, "log_event", lambda log, evt, **f: None)
-    monkeypatch.setattr(srv.models, "select", lambda cfg, role: "claude-haiku-4-5")
-    monkeypatch.setattr(srv.transport, "auth_label", lambda cfg: "test")
-    return srv
-
-
-def test_a_second_run_pays_only_for_the_chunks_it_is_missing(monkeypatch):
+def test_a_second_run_pays_only_for_the_chunks_it_is_missing(monkeypatch, batch_ctx):
     """THE headline fix. The incident was a 30-minute run that returned nothing and would
     have cost the same again. Here the second call must make model calls only for what
     the first did not finish."""
     import src.subquery as sq
-    srv = _stub_batch_ctx(monkeypatch, n_chunks=4)
+    srv, _events = batch_ctx(4)
     asked: list[list[int]] = []
 
     def fake_batch(prompts, model, concurrency=1, indices=None, on_result=None, **kw):
@@ -287,11 +265,11 @@ def test_a_second_run_pays_only_for_the_chunks_it_is_missing(monkeypatch):
     assert "finding 2" in out, "a cached answer was dropped from the report"
 
 
-def test_a_budget_stop_leaves_a_resumable_gap_not_a_lost_run(monkeypatch):
+def test_a_budget_stop_leaves_a_resumable_gap_not_a_lost_run(monkeypatch, batch_ctx):
     """A stopped run must (a) keep what it bought, (b) say it is partial, and (c) resume
     at the gap. Losing any of the three reproduces the original incident."""
     import src.subquery as sq
-    srv = _stub_batch_ctx(monkeypatch, n_chunks=4)
+    srv, _events = batch_ctx(4)
     asked: list[list[int]] = []
 
     def stop_after_two(prompts, model, concurrency=1, indices=None, on_result=None, **kw):

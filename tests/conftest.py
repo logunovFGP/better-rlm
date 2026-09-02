@@ -91,3 +91,51 @@ def _no_test_writes_to_the_real_log_dir():
     for h in [h for h in logger.handlers if isinstance(h, logging.FileHandler)]:
         logger.removeHandler(h)
         h.close()
+
+
+@pytest.fixture
+def batch_ctx(monkeypatch):
+    """Factory for a stub context wired into the batch tools, with captured log events.
+
+    Lesson taken from the clinemm suite (mock factories with captured spies; fixture
+    builders with partial overrides) after this repo paid for its absence: the same
+    ``_Meta``/``_Store`` pair was hand-copied into eight tests, so adding one field the
+    production path had always read — ``chunk_strategy`` — meant editing eight stubs, and
+    missing one would have failed as a confusing AttributeError inside a tool rather than
+    as a missing-stub error. One factory makes that class of drift impossible.
+
+    Returns ``(srv, events)``: the server module with STORE/models/transport/log_event
+    stubbed, and the list every log_event call lands in. Tests that do not care about the
+    log simply ignore the second element — capturing unconditionally costs nothing and
+    means a test can start asserting on it without rewiring its setup.
+    """
+    def _make(n_chunks: int = 3, *, est_tokens: int = 1000, strategy: str = "lines",
+              on_read=None):
+        import src.server as srv
+
+        class _Meta:
+            chunks = [{"i": i, "est_tokens": est_tokens} for i in range(n_chunks)]
+            chunk_strategy = strategy
+
+        class _Store:
+            def get(self, ctx_id):
+                return _Meta()
+
+            def read_chunk(self, ctx_id, i):
+                if on_read is not None:
+                    on_read(i)   # lets a test prove WHEN a chunk was read, not just that it was
+                return f"chunk{i}"
+
+            def read_text(self, ctx_id):
+                return "".join(f"chunk{i}\n" for i in range(n_chunks))
+
+        events: list[tuple[str, dict]] = []
+        monkeypatch.setattr(srv, "STORE", _Store())
+        monkeypatch.setattr(srv, "log_event", lambda log, evt, **f: events.append((evt, f)))
+        # models.select resolves the auth mode, which raises on a machine with no CLI and
+        # no key — every CI runner. Pin it, as the suite's other fixtures do.
+        monkeypatch.setattr(srv.models, "select", lambda cfg, role: "claude-haiku-4-5")
+        monkeypatch.setattr(srv.transport, "auth_label", lambda cfg: "test")
+        return srv, events
+
+    return _make

@@ -42,6 +42,27 @@ def _pin_auth_discovery(monkeypatch):
     monkeypatch.setattr(srv.models, "select", lambda cfg, role: "claude-haiku-4-5")
 
 
+def test_the_shared_context_stub_still_matches_the_real_ContextMeta(batch_ctx):
+    """The stub must expose every field the batch path reads off a real context.
+
+    This is the drift that cost real time: `chunk_strategy` had always been on
+    ContextMeta, but the hand-copied stubs predated the code path that read it — so the
+    tools failed with `'_Meta' object has no attribute 'chunk_strategy'` in eight places
+    at once. Now there is one stub, and this asserts its surface against the real
+    dataclass, so the next field added to that path fails HERE with a clear message
+    rather than inside a tool call.
+    """
+    from src.context_store import ContextMeta
+
+    srv, _events = batch_ctx(2)
+    stub = srv.STORE.get("ctx_x")
+    for field in ("chunks", "chunk_strategy"):
+        assert hasattr(stub, field), f"the shared stub is missing {field!r}"
+        assert field in ContextMeta.__dataclass_fields__, (
+            f"{field!r} is stubbed but no longer exists on ContextMeta - the stub is stale"
+        )
+
+
 def test_auth_failure_parses_to_its_own_error_type():
     with pytest.raises(CliAuthError):
         _parse_cli_output(0, _AUTH_PAYLOAD, "", "claude-haiku-4-5")
@@ -65,14 +86,14 @@ def _run_batch(monkeypatch, exc, n=10):
     return calls, results
 
 
-def test_auth_failure_stops_the_fan_out(monkeypatch):
+def test_auth_failure_stops_the_fan_out(monkeypatch, batch_ctx):
     calls, results = _run_batch(monkeypatch, CliAuthError("OAuth session expired"))
     assert len(calls) == 1, "chunks after the first re-ran a call already known dead"
     assert len(results) == 10 and all(r.error for r in results)
     assert results[-1].error.startswith("skipped —")
 
 
-def test_ordinary_failure_does_not_discard_the_other_chunks(monkeypatch):
+def test_ordinary_failure_does_not_discard_the_other_chunks(monkeypatch, batch_ctx):
     calls, _ = _run_batch(monkeypatch, CliCompletionError("just this chunk"))
     assert len(calls) == 10, "a chunk-local failure must not abort the whole batch"
 
@@ -86,7 +107,7 @@ def _counting_builder(build_counts: list[int], i: int):
     return _build
 
 
-def test_batch_builds_prompts_lazily_one_per_worker(monkeypatch):
+def test_batch_builds_prompts_lazily_one_per_worker(monkeypatch, batch_ctx):
     calls: list[str] = []
     monkeypatch.setattr(sq, "_call", lambda model, prompt, max_tokens, system: (
         calls.append(prompt), ("ok", 1, 1, "m"))[1])
@@ -101,7 +122,7 @@ def test_batch_builds_prompts_lazily_one_per_worker(monkeypatch):
     assert all(not r.error for r in results)
 
 
-def test_batch_reports_prompt_build_failure_without_aborting(monkeypatch):
+def test_batch_reports_prompt_build_failure_without_aborting(monkeypatch, batch_ctx):
     calls: list[str] = []
     monkeypatch.setattr(sq, "_call", lambda model, prompt, max_tokens, system: (
         calls.append(prompt), ("ok", 1, 1, "m"))[1])
@@ -115,7 +136,7 @@ def test_batch_reports_prompt_build_failure_without_aborting(monkeypatch):
     assert calls == ["p0", "p2"], "the failing builder must not reach _call"
 
 
-def test_fatal_auth_skip_happens_before_building(monkeypatch):
+def test_fatal_auth_skip_happens_before_building(monkeypatch, batch_ctx):
     build_counts: list[int] = []
     builders = [_counting_builder(build_counts, i) for i in range(10)]
     monkeypatch.setattr(sq, "_call", lambda *a: (_ for _ in ()).throw(
@@ -137,14 +158,14 @@ def _login_ok(monkeypatch):
     return srv
 
 
-def test_probe_reports_failure_instead_of_raising(monkeypatch):
+def test_probe_reports_failure_instead_of_raising(monkeypatch, batch_ctx):
     srv = _login_ok(monkeypatch)
     monkeypatch.setattr(srv, "sub_query",
                         lambda *a, **k: sq.SubResult(0, "", 0, 0, error="OAuth session expired"))
     assert "FAILED — OAuth session expired" in srv._auth_probe_line()
 
 
-def test_probe_survives_a_transport_that_explodes(monkeypatch):
+def test_probe_survives_a_transport_that_explodes(monkeypatch, batch_ctx):
     srv = _login_ok(monkeypatch)
 
     def boom(*a, **k):
@@ -155,13 +176,13 @@ def test_probe_survives_a_transport_that_explodes(monkeypatch):
     assert line.startswith("\n- auth probe: FAILED — RuntimeError: socket closed")
 
 
-def test_probe_reports_ok_on_a_live_transport(monkeypatch):
+def test_probe_reports_ok_on_a_live_transport(monkeypatch, batch_ctx):
     srv = _login_ok(monkeypatch)
     monkeypatch.setattr(srv, "sub_query", lambda *a, **k: sq.SubResult(0, "ok", 1, 1))
     assert "auth probe: ok" in srv._auth_probe_line()
 
 
-def test_probe_is_skipped_when_the_free_check_already_knows_it_is_dead(monkeypatch):
+def test_probe_is_skipped_when_the_free_check_already_knows_it_is_dead(monkeypatch, batch_ctx):
     """Paying for a call whose answer is already known is the same waste the batch
     fail-fast exists to stop."""
     import src.server as srv
@@ -173,7 +194,7 @@ def test_probe_is_skipped_when_the_free_check_already_knows_it_is_dead(monkeypat
     assert called == [], "spent a model call it already knew would fail"
 
 
-def test_status_names_the_fix_when_the_cli_is_not_logged_in(monkeypatch):
+def test_status_names_the_fix_when_the_cli_is_not_logged_in(monkeypatch, batch_ctx):
     import src.server as srv
 
     monkeypatch.setattr(srv, "resolve_auth_mode_safe", lambda: "oauth")
@@ -183,30 +204,18 @@ def test_status_names_the_fix_when_the_cli_is_not_logged_in(monkeypatch):
     assert "claude auth login" in line and "claude setup-token" in line
 
 
-def test_status_says_nothing_about_cli_login_on_the_sdk_path(monkeypatch):
+def test_status_says_nothing_about_cli_login_on_the_sdk_path(monkeypatch, batch_ctx):
     import src.server as srv
 
     monkeypatch.setattr(srv, "resolve_auth_mode_safe", lambda: "apikey")
     assert srv._cli_login_line() == "", "no CLI is involved on the API-key path"
 
 
-def test_all_chunks_failing_is_reported_as_a_failed_tool_call(monkeypatch):
+def test_all_chunks_failing_is_reported_as_a_failed_tool_call(monkeypatch, batch_ctx):
     """100% failure is not a result with notes. Returning the ordinary success
     string here is how a dead login reads back as 'no findings'."""
-    import src.server as srv
+    srv, events = batch_ctx(2)
 
-    class _Meta:
-        chunks = [{"i": 0}, {"i": 1}]
-        chunk_strategy = "lines"
-
-    class _Store:
-        def get(self, ctx_id):
-            return _Meta()
-
-        def read_chunk(self, ctx_id, i):
-            return f"chunk{i}"
-
-    monkeypatch.setattr(srv, "STORE", _Store())
     monkeypatch.setattr(srv, "sub_query_batch", lambda *a, **k: [
         sq.SubResult(0, "", 0, 0, error="OAuth session expired"),
         sq.SubResult(1, "", 0, 0, error="skipped — OAuth session expired"),
@@ -297,28 +306,14 @@ def test_lm_handler_batch_does_not_abort_on_a_local_failure():
     assert len(calls) == 20, "a chunk-local failure aborted the batch"
 
 
-def test_map_start_is_logged_before_the_fan_out(monkeypatch):
+def test_map_start_is_logged_before_the_fan_out(monkeypatch, batch_ctx):
     """A 408-chunk batch runs for tens of minutes. Logging the batch only when it
     RETURNS leaves an in-flight run as N indistinguishable cli_spawn lines with no
     ctx_id and no denominator — indistinguishable from hung. The record has to land
     before sub_query_batch is entered, not after it comes back.
     """
-    import src.server as srv
+    srv, events = batch_ctx(3)
 
-    class _Meta:
-        chunks = [{"i": 0}, {"i": 1}, {"i": 2}]
-        chunk_strategy = "lines"
-
-    class _Store:
-        def get(self, ctx_id):
-            return _Meta()
-
-        def read_chunk(self, ctx_id, i):
-            return f"chunk{i}"
-
-    events: list[tuple[str, dict]] = []
-    monkeypatch.setattr(srv, "STORE", _Store())
-    monkeypatch.setattr(srv, "log_event", lambda log, evt, **f: events.append((evt, f)))
 
     seen_at_fan_out: list[list[str]] = []
 
@@ -336,25 +331,11 @@ def test_map_start_is_logged_before_the_fan_out(monkeypatch):
     assert (fields["chunks"], fields["total_chunks"]) == (2, 3)
 
 
-def _logged_batch(monkeypatch, reduce, reduce_result=None):
+def _logged_batch(monkeypatch, batch_ctx, reduce, reduce_result=None):
     """Drive rlm_sub_query_batch over a 2-chunk stub context, returning the sub_batch
     records it logged. Each chunk reports 10 in / 3 out, so the totals are checkable."""
-    import src.server as srv
+    srv, events = batch_ctx(2)
 
-    class _Meta:
-        chunks = [{"i": 0}, {"i": 1}]
-        chunk_strategy = "lines"
-
-    class _Store:
-        def get(self, ctx_id):
-            return _Meta()
-
-        def read_chunk(self, ctx_id, i):
-            return f"chunk{i}"
-
-    events: list[tuple[str, dict]] = []
-    monkeypatch.setattr(srv, "STORE", _Store())
-    monkeypatch.setattr(srv, "log_event", lambda log, evt, **f: events.append((evt, f)))
     monkeypatch.setattr(srv, "sub_query_batch", lambda prompts, model, concurrency=1, **kw: [
         sq.SubResult(i, f"finding {i}", 10, 3) for i in range(len(prompts))])
     if reduce_result is not None:
@@ -363,34 +344,23 @@ def _logged_batch(monkeypatch, reduce, reduce_result=None):
     return [f for e, f in events if e == "sub_batch"]
 
 
-def test_a_clean_map_is_logged_with_its_chunk_and_token_counts(monkeypatch):
+def test_a_clean_map_is_logged_with_its_chunk_and_token_counts(monkeypatch, batch_ctx):
     """The batch record used to be emitted only when a chunk ERRORED, so a fully
     successful run left no chunk count and no token totals anywhere — the parent
     tool_call carries neither, leaving N anonymous cli_spawn lines under one rid.
     """
-    rec = next(f for f in _logged_batch(monkeypatch, reduce=False) if f["phase"] == "map")
+    rec = next(f for f in _logged_batch(monkeypatch, batch_ctx, reduce=False) if f["phase"] == "map")
     assert (rec["chunks"], rec["errors"]) == (2, 0)
     assert (rec["itok"], rec["otok"]) == (20, 6)
     assert rec["err_sample"] is None
     assert rec["ctx_id"] == "ctx_x", "every sub_batch phase carries ctx_id, not just map_start"
 
 
-def test_rlm_sub_query_batch_passes_builders_not_strings(monkeypatch):
+def test_rlm_sub_query_batch_passes_builders_not_strings(monkeypatch, batch_ctx):
     """Leaf 3: the server must hand sub_query_batch lazy builders, not a materialized
     list of full prompt strings — that list is ~= the whole context held in RAM for
     the entire batch (the defect this plan fixes)."""
-    import src.server as srv
-
-    class _Meta:
-        chunks = [{"i": 0}, {"i": 1}, {"i": 2}]
-        chunk_strategy = "lines"
-
-    class _Store:
-        def get(self, ctx_id):
-            return _Meta()
-
-        def read_chunk(self, ctx_id, i):
-            return f"chunk{i}"
+    srv, events = batch_ctx(3)
 
     seen: list = []
 
@@ -398,7 +368,6 @@ def test_rlm_sub_query_batch_passes_builders_not_strings(monkeypatch):
         seen.extend(prompts)
         return [sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))]
 
-    monkeypatch.setattr(srv, "STORE", _Store())
     monkeypatch.setattr(srv, "sub_query_batch", fake_batch)
     srv.rlm_sub_query_batch("ctx_x", "audit every file", reduce=False)
 
@@ -410,24 +379,11 @@ def test_rlm_sub_query_batch_passes_builders_not_strings(monkeypatch):
     ]
 
 
-def test_max_chunks_caps_how_many_prompts_get_built(monkeypatch):
+def test_max_chunks_caps_how_many_prompts_get_built(monkeypatch, batch_ctx):
     """The other half of laziness: with max_chunks set, only the SELECTED chunks may be
     built -- and none of them before the pool runs."""
-    import src.server as srv
-
-    class _Meta:
-        chunks = [{"i": 0}, {"i": 1}, {"i": 2}]
-        chunk_strategy = "lines"
-
     builds: list[int] = []
-
-    class _Store:
-        def get(self, ctx_id):
-            return _Meta()
-
-        def read_chunk(self, ctx_id, i):
-            builds.append(i)
-            return f"chunk{i}"
+    srv, _events = batch_ctx(3, on_read=builds.append)
 
     seen: list = []
 
@@ -436,7 +392,6 @@ def test_max_chunks_caps_how_many_prompts_get_built(monkeypatch):
         seen.extend(prompts)
         return [sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))]
 
-    monkeypatch.setattr(srv, "STORE", _Store())
     monkeypatch.setattr(srv, "sub_query_batch", fake_batch)
     srv.rlm_sub_query_batch("ctx_x", "audit", max_chunks=2, reduce=False)
 
@@ -444,7 +399,7 @@ def test_max_chunks_caps_how_many_prompts_get_built(monkeypatch):
     assert [p() for p in seen] and builds == [0, 1], "built a chunk max_chunks excluded"
 
 
-def test_a_failed_reduce_falls_back_to_the_raw_findings(monkeypatch):
+def test_a_failed_reduce_falls_back_to_the_raw_findings(monkeypatch, batch_ctx):
     """A reduce call that fails must not discard the map work that succeeded.
 
     The whole point is the fallback: the map spent N model calls, and a failed synthesis
@@ -456,22 +411,8 @@ def test_a_failed_reduce_falls_back_to_the_raw_findings(monkeypatch):
     no-op with real inputs (verified by mutation: removing the `if not red.error` guard
     breaks nothing). That guard is defensive, not load-bearing.
     """
-    import src.server as srv
+    srv, events = batch_ctx(2)
 
-    class _Meta:
-        chunks = [{"i": 0}, {"i": 1}]
-        chunk_strategy = "lines"
-
-    class _Store:
-        def get(self, ctx_id):
-            return _Meta()
-
-        def read_chunk(self, ctx_id, i):
-            return f"chunk{i}"
-
-    events: list[tuple[str, dict]] = []
-    monkeypatch.setattr(srv, "STORE", _Store())
-    monkeypatch.setattr(srv, "log_event", lambda log, evt, **f: events.append((evt, f)))
     monkeypatch.setattr(srv, "sub_query_batch", lambda prompts, model, concurrency=1, **kw: [
         sq.SubResult(i, f"finding {i}", 10, 3) for i in range(len(prompts))])
     monkeypatch.setattr(srv, "sub_query",
@@ -487,10 +428,10 @@ def test_a_failed_reduce_falls_back_to_the_raw_findings(monkeypatch):
     assert rec["reduce_error"] == "reduce blew up"
 
 
-def test_a_successful_reduce_is_logged_with_the_batch_total(monkeypatch):
+def test_a_successful_reduce_is_logged_with_the_batch_total(monkeypatch, batch_ctx):
     """A reduce that SUCCEEDS still spends a call and tokens. Logging only the failure
     left those in no record, so the map totals understated every reduce=True batch."""
-    recs = _logged_batch(monkeypatch, reduce=True,
+    recs = _logged_batch(monkeypatch, batch_ctx, reduce=True,
                          reduce_result=sq.SubResult(0, "synthesis", 5, 2))
     rec = next(f for f in recs if f["phase"] == "reduce")
     assert (rec["itok"], rec["otok"]) == (25, 8), "map 20/6 + reduce 5/2"
@@ -502,23 +443,10 @@ def test_a_successful_reduce_is_logged_with_the_batch_total(monkeypatch):
 # All are "the batch partly worked" paths: the map spent real model calls, so each must
 # still hand back the per-chunk findings rather than an error or an empty answer.
 
-def _batch_over(monkeypatch, results, *, n_chunks=3, reduce=True, sub_context_tokens=None):
+def _batch_over(monkeypatch, batch_ctx, results, *, n_chunks=3, reduce=True, sub_context_tokens=None):
     """Drive rlm_sub_query_batch over a stub context whose map returns `results`."""
-    import src.server as srv
+    srv, events = batch_ctx(n_chunks)
 
-    class _Meta:
-        chunks = [{"i": i} for i in range(n_chunks)]
-        chunk_strategy = "lines"
-
-    class _Store:
-        def get(self, ctx_id):
-            return _Meta()
-
-        def read_chunk(self, ctx_id, i):
-            return f"chunk{i}"
-
-    monkeypatch.setattr(srv, "STORE", _Store())
-    monkeypatch.setattr(srv, "log_event", lambda log, evt, **f: None)
     monkeypatch.setattr(srv, "sub_query_batch",
                         lambda prompts, model, concurrency=1, **kw: results)
     monkeypatch.setattr(srv, "sub_query",
@@ -530,10 +458,10 @@ def _batch_over(monkeypatch, results, *, n_chunks=3, reduce=True, sub_context_to
     return srv.rlm_sub_query_batch("ctx_x", "audit every file", reduce=reduce)
 
 
-def test_a_partly_failed_map_notes_the_skipped_chunks_and_keeps_the_rest(monkeypatch):
+def test_a_partly_failed_map_notes_the_skipped_chunks_and_keeps_the_rest(monkeypatch, batch_ctx):
     """One chunk erroring must not cost the others. The count in the note is what tells a
     reader the answer is partial -- without it a 2-of-3 result reads as complete."""
-    out = _batch_over(monkeypatch, [
+    out = _batch_over(monkeypatch, batch_ctx, [
         sq.SubResult(0, "finding 0", 10, 3),
         sq.SubResult(1, "", 0, 0, error="rate limited"),
         sq.SubResult(2, "finding 2", 10, 3),
@@ -544,10 +472,10 @@ def test_a_partly_failed_map_notes_the_skipped_chunks_and_keeps_the_rest(monkeyp
     assert "[ERROR: rate limited]" in out, "the failed chunk is shown, not hidden"
 
 
-def test_a_map_that_produced_no_findings_shows_the_raw_report(monkeypatch):
+def test_a_map_that_produced_no_findings_shows_the_raw_report(monkeypatch, batch_ctx):
     """Every chunk answered, but every answer was blank: there is nothing to reduce, and
     spending another model call on nothing is waste. Says so instead of returning empty."""
-    out = _batch_over(monkeypatch, [
+    out = _batch_over(monkeypatch, batch_ctx, [
         sq.SubResult(0, "   ", 10, 3),
         sq.SubResult(1, "", 10, 3),
     ], n_chunks=2, reduce=True)
@@ -556,12 +484,12 @@ def test_a_map_that_produced_no_findings_shows_the_raw_report(monkeypatch):
     assert "map over 2 chunks" in out, "should fall back to the raw map report"
 
 
-def test_findings_too_large_to_reduce_fall_back_to_raw_instead_of_being_truncated(monkeypatch):
+def test_findings_too_large_to_reduce_fall_back_to_raw_instead_of_being_truncated(monkeypatch, batch_ctx):
     """The reduce pass sends every finding in one prompt, so findings bigger than the
     sub-model's window cannot be reduced at all. Returning raw beats a call certain to
     fail with "prompt is too long", and the note names the two ways out."""
     big = "x" * 4000
-    out = _batch_over(monkeypatch, [
+    out = _batch_over(monkeypatch, batch_ctx, [
         sq.SubResult(0, big, 10, 3),
         sq.SubResult(1, big, 10, 3),
     ], n_chunks=2, reduce=True, sub_context_tokens=100)
