@@ -9,6 +9,7 @@ reference, not memory.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -320,6 +321,17 @@ def load_config() -> Config:
         store_dir=Path(os.path.expanduser(str(m["store_dir"]))),
         sources_file=Path(os.path.expanduser(str(m["sources_file"]))),
     )
+
+
+#: A source of wall-clock seconds. Injected as a keyword with ``time.time`` as the
+#: default, so production reads the real clock and a test can hand over a frozen one.
+#:
+#: ONLY wall-clock positions take this. ``time.monotonic()`` elapsed-duration reads
+#: (tool_call dur_ms, the throttle's inter-dispatch gap, cli_spawn timing) deliberately
+#: do NOT: freezing them makes every measured duration zero, which tests nothing and
+#: would break the throttle's spacing. The distinction is "where are we on the calendar"
+#: versus "how long did that take".
+Clock = Callable[[], float]
 
 
 def estimate_tokens(text_or_len: str | int) -> int:

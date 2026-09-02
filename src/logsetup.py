@@ -33,7 +33,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .config import Config, load_config
+from .config import Clock, Config, load_config
 from .output import bound_output
 
 LOGGER_NAME = "rlm-mcp"
@@ -137,7 +137,8 @@ def log_event(logger: logging.Logger, evt: str, **fields: object) -> None:
 # it delete because a live process holds it. The cap that protects disk is BYTES, and it
 # has headroom to absorb the overshoot.
 # --------------------------------------------------------------------------- #
-def _run_retention_sweep(cfg: Config, own_path: Path) -> None:
+def _run_retention_sweep(cfg: Config, own_path: Path, *,
+                         now_fn: Clock = time.time) -> None:
     """Prune ``rlm-mcp-*.log*`` in log_dir to stay within the file/byte/age caps.
 
     Best-effort and never fatal. Skips if another process swept within the cooldown
@@ -147,7 +148,7 @@ def _run_retention_sweep(cfg: Config, own_path: Path) -> None:
     try:
         log_dir = cfg.log_dir
         sentinel = log_dir / ".sweep"
-        now = time.time()
+        now = now_fn()
         # Cooldown: skip if a recent sweep already ran (avoids redundant concurrent sweeps).
         try:
             if now - sentinel.stat().st_mtime < cfg.log_sweep_cooldown_s:

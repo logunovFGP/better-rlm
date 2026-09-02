@@ -15,6 +15,7 @@ import src.batch as bt
 import src.budget as budget
 import src.results as results
 from src.config import load_config
+from tests.conftest import FrozenClock
 
 
 @pytest.fixture
@@ -351,3 +352,114 @@ def test_the_ledger_wrapper_does_not_hide_which_backend_was_chosen(bcfg):
     w = tp._LedgeredTransport(inner, bcfg)
     assert w.inner is inner
     assert w.auth_label == "cli", "attribute forwarding broke; wrapping is not transparent"
+
+
+# --------------------------- frozen clock: arithmetic that was uncoverable ---------- #
+def test_the_window_boundary_is_inclusive_at_exactly_one_window_ago(bcfg, clock):
+    """A record at EXACTLY now - window: in, or out? Unanswerable against a moving clock,
+    which is why the original window test used hour-wide margins and never pinned it.
+
+    ``spent`` asks for records ``>= now - window_s``, so the boundary record counts. That
+    is the safe direction: counting a just-expiring call keeps the estimate conservative,
+    where dropping it would over-report headroom right at the wall.
+    """
+    window_s = bcfg.session_window_h * 3600
+    budget.record(bcfg, "m", 100, 0, now=lambda: clock.now - window_s)       # exactly on it
+    budget.record(bcfg, "m", 7, 0, now=lambda: clock.now - window_s - 0.001)  # a hair past
+
+    s = budget.spent(bcfg, now=clock)
+    assert s.tokens == 100, "the boundary record must count and the one past it must not"
+    assert s.calls == 1
+
+
+def test_oldest_expires_in_s_says_when_headroom_next_grows(bcfg, clock):
+    """The only answer to "when can I run again", and it had no test. The window rolls
+    continuously — it does not reset on a clock boundary — so this is the oldest call's
+    timestamp plus one window, measured from now."""
+    window_s = bcfg.session_window_h * 3600
+    budget.record(bcfg, "m", 10, 0, now=lambda: clock.now - 3600)   # 1h ago
+    budget.record(bcfg, "m", 10, 0, now=lambda: clock.now - 600)    # 10m ago
+
+    s = budget.spent(bcfg, now=clock)
+    assert s.oldest_expires_in_s == pytest.approx(window_s - 3600)
+
+    clock.tick(3600)   # an hour passes; the oldest is now due to age out
+    assert budget.spent(bcfg, now=clock).oldest_expires_in_s == pytest.approx(window_s - 7200)
+
+
+def test_a_fully_expired_window_reports_no_spend_and_no_expiry(bcfg, clock):
+    budget.record(bcfg, "m", 500, 0, now=lambda: clock.now)
+    clock.tick(bcfg.session_window_h * 3600 + 1)
+
+    s = budget.spent(bcfg, now=clock)
+    assert (s.tokens, s.calls, s.oldest_expires_in_s) == (0, 0, None)
+
+
+def test_observed_call_latency_is_measured_from_the_ledger_spacing(bcfg, clock):
+    """The wall-time forecast comes from this, and it had no test because it is nothing
+    BUT clock arithmetic. Ten calls 20s apart at concurrency 3: the span is 180s over 9
+    gaps = 20s per slot, times 3 lanes = 60s of work per call.
+    """
+    cfg = dataclasses.replace(bcfg, subquery_concurrency=3)
+    for _ in range(10):
+        budget.record(cfg, "m", 1, 1, now=clock)
+        clock.tick(20)
+
+    assert budget._observed_call_s(cfg, clock) == pytest.approx(60.0)
+
+
+def test_too_little_history_falls_back_to_the_default_latency(bcfg, clock):
+    """Below the sample threshold the measurement is noise, so the forecast must use the
+    documented default rather than a confident number derived from three calls."""
+    for _ in range(3):
+        budget.record(bcfg, "m", 1, 1, now=clock)
+        clock.tick(5)
+
+    assert budget._observed_call_s(bcfg, clock) == budget._DEFAULT_CALL_S
+
+
+def test_an_implausible_measured_latency_is_rejected(bcfg, clock):
+    """A ledger spanning days (an idle server, not a slow one) would forecast a batch at
+    weeks. The measurement is only trusted inside a plausible band."""
+    for _ in range(10):
+        budget.record(bcfg, "m", 1, 1, now=clock)
+        clock.tick(6 * 3600)          # six hours between calls
+
+    assert budget._observed_call_s(bcfg, clock) == budget._DEFAULT_CALL_S
+
+
+def test_the_forecast_uses_the_measured_latency(bcfg, clock):
+    """End to end: measured latency feeds the wall-time estimate, so a slow transport
+    makes the forecast longer rather than the forecast staying a constant."""
+    cfg = dataclasses.replace(bcfg, subquery_concurrency=1)
+    for _ in range(10):
+        budget.record(cfg, "m", 1, 1, now=clock)
+        clock.tick(30)
+
+    est = budget.estimate_batch(cfg, [1000] * 4, prompt="p", max_output_tokens=100,
+                                reduce=False, now=clock)
+    assert est.seconds == pytest.approx(4 * 30.0)
+
+
+def test_the_learned_ceiling_records_when_it_was_observed(bcfg, clock):
+    """observed_at is what a future reader uses to judge whether a learned ceiling is
+    still current. It was written but never asserted."""
+    budget.record(bcfg, "m", 400_000, 0, now=clock)
+    budget.note_limit_hit(bcfg, now=clock)
+
+    state = json.loads(bcfg.budget_state.read_text(encoding="utf-8"))
+    assert state["learned_ceiling_tokens"] == 400_000
+    assert state["observed_at"] == clock.now
+
+
+def test_a_persisted_answer_carries_the_time_it_landed(bcfg, clock):
+    """Resume reads these back; a timestamp that drifts with the reader is not evidence
+    of when the answer was actually bought."""
+    key = results.key_for("audit", "haiku", "lines", 3)
+    results.append(bcfg, "ctx_1", key, results.Saved(0, "a", 1, 1, "haiku"), now=clock)
+    clock.tick(45)
+    results.append(bcfg, "ctx_1", key, results.Saved(1, "b", 1, 1, "haiku"), now=clock)
+
+    stamps = [json.loads(line)["ts"] for line
+              in results.path_for(bcfg, "ctx_1", key).read_text(encoding="utf-8").splitlines()]
+    assert stamps == [FrozenClock.START, FrozenClock.START + 45]

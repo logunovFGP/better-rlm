@@ -37,7 +37,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .config import Config, estimate_tokens
+from .config import Clock, Config, estimate_tokens
 
 #: Ledger lines older than the widest window we would ever ask about are dead weight.
 #: Pruned opportunistically on append, not by a scheduled job.
@@ -80,30 +80,31 @@ def _read_lines(path: Path, since_ts: float) -> list[dict]:
     return out
 
 
-def record(cfg: Config, model: str, itok: int, otok: int) -> None:
+def record(cfg: Config, model: str, itok: int, otok: int, *,
+           now: Clock = time.time) -> None:
     """Append one call's spend. Best-effort: ledger failure must never fail the call.
 
     ``itok`` is the caller's LOCAL estimate of what it sent, not the transport's report
     — see the module docstring for why the reported figure cannot be used.
     """
-    rec = {"ts": time.time(), "model": model, "itok": int(itok), "otok": int(otok)}
+    rec = {"ts": now(), "model": model, "itok": int(itok), "otok": int(otok)}
     try:
         cfg.budget_ledger.parent.mkdir(parents=True, exist_ok=True)
         with _LOCK:
             with open(cfg.budget_ledger, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec) + "\n")
-            _prune(cfg)
+            _prune(cfg, now)
     except OSError:
         pass
 
 
-def _prune(cfg: Config) -> None:
+def _prune(cfg: Config, now: Clock) -> None:
     """Drop records older than _PRUNE_AFTER_H once the file grows past a few hundred KB.
     Rewrite via tmp + os.replace so a crash cannot truncate the ledger."""
     try:
         if cfg.budget_ledger.stat().st_size < 512_000:
             return
-        keep = _read_lines(cfg.budget_ledger, time.time() - _PRUNE_AFTER_H * 3600)
+        keep = _read_lines(cfg.budget_ledger, now() - _PRUNE_AFTER_H * 3600)
         tmp = cfg.budget_ledger.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text("".join(json.dumps(r) + "\n" for r in keep), encoding="utf-8")
         os.replace(tmp, cfg.budget_ledger)
@@ -111,17 +112,17 @@ def _prune(cfg: Config) -> None:
         pass
 
 
-def spent(cfg: Config) -> Spend:
+def spent(cfg: Config, *, now: Clock = time.time) -> Spend:
     """This server's spend inside the current rolling window."""
-    now = time.time()
+    t = now()
     window_s = cfg.session_window_h * 3600
-    recs = _read_lines(cfg.budget_ledger, now - window_s)
+    recs = _read_lines(cfg.budget_ledger, t - window_s)
     if not recs:
         return Spend(0, 0, cfg.session_window_h)
     total = sum(int(r.get("itok", 0)) + int(r.get("otok", 0)) for r in recs)
-    oldest = min(float(r.get("ts", now)) for r in recs)
+    oldest = min(float(r.get("ts", t)) for r in recs)
     return Spend(total, len(recs), cfg.session_window_h,
-                 oldest_expires_in_s=max(0.0, (oldest + window_s) - now))
+                 oldest_expires_in_s=max(0.0, (oldest + window_s) - t))
 
 
 # --------------------------------------------------------------------------- #
@@ -150,14 +151,14 @@ def ceiling(cfg: Config) -> tuple[int | None, str]:
     return None, "unknown"
 
 
-def note_limit_hit(cfg: Config) -> None:
+def note_limit_hit(cfg: Config, *, now: Clock = time.time) -> None:
     """Record the window spend at the moment a usage limit was hit — that IS the ceiling.
 
     Called from the rate-limit path. The lowest observed wall wins: a limit hit at 800K
     proves the ceiling is not 1.2M, so a later, larger observation must not raise it.
     """
     try:
-        s = spent(cfg)
+        s = spent(cfg, now=now)
         if s.tokens <= 0:
             return
         st = _state(cfg)
@@ -165,7 +166,7 @@ def note_limit_hit(cfg: Config) -> None:
         st["learned_ceiling_tokens"] = (
             min(int(prev), s.tokens) if isinstance(prev, (int, float)) and prev > 0 else s.tokens
         )
-        st["observed_at"] = time.time()
+        st["observed_at"] = now()
         cfg.budget_state.parent.mkdir(parents=True, exist_ok=True)
         tmp = cfg.budget_state.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(st, indent=2), encoding="utf-8")
@@ -203,7 +204,7 @@ _DEFAULT_CALL_S = 45.0
 
 def estimate_batch(cfg: Config, chunk_tokens: list[int], *, prompt: str,
                    max_output_tokens: int, reduce: bool,
-                   done: set[int] | None = None) -> Estimate:
+                   done: set[int] | None = None, now: Clock = time.time) -> Estimate:
     """Forecast a map(-reduce) batch over ``chunk_tokens`` (est_tokens per chunk).
 
     ``done`` holds the indices (into ``chunk_tokens``) already answered and persisted, so
@@ -227,14 +228,14 @@ def estimate_batch(cfg: Config, chunk_tokens: list[int], *, prompt: str,
         calls += 1
     conc = max(1, cfg.subquery_concurrency)
     return Estimate(calls=calls, input_tokens=itok, output_tokens=otok,
-                    seconds=(calls / conc) * _observed_call_s(cfg),
+                    seconds=(calls / conc) * _observed_call_s(cfg, now),
                     chunks_total=len(chunk_tokens), chunks_todo=len(todo),
                     chunks_done=len(chunk_tokens) - len(todo))
 
 
-def _observed_call_s(cfg: Config) -> float:
+def _observed_call_s(cfg: Config, now: Clock = time.time) -> float:
     """Mean seconds per call, measured from the ledger when it has enough history."""
-    recs = _read_lines(cfg.budget_ledger, time.time() - _PRUNE_AFTER_H * 3600)
+    recs = _read_lines(cfg.budget_ledger, now() - _PRUNE_AFTER_H * 3600)
     stamps = sorted(float(r.get("ts", 0)) for r in recs)
     if len(stamps) < 8:
         return _DEFAULT_CALL_S
@@ -265,7 +266,7 @@ class Verdict:
         return d
 
 
-def judge(cfg: Config, est: Estimate) -> Verdict:
+def judge(cfg: Config, est: Estimate, *, now: Clock = time.time) -> Verdict:
     """Compare an estimate against the window's remaining headroom.
 
     ``possible`` is True whenever the caller can resume, even if the run needs several
@@ -274,7 +275,7 @@ def judge(cfg: Config, est: Estimate) -> Verdict:
     "this takes three sittings, and each one keeps what it earned".
     """
     cap, source = ceiling(cfg)
-    s = spent(cfg)
+    s = spent(cfg, now=now)
     stop_pct = round(cfg.budget_stop_fraction * 100)
     if cap is None:
         return Verdict(fits=True, possible=True, windows_needed=0.0, headroom_tokens=None,
@@ -308,11 +309,11 @@ class Gate:
     still tracks projected spend, so the caller can report what a run actually cost.
     """
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, *, now: Clock = time.time):
         self.cfg = cfg
         self._cap, self._source = ceiling(cfg)
         self._lock = threading.Lock()
-        self._projected = spent(cfg).tokens
+        self._projected = spent(cfg, now=now).tokens
         self._start = self._projected
         self.closed = False
         self.stopped_at: int | None = None

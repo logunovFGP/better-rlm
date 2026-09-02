@@ -60,9 +60,9 @@ def estimate(d: Deps, ctx_id: str, prompt: str = "", max_chunks: int = 0,
     done_pos = {pos for pos, i in enumerate(sel) if i in cached}
     est = budget.estimate_batch(
         d.cfg, [int(chunks[i].get("est_tokens", 0)) for i in sel], prompt=prompt,
-        max_output_tokens=BATCH_MAX_TOKENS, reduce=reduce, done=done_pos)
+        max_output_tokens=BATCH_MAX_TOKENS, reduce=reduce, done=done_pos, now=d.clock)
     return d.answer(
-        budget.render(budget.judge(d.cfg, est),
+        budget.render(budget.judge(d.cfg, est, now=d.clock),
                       what=f"batch over {ctx_id} ({strategy}, {n} chunks)")
         + f"\n\n_Sub-model: {sub_model}. Estimate only — no model call was made._"
     )
@@ -72,7 +72,7 @@ def budget_report(d: Deps) -> str:
     """Spend inside the rolling window, the ceiling being gated against, and when
     headroom next grows."""
     cap, source = budget.ceiling(d.cfg)
-    s = budget.spent(d.cfg)
+    s = budget.spent(d.cfg, now=d.clock)
     lines = [
         f"## Session budget — rolling {s.window_h:g}h window",
         "",
@@ -165,8 +165,8 @@ def run(d: Deps, ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = T
     done_pos = {pos for pos, i in enumerate(sel) if i in cached}
     est = budget.estimate_batch(d.cfg, sel_tokens, prompt=prompt,
                                 max_output_tokens=BATCH_MAX_TOKENS, reduce=reduce,
-                                done=done_pos)
-    verdict = budget.judge(d.cfg, est)
+                                done=done_pos, now=d.clock)
+    verdict = budget.judge(d.cfg, est, now=d.clock)
 
     if not todo:
         # Everything asked for is already answered. This is the payoff of persistence:
@@ -192,7 +192,7 @@ def run(d: Deps, ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = T
               "tool once the window has rolled and it resumes there._"
         )
 
-    gate = budget.Gate(d.cfg)
+    gate = budget.Gate(d.cfg, now=d.clock)
     # Built lazily, one at a time inside each pool worker (sub_query_batch), not here —
     # holding all N prompt strings at once is ~= the whole context in RAM for the entire
     # multi-minute batch. Leaf 2's seek-based read_chunk is what makes per-worker reads
@@ -215,7 +215,8 @@ def run(d: Deps, ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = T
         # this died holding 40 finished answers it had already paid for.
         on_result=lambda r: results.append(
             d.cfg, ctx_id, key,
-            results.Saved(r.index, r.answer, r.input_tokens, r.output_tokens, r.model)),
+            results.Saved(r.index, r.answer, r.input_tokens, r.output_tokens, r.model),
+            now=d.clock),
     )
     deferred = sum(1 for r in fresh_results if (r.error or "").startswith("deferred"))
     by_index = {r.index: r for r in fresh_results}

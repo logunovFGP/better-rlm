@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import Config
+from .config import Clock, Config
 
 _LOCK = threading.Lock()
 
@@ -85,12 +85,13 @@ def load(cfg: Config, ctx_id: str, key: str) -> dict[int, Saved]:
     return out
 
 
-def append(cfg: Config, ctx_id: str, key: str, saved: Saved) -> None:
+def append(cfg: Config, ctx_id: str, key: str, saved: Saved, *,
+           now: Clock = time.time) -> None:
     """Persist one chunk answer. Best-effort — a storage failure must not fail the batch
     that just successfully produced the answer; it only costs a re-ask on resume."""
     p = path_for(cfg, ctx_id, key)
     rec = {"index": saved.index, "answer": saved.answer, "itok": saved.itok,
-           "otok": saved.otok, "model": saved.model, "ts": time.time()}
+           "otok": saved.otok, "model": saved.model, "ts": now()}
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         with _LOCK, open(p, "a", encoding="utf-8") as fh:

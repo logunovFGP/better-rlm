@@ -20,9 +20,10 @@ correct answer there, not an oversight — see that module's own note.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 
-from .config import Config, cost_usd, load_config
+from .config import Clock, Config, cost_usd, load_config
 from .context_store import ContextStore
 from .logsetup import LOGGER_NAME, configure_logging
 from .output import bound_output
@@ -39,6 +40,11 @@ class Deps:
     cfg: Config
     store: ContextStore
     log: logging.Logger
+    #: Wall-clock source, threaded into everything that reads a clock POSITION (the spend
+    #: ledger's window arithmetic, a persisted answer's timestamp). Defaulted so ordinary
+    #: construction is unchanged; a test replaces it to make window boundaries and
+    #: measured latencies exact instead of approximately-right-by-wide-margin.
+    clock: Clock = field(default=time.time)
 
     @classmethod
     def create(cls, cfg: Config | None = None) -> "Deps":
@@ -52,14 +58,15 @@ class Deps:
         return cls(cfg=c, store=ContextStore(c), log=configure_logging(c))
 
     @classmethod
-    def for_test(cls, cfg: Config) -> "Deps":
+    def for_test(cls, cfg: Config, *, clock: Clock = time.time) -> "Deps":
         """Dependencies over an already-redirected config, installing NO log handlers.
 
         Named here rather than left to each test to assemble, so "a test's Deps never
         touches the real logger" is a property of one line instead of a rule every test
         file has to remember.
         """
-        return cls(cfg=cfg, store=ContextStore(cfg), log=logging.getLogger(LOGGER_NAME))
+        return cls(cfg=cfg, store=ContextStore(cfg),
+                   log=logging.getLogger(LOGGER_NAME), clock=clock)
 
     # -- output bounding ---------------------------------------------------
     def bound(self, text: str) -> str:

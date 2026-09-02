@@ -26,8 +26,51 @@ def cfg(tmp_path: Path):
     )
 
 
+class FrozenClock:
+    """A wall clock the test moves by hand.
+
+    Callable, so it drops straight into any ``now: Clock`` parameter. Adopted from the
+    clinemm suite's fake-timer discipline for a specific reason: three pieces of pure
+    clock arithmetic had NO coverage at all, because you cannot test them against a clock
+    that moves underneath you.
+
+      * ``budget._observed_call_s`` derives per-call latency from the span between ledger
+        timestamps — untestable without control of those timestamps.
+      * ``Spend.oldest_expires_in_s`` answers "when does headroom next grow", which is
+        arithmetic on now.
+      * the rolling-window boundary itself: a record at exactly ``now - window`` is either
+        in or out, and asserting which requires writing and reading at one fixed instant.
+
+    The existing window test only worked because its margins were hours wide, which is
+    the tell that the boundary was never actually pinned.
+
+    Absolute epoch, not 0: several code paths format or compare timestamps, and a
+    1970 clock hides sign errors that a plausible date would surface.
+    """
+
+    #: 2026-09-02T12:00:00Z — a fixed, plausible instant.
+    START = 1_788_350_400.0
+
+    def __init__(self, start: float = START):
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def tick(self, seconds: float) -> "FrozenClock":
+        """Advance the clock. Returns self so a test can chain or inline it."""
+        self.now += seconds
+        return self
+
+
 @pytest.fixture
-def deps(cfg):
+def clock():
+    """A FrozenClock at a fixed instant. Pair with `deps` to freeze a whole run."""
+    return FrozenClock()
+
+
+@pytest.fixture
+def deps(cfg, clock):
     """Injected dependencies over a temp config — the reason there is no longer a fixture
     that reaches into module globals.
 
@@ -38,7 +81,7 @@ def deps(cfg):
     leftovers out of the real store. The logic now takes ``Deps`` as an argument, so a
     test hands it a temp one and nothing global is touched at all.
     """
-    return Deps.for_test(cfg)
+    return Deps.for_test(cfg, clock=clock)
 
 
 @pytest.fixture(autouse=True)
