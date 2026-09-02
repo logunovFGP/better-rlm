@@ -31,7 +31,7 @@ from . import auth, batch, models, sources, transport
 from .chunking import STRATEGIES, chunk_text
 from .config import PROVIDER_KEY_ENV
 from .deps import Deps
-from .engine import ReplSession, run_query
+from .engine import ReplSession, query_checkpoint_path, run_query
 from .subquery import sub_query
 from .logsetup import log_event, logged_tool, note_startup
 # meta_block keeps its old private name: tests reach for srv._meta_block. It and
@@ -434,7 +434,7 @@ def rlm_budget() -> str:
 
 @mcp.tool()
 @logged_tool
-def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
+def rlm_query(ctx_id: str, question: str, model_override: str = "", fresh: bool = False) -> str:
     """Answer a question over a loaded context using the FULL recursive RLM loop:
     the root model (Sonnet 5 by default) writes Python in the configured sandbox to
     explore the context and delegates chunk-level work to Haiku 4.5, then returns
@@ -451,25 +451,41 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
     COST CANNOT BE ESTIMATED, ONLY BOUNDED. The root model decides at run time how many
     sub-calls to make. rlm_estimate prints the ceiling: what config permits (usually
     several times a whole session window) and what query_timeout_s allows in practice.
-    This tool is stopped by the clock, is NOT gated at the budget line, and a stopped run
-    returns a partial answer that cannot be resumed. Its spend is ledgered, so the next
-    estimate sees it. Prefer rlm_exec/rlm_grep (free) and rlm_sub_query_batch (estimable,
-    gated, resumable) unless the question truly needs multi-hop reasoning.
+
+    GATED AND RESUMABLE. Every model call passes a hard floor at `budget_stop_fraction`
+    of the session window, so the run stops itself before the wall. Any stop -- budget,
+    timeout, error threshold -- checkpoints the transcript and the sandbox's REPL
+    variables; call this tool again with the SAME ctx_id and question and it continues
+    from the failed iteration instead of starting over. fresh=True discards a checkpoint.
+    Spend is ledgered, so the next estimate sees it. Prefer rlm_exec/rlm_grep (free) and
+    rlm_sub_query_batch (estimable) unless the question truly needs multi-hop reasoning.
     """
     root_model = _resolve_root_model(model_override)
     sub_model = models.select(DEPS.cfg, models.Role.SUB)
     text = DEPS.store.read_text(ctx_id)
-    res = run_query(DEPS.cfg, text, question, root_model, sub_model)
+    ckpt = query_checkpoint_path(DEPS.cfg, ctx_id, question, root_model, sub_model)
+    res = run_query(DEPS.cfg, text, question, root_model, sub_model,
+                    checkpoint=ckpt, fresh=fresh)
+    resumed = (f" · resumed from iteration {res['resumed_from']}"
+               if res.get("resumed_from") else "")
     if res.get("limit"):
         # ERROR-prefixed so logsetup records outcome=error; the partial answer still
         # travels, because a stopped run that found something is not a dead loss.
         partial_answer = res["answer"]
+        if res.get("resumable"):
+            how = (f"\n**Resumable.** The transcript and REPL state are checkpointed. Call "
+                   f"rlm_query again with the same ctx_id and question to continue from "
+                   f"iteration {res['next_iteration']}"
+                   + (" once the window has rolled" if res["limit"] == "SessionBudgetError" else "")
+                   + "; fresh=True discards the checkpoint instead.")
+        else:
+            how = ("\nRaise query_timeout_s / query_max_errors in config.yaml, or narrow the "
+                   "question. rlm_exec and rlm_grep need no model call at all.")
         return DEPS.answer(
-            f"ERROR: rlm_query stopped on {res['limit']} — {res['limit_detail']}\n"
+            f"ERROR: rlm_query stopped on {res['limit']} — {res['limit_detail']}{resumed}\n"
             + (f"\n--- best answer before the limit ---\n{partial_answer}\n"
                if partial_answer else "\nNo partial answer was available.\n")
-            + "\nRaise query_timeout_s / query_max_errors in config.yaml, or narrow the "
-              "question. rlm_exec and rlm_grep need no model call at all."
+            + how
         )
     rows = "\n".join(
         f"  - {r['model']}: {r['calls']} calls, "
@@ -480,7 +496,7 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
     total = res["cost_usd"]
     return DEPS.answer(
         f"## RLM answer (root: {res['root_model']}, sub: {res['sub_model']}"
-        f" · auth: {transport.auth_label(DEPS.cfg)})\n\n{res['answer']}\n\n"
+        f" · auth: {transport.auth_label(DEPS.cfg)}{resumed})\n\n{res['answer']}\n\n"
         f"---\n**Model routing / usage:**\n{rows}\n"
         + (f"**Total cost:** ${total:.4f}  |  " if total is not None else "")
         + f"**Time:** {res['execution_time']}s"

@@ -302,6 +302,54 @@ def judge(cfg: Config, est: Estimate, *, now: Clock = time.time) -> Verdict:
 
 
 # --------------------------------------------------------------------------- #
+# The hard floor: refuse a call that would cross the stop line
+# --------------------------------------------------------------------------- #
+class BudgetStopError(Exception):
+    """Raised by the transport when one more call would cross the session stop line.
+
+    Two duck-typed markers make the engine do the right thing without importing us:
+
+    * ``is_fatal_subcall`` -- the engine's existing contract (rlm.utils.exceptions
+      .FATAL_SUBCALL_ATTR): every batched fan-out stops on it instead of reissuing the
+      identical doomed call once per prompt.
+    * ``is_session_budget_stop`` -- new (STOPS_RUN_ATTR): the ROOT loop converts it into
+      a clean limit that carries the best partial answer and a resumable checkpoint,
+      rather than letting it escape as a traceback.
+
+    This is the enforcement that belongs where the ledger already is. The batch's Gate
+    is the polite early stop that defers remaining chunks; this is the floor under
+    EVERY caller -- rlm_query's recursive fan-out included, which had none.
+    """
+
+    is_fatal_subcall = True
+    is_session_budget_stop = True
+
+    def __init__(self, spent: int, usable: int, next_call: int):
+        self.spent, self.usable, self.next_call = spent, usable, next_call
+        super().__init__(
+            f"session budget stop: ~{spent:,} spent + ~{next_call:,} for this call would "
+            f"cross the {usable:,}-token stop line; answers so far are on disk -- resume "
+            f"once the window has rolled"
+        )
+
+
+def check_or_raise(cfg: Config, next_call_tokens: int, *, now: Clock = time.time) -> None:
+    """Refuse ``next_call_tokens`` if it would cross the stop line. No ceiling -> never.
+
+    Read-and-compare, not reserve: with N concurrent workers the overshoot is bounded
+    by N calls (~3 x one call against a 5% margin of ~290k tokens at the configured
+    ceiling), which is the price of not serialising every completion through a lock.
+    """
+    cap, _src = ceiling(cfg)
+    if cap is None:
+        return
+    usable = int(cap * cfg.budget_stop_fraction)
+    s = spent(cfg, now=now)
+    if s.tokens + next_call_tokens > usable:
+        raise BudgetStopError(s.tokens, usable, next_call_tokens)
+
+
+# --------------------------------------------------------------------------- #
 # Mid-run gate
 # --------------------------------------------------------------------------- #
 class Gate:
@@ -409,11 +457,13 @@ def render_query_ceiling(q: QueryCeiling, cap: int | None) -> str:
         f"- in practice: `query_timeout_s={q.timeout_s}` at ~{q.per_call_s:.0f}s/call allows "
         f"**~{q.timeout_calls} calls, ~{q.timeout_tokens:,} tokens** before the engine is stopped",
         "",
-        "_rlm_query is bounded by the clock, not by tokens: it is not gated at the budget "
-        "line, and a stopped query returns a partial answer that cannot be resumed. Its "
-        "spend IS ledgered, so the next estimate sees it. Prefer rlm_exec / rlm_grep (free) "
-        "and rlm_sub_query_batch (estimable, gated, resumable) unless the question truly "
-        "needs multi-hop reasoning._",
+        "_rlm_query cannot be forecast, but it is bounded on both sides: every model call "
+        "passes the session-budget floor, so it stops itself before the wall, and any stop "
+        "(budget, timeout, error threshold) checkpoints the transcript and REPL state -- "
+        "call it again with the same ctx_id and question to resume. Spend is ledgered, so "
+        "the next estimate sees it. Prefer rlm_exec / rlm_grep (free) and "
+        "rlm_sub_query_batch (estimable) unless the question truly needs multi-hop "
+        "reasoning._",
     ]
     return "\n".join(lines)
 

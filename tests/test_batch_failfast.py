@@ -505,3 +505,19 @@ def test_findings_too_large_to_reduce_fall_back_to_raw_instead_of_being_truncate
     assert "findings too large to reduce in one pass" in out
     assert "fewer/larger chunks" in out and "rlm_query" in out, "must name the way out"
     assert big in out, "the raw findings are still returned"
+
+
+
+def test_the_transport_floor_defers_the_batch_instead_of_failing_it(monkeypatch, cfg):
+    """If the floor fires under a worker (the Gate normally stops first), the chunk and
+    every one after it are DEFERRED -- scheduled work with answers safe on disk -- and
+    the fan-out stops. Reporting them as errors would tell the operator to investigate
+    a healthy stop, and reissuing the doomed call per chunk is the waste fail-fast exists
+    to prevent."""
+    from src.budget import BudgetStopError
+
+    calls, results = _run_batch(monkeypatch, cfg, BudgetStopError(spent=1, usable=1, next_call=1))
+    assert len(calls) == 1, "the floor was re-hit once per remaining chunk"
+    assert len(results) == 10
+    assert all(r.error == "deferred — session budget reached" for r in results), \
+        [r.error for r in results]

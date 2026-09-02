@@ -1,3 +1,4 @@
+import os
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -21,7 +22,9 @@ from rlm.utils.exceptions import (
     BudgetExceededError,
     CancellationError,
     ErrorThresholdExceededError,
+    SessionBudgetError,
     TimeoutExceededError,
+    stops_run,
     TokenLimitExceededError,
 )
 from rlm.utils.parsing import (
@@ -324,7 +327,8 @@ class RLM:
         return message_history
 
     def completion(
-        self, prompt: str | dict[str, Any], root_prompt: str | None = None
+        self, prompt: str | dict[str, Any], root_prompt: str | None = None,
+        *, resume: dict[str, Any] | None = None,
     ) -> RLMChatCompletion:
         """
         Recursive Language Model completion call. This is the main entry point for querying an RLM, and
@@ -336,6 +340,10 @@ class RLM:
             prompt: A single string or dictionary of messages to pass as context to the model.
             root_prompt: We allow the RLM's root LM to see a (small) prompt that the user specifies. A common example of this
             is if the user is asking the RLM to answer a question, we can pass the question as the root prompt.
+            resume: better-rlm. Continue a run a limit stopped: ``{"history": [...], "next_iteration": k,
+            "state_dill": bytes | None}`` as attached to that limit exception by ``_attach_checkpoint``.
+            The transcript is replayed as the message history, the loop restarts at ``k``, and the REPL's
+            saved variables are restored when the environment exposes its workspace (DockerREPL).
         Returns:
             A final answer as a string.
         """
@@ -354,9 +362,23 @@ class RLM:
             self.logger.clear_iterations()
 
         with self._spawn_completion_context(prompt) as (lm_handler, environment):
-            message_history = self._setup_prompt(prompt, root_prompt=root_prompt)
+            start_iter = 0
+            if resume:
+                # better-rlm: a run stopped by the session budget (or any limit) resumes
+                # here instead of restarting. The environment has already loaded
+                # `context` from prompt; overwriting its state file with the checkpoint
+                # restores every variable the model had computed before the stop.
+                message_history = list(resume["history"])
+                start_iter = int(resume.get("next_iteration", 0))
+                self._restore_repl_state(environment, resume.get("state_dill"))
+            else:
+                message_history = self._setup_prompt(prompt, root_prompt=root_prompt)
 
             compaction_count = 0
+            # Checkpoint cursor: the history length BEFORE this turn's user prompt was
+            # appended, and the iteration to retry. Captured per turn so a stop mid-turn
+            # resumes at the failed turn with a clean transcript (no duplicated prompt).
+            ckpt_len, ckpt_iter = len(message_history), start_iter
             try:
                 # better-rlm: on_iteration_start/complete were declared, documented and
                 # stored by __init__ but never invoked anywhere - a dead callback API.
@@ -372,7 +394,7 @@ class RLM:
                         except Exception:
                             pass  # Don't let callback errors break execution
 
-                for i in range(self.max_iterations):
+                for i in range(start_iter, self.max_iterations):
                     # Check timeout before each iteration
                     self._check_timeout(i, time_start)
                     _iter_start = time.perf_counter()
@@ -403,6 +425,7 @@ class RLM:
                         if isinstance(environment, SupportsPersistence)
                         else 0
                     )
+                    ckpt_len, ckpt_iter = len(message_history), i
                     # Fully prefixed trajectory: persist the per-turn user prompt
                     # into message_history so the model sees a single continuous
                     # [system, metadata, user_0, assistant_0, repl_0, user_1, ...]
@@ -482,10 +505,33 @@ class RLM:
 
             except KeyboardInterrupt:
                 self.verbose.print_limit_exceeded("cancelled", "User interrupted execution")
-                raise CancellationError(
+                stop = CancellationError(
                     partial_answer=self._best_partial_answer,
                     message="Execution cancelled by user (Ctrl+C)",
-                ) from None
+                )
+                self._attach_checkpoint(stop, message_history[:ckpt_len], ckpt_iter, environment)
+                raise stop from None
+            except (
+                TimeoutExceededError,
+                ErrorThresholdExceededError,
+                BudgetExceededError,
+                TokenLimitExceededError,
+                SessionBudgetError,
+            ) as limit:
+                # better-rlm: every deliberate stop is resumable, not just reportable.
+                self._attach_checkpoint(limit, message_history[:ckpt_len], ckpt_iter, environment)
+                raise
+            except Exception as exc:
+                if not stops_run(exc):
+                    raise
+                # better-rlm: the backend refused a call because the caller's SESSION
+                # window is about to be exhausted. _check_iteration_limits counts REPL
+                # stderr, not LM exceptions, so without this the stop escaped as a raw
+                # traceback -- the partial answer and everything paid for were lost.
+                self.verbose.print_limit_exceeded("session budget", str(exc))
+                stop = SessionBudgetError(partial_answer=self._best_partial_answer, message=str(exc))
+                self._attach_checkpoint(stop, message_history[:ckpt_len], ckpt_iter, environment)
+                raise stop from exc
 
             # Default behavior: we run out of iterations, provide one final answer
             time_end = time.perf_counter()
@@ -508,6 +554,45 @@ class RLM:
                 execution_time=time_end - time_start,
                 metadata=self.logger.get_trajectory() if self.logger else None,
             )
+
+    # --- better-rlm: resumable stops ------------------------------------------------
+    def _attach_checkpoint(self, exc: BaseException, history: list[dict[str, Any]],
+                           next_iteration: int, environment: Any) -> None:
+        """Make a stopped run continuable: the transcript up to the failed turn, the
+        iteration to retry, and the REPL's saved variables when the environment exposes
+        them. Attached to the exception because the environment is torn down as it
+        propagates -- this is the last moment the state file is readable."""
+        exc.history = list(history)
+        exc.next_iteration = int(next_iteration)
+        exc.state_dill = self._read_repl_state(environment)
+
+    @staticmethod
+    def _repl_state_path(environment: Any) -> str | None:
+        # DockerREPL bind-mounts a host temp dir at /workspace and its exec runner
+        # reloads /workspace/state.dill on every call -- so the file IS the REPL state,
+        # host-readable. Other environments expose nothing here and resume transcript-only.
+        d = getattr(environment, "temp_dir", None)
+        return os.path.join(d, "state.dill") if d else None
+
+    def _read_repl_state(self, environment: Any) -> bytes | None:
+        path = self._repl_state_path(environment)
+        try:
+            with open(path, "rb") as fh:  # type: ignore[arg-type]
+                return fh.read()
+        except (TypeError, OSError):
+            return None
+
+    def _restore_repl_state(self, environment: Any, blob: bytes | None) -> None:
+        path = self._repl_state_path(environment)
+        if not blob or not path:
+            return
+        try:
+            tmp = path + ".resume.tmp"
+            with open(tmp, "wb") as fh:
+                fh.write(blob)
+            os.replace(tmp, path)   # atomic, like the runner's own state write
+        except OSError:
+            pass
 
     def _check_timeout(self, iteration: int, time_start: float) -> None:
         """Raise TimeoutExceededError if the timeout has been exceeded."""

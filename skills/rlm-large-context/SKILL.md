@@ -20,7 +20,7 @@ Size decides *whether* to load. The question's complexity decides *which* tool.
 | Exact counts, sums, buckets, parsing | `rlm_exec(code, ctx_id)` | free, no model call |
 | "Label / classify / judge **every** entry"; aggregate over the whole input | `rlm_chunk_context` → `rlm_sub_query_batch` | one cheap call per chunk; re-runs over unchanged chunks are **free** |
 | One targeted semantic question, input under ~200K tokens | `rlm_sub_query(ctx_id, prompt)` | one cheap call |
-| Cross-referencing, contradicting pairs, multi-hop over a corpus | `rlm_query(ctx_id, question)` | recursive loop; **bounded by timeout, not tokens** — see `rlm_estimate` |
+| Cross-referencing, contradicting pairs, multi-hop over a corpus | `rlm_query(ctx_id, question)` | recursive loop; not forecastable, but **gated at the budget line and resumable** — see `rlm_estimate` for its ceiling |
 | Hardest reasoning | `rlm_query(..., model_override="opus")` | most expensive |
 
 Start at the top. `rlm_grep` and `rlm_exec` answer more questions than expected and spend
@@ -179,14 +179,16 @@ chunks whose text actually changed are sent. Practical consequences:
   chunk it will resume at. That is a scheduled continuation, not a failure — do not
   report it to the user as an error, and do not retry it in a loop hoping it will finish.
 
-**`rlm_query` cannot be estimated, only bounded.** The root model decides at run time how
-many sub-calls to make. `rlm_estimate` therefore prints a *ceiling* for it, not a
-forecast: the worst case config permits (normally several times a whole window) and the
-tighter bound the timeout imposes in practice. `rlm_query` is stopped by the clock, is
-not gated at the budget line, and a stopped run returns a partial answer that cannot be
-resumed — its spend is ledgered, so the *next* estimate sees it. Prefer `rlm_exec` /
-`rlm_grep` (free) and `rlm_sub_query_batch` (estimable, gated, resumable) unless the
-question truly needs multi-hop reasoning.
+**`rlm_query` cannot be estimated, only bounded — but it is bounded on both sides.** The
+root model decides at run time how many sub-calls to make, so `rlm_estimate` prints a
+*ceiling* for it, not a forecast: the worst case config permits (normally several times a
+whole window) and the tighter bound the timeout imposes in practice. What it now shares
+with the batch: **every model call passes the session-budget floor**, so the run stops
+itself before the wall instead of being killed at it; and **any stop checkpoints the
+transcript and the sandbox's REPL variables**, so calling `rlm_query` again with the same
+ctx_id and question continues from the failed iteration. `fresh=True` discards the
+checkpoint. Still prefer `rlm_exec` / `rlm_grep` (free) and `rlm_sub_query_batch`
+(estimable) unless the question truly needs multi-hop reasoning.
 
 **A synthesis over a partially-mapped context is partial.** When a run stops early, the
 reduce pass says so explicitly. Carry that caveat into whatever you tell the user; a

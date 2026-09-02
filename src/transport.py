@@ -574,23 +574,28 @@ class _LedgeredTransport(CompletionTransport):
         return estimate_tokens(n)
 
     def complete(self, messages, system, model, max_tokens) -> CompletionResult:
+        est_in = self._est_in(messages, system)
+        # The hard floor, for EVERY caller. The batch's Gate stops politely one layer
+        # up; this is what stops rlm_query's recursive fan-out, which had nothing. It
+        # raises BEFORE the call, so a refused call costs zero tokens.
+        budget.check_or_raise(self._cfg, est_in + max_tokens)
         try:
             res = self._inner.complete(messages, system, model, max_tokens)
         except Exception as exc:
             self._note_if_limit(exc)
             raise
-        budget.record(self._cfg, res.model or model,
-                      self._est_in(messages, system), res.output_tokens)
+        budget.record(self._cfg, res.model or model, est_in, res.output_tokens)
         return res
 
     async def acomplete(self, messages, system, model, max_tokens) -> CompletionResult:
+        est_in = self._est_in(messages, system)
+        budget.check_or_raise(self._cfg, est_in + max_tokens)
         try:
             res = await self._inner.acomplete(messages, system, model, max_tokens)
         except Exception as exc:
             self._note_if_limit(exc)
             raise
-        budget.record(self._cfg, res.model or model,
-                      self._est_in(messages, system), res.output_tokens)
+        budget.record(self._cfg, res.model or model, est_in, res.output_tokens)
         return res
 
     def _note_if_limit(self, exc: BaseException) -> None:

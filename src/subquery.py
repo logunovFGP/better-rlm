@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from .auth import resolve_auth_mode
+from .budget import BudgetStopError
 from .config import Config, estimate_tokens
 from .logsetup import bind_rid, current_rid
 from .ratelimit import is_fatal_auth, retry_and_queue_retries
@@ -84,13 +85,14 @@ def sub_query_batch(cfg: Config, prompts: Sequence[str | Callable[[], str]], mod
     # ponytail: plain list as the flag. The benign race lets the calls already in
     # flight finish; a threading.Event only matters if that ever costs something.
     fatal: list[str] = []
+    budget_stop: list[bool] = []   # same benign-race shape as `fatal`, same reason
 
     def work(item: tuple[int, str | Callable[[], str]]) -> SubResult:
         pos, entry = item
         idx = indices[pos] if indices is not None else pos
         if fatal:
             return SubResult(idx, "", 0, 0, error=f"skipped — {fatal[0]}")
-        if gate is not None and gate.closed:
+        if budget_stop or (gate is not None and gate.closed):
             return SubResult(idx, "", 0, 0, error="deferred — session budget reached")
         try:
             # Built here, not by the caller: a lazy builder keeps only `concurrency`
@@ -113,6 +115,14 @@ def sub_query_batch(cfg: Config, prompts: Sequence[str | Callable[[], str]], mod
                     except Exception:  # persistence must not lose an answer we just paid for
                         pass
                 return res
+            except BudgetStopError:
+                # The transport's hard floor fired under us (the batch Gate normally
+                # stops first; this is the fallback). Not a failure: scheduled work.
+                # Latch the gate if we have one so the rest defer without a call each.
+                if gate is not None:
+                    gate.closed = True
+                budget_stop.append(True)
+                return SubResult(idx, "", 0, 0, error="deferred — session budget reached")
             except Exception as exc:
                 if is_fatal_auth(exc):
                     fatal.append(str(exc))

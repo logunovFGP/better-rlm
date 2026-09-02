@@ -73,6 +73,22 @@ class CancellationError(Exception):
         super().__init__(message or "Execution cancelled by user")
 
 
+class SessionBudgetError(Exception):
+    """Raised when the backend refuses a call because the caller's SESSION budget --
+    a rolling usage window, not a per-run dollar cap -- would be crossed.
+
+    Distinct from BudgetExceededError (this run's own $ budget) because it is a
+    property of the account's window, shared with everything else the operator is
+    running, and because it is the one limit a caller can RESUME from: the loop
+    attaches its transcript and REPL state so the next call continues rather than
+    restarts. Carries partial_answer like the other limits.
+    """
+
+    def __init__(self, partial_answer: str | None = None, message: str | None = None):
+        self.partial_answer = partial_answer
+        super().__init__(message or "Session budget stop: the next call would cross the stop line")
+
+
 # --- better-rlm --------------------------------------------------------------
 #: Attribute a backend sets on an exception to say "this failure is a property of
 #: the session, not of this prompt" - an expired login, an exhausted quota. Every
@@ -92,3 +108,16 @@ def aborts_batch(exc: BaseException) -> bool:
     only honours the documented attribute. See FATAL_SUBCALL_ATTR.
     """
     return bool(getattr(exc, FATAL_SUBCALL_ATTR, False))
+
+
+#: Attribute a backend sets on an exception to say "stop the WHOLE run cleanly" -- the
+#: caller's session window is about to be exhausted. Sibling of FATAL_SUBCALL_ATTR
+#: (which only aborts a fan-out): the root loop converts an exception carrying this into
+#: SessionBudgetError with the best partial answer and a resumable checkpoint attached,
+#: instead of letting it escape as a traceback.
+STOPS_RUN_ATTR = "is_session_budget_stop"
+
+
+def stops_run(exc: BaseException) -> bool:
+    """True when a backend failure means the run itself must stop, resumably."""
+    return bool(getattr(exc, STOPS_RUN_ATTR, False))

@@ -221,3 +221,32 @@ def test_auth_failure_carries_the_remediation():
     assert "claude auth login" in msg
     assert "claude setup-token" in msg
     assert "does NOT sign in the CLI" in msg
+
+
+
+# --------------------------- the floor sits under EVERY completion ------------------ #
+def test_the_transport_refuses_a_call_that_would_cross_the_line_without_spending(cfg):
+    """rlm_query's recursive fan-out had no stop at all; the batch's Gate only reached
+    the batch. Placing the check here, where the ledger already is, makes it structural:
+    the refused call must never reach the backend and must not be ledgered."""
+    import dataclasses
+    import src.budget as budget
+
+    cfg = dataclasses.replace(cfg, session_budget_tokens=100_000, budget_stop_fraction=0.95)
+    budget.record(cfg, "m", 94_000, 0)
+    calls = []
+
+    class _Backend:
+        def complete(self, messages, system, model, max_tokens):
+            calls.append(1)
+            return tp.CompletionResult(text="ok", input_tokens=1, output_tokens=1, model="m")
+
+        async def acomplete(self, *a):
+            raise AssertionError("not used")
+
+    w = tp._LedgeredTransport(_Backend(), cfg)
+    with pytest.raises(budget.BudgetStopError):
+        w.complete([{"role": "user", "content": "x" * 400}], None, "m", 2048)   # ~100 + 2048
+
+    assert calls == [], "the refused call reached the backend"
+    assert budget.spent(cfg).tokens == 94_000, "a refused call was ledgered"

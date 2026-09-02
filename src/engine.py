@@ -10,7 +10,10 @@ root model's messages, so the root context never overflows.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+from pathlib import Path
 from typing import Optional
 
 from rlm.core.rlm import RLM
@@ -18,6 +21,7 @@ from rlm.utils.exceptions import (
     BudgetExceededError,
     CancellationError,
     ErrorThresholdExceededError,
+    SessionBudgetError,
     TimeoutExceededError,
     TokenLimitExceededError,
 )
@@ -71,6 +75,7 @@ _ENGINE_LIMITS = (
     BudgetExceededError,
     ErrorThresholdExceededError,
     CancellationError,
+    SessionBudgetError,   # the transport's hard floor, converted by the engine loop
 )
 
 _PLACEHOLDER_KEY = "rlm-mcp-oauth"
@@ -151,19 +156,102 @@ def _log_subcall(depth: int, model: str, duration: float, error: str | None) -> 
               dur_s=round(duration, 2), err=error)
 
 
+# --------------------------------------------------------------------------- #
+# Checkpoints: a stopped rlm_query resumes instead of restarting
+# --------------------------------------------------------------------------- #
+def query_checkpoint_path(cfg: Config, ctx_id: str, question: str,
+                          root_model: str, sub_model: str) -> Path:
+    """Where a stopped run's transcript lives. Keyed on the question AND both models:
+    a different question is a different run, and a transcript produced by one root
+    model is not a valid prefix for another."""
+    h = hashlib.sha256(f"{question}\x00{root_model}\x00{sub_model}".encode("utf-8", "replace"))
+    return cfg.store_dir / ctx_id / "query" / f"{h.hexdigest()[:16]}.json"
+
+
+def _state_path(checkpoint: Path) -> Path:
+    return checkpoint.with_suffix(".state.dill")
+
+
+def _load_checkpoint(checkpoint: Path) -> dict | None:
+    try:
+        ck = json.loads(checkpoint.read_text(encoding="utf-8"))
+        blob = None
+        try:
+            blob = _state_path(checkpoint).read_bytes()
+        except OSError:
+            pass
+        return {"history": ck["history"], "next_iteration": int(ck["next_iteration"]),
+                "state_dill": blob}
+    except (FileNotFoundError, OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _save_checkpoint(checkpoint: Path, exc: BaseException, *, question: str,
+                     root_model: str, sub_model: str) -> bool:
+    """Persist what the engine attached to a limit. Best-effort; returns whether saved."""
+    history = getattr(exc, "history", None)
+    if history is None:
+        return False
+    try:
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        ck = {"question": question, "root_model": root_model, "sub_model": sub_model,
+              "history": history, "next_iteration": int(getattr(exc, "next_iteration", 0)),
+              "partial_answer": str(getattr(exc, "partial_answer", "") or ""),
+              "stopped_on": type(exc).__name__}
+        tmp = checkpoint.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(ck), encoding="utf-8")
+        tmp.replace(checkpoint)
+        blob = getattr(exc, "state_dill", None)
+        if blob:
+            stmp = _state_path(checkpoint).with_suffix(".dill.tmp")
+            stmp.write_bytes(blob)
+            stmp.replace(_state_path(checkpoint))
+        return True
+    except OSError:
+        return False
+
+
+def _clear_checkpoint(checkpoint: Path) -> None:
+    for p in (checkpoint, _state_path(checkpoint)):
+        try:
+            p.unlink()
+        except (FileNotFoundError, OSError):
+            pass
+
+
 def run_query(cfg: Config, context_text: str, question: str,
-              root_model: str, sub_model: str) -> dict:
-    """Run a full recursive RLM query; return the final answer + routing/usage."""
+              root_model: str, sub_model: str, *,
+              checkpoint: Path | None = None, fresh: bool = False) -> dict:
+    """Run a full recursive RLM query; return the final answer + routing/usage.
+
+    ``checkpoint`` makes a stopped run resumable: when a limit fires (the session
+    budget floor, the timeout, the error threshold), the transcript and REPL state the
+    engine attached are saved there, and the next call with the same checkpoint path
+    continues from the failed iteration instead of starting over. ``fresh`` discards
+    an existing checkpoint first. A completed run deletes its checkpoint.
+    """
+    resume = None
+    if checkpoint is not None:
+        if fresh:
+            _clear_checkpoint(checkpoint)
+        else:
+            resume = _load_checkpoint(checkpoint)
+    resumed_from = resume["next_iteration"] if resume else 0
     rlm = build_rlm(cfg, root_model, sub_model)
     try:
-        result = rlm.completion(prompt=context_text, root_prompt=question)
+        result = rlm.completion(prompt=context_text, root_prompt=question, resume=resume)
     except _ENGINE_LIMITS as exc:
         # A limit firing is not a crash: the engine stops deliberately and several of
         # these carry the best answer found so far. Losing that work and surfacing a
         # traceback instead was the old behaviour -- nothing in src/ caught them.
         partial = str(getattr(exc, "partial_answer", "") or "")
+        saved = checkpoint is not None and _save_checkpoint(
+            checkpoint, exc, question=question, root_model=root_model, sub_model=sub_model)
         log_event(_LOG, "rlm_query", root=root_model, sub=sub_model,
-                  limit=type(exc).__name__, err=str(exc), partial_bytes=len(partial))
+                  limit=type(exc).__name__, err=str(exc), partial_bytes=len(partial),
+                  resumable=saved or None,
+                  next_iteration=getattr(exc, "next_iteration", None) if saved else None,
+                  resumed_from=resumed_from or None)
         return {
             "answer": partial,
             "limit": type(exc).__name__,
@@ -173,7 +261,12 @@ def run_query(cfg: Config, context_text: str, question: str,
             "sub_model": sub_model,
             "usage": [],
             "cost_usd": None,
+            "resumable": saved,
+            "next_iteration": int(getattr(exc, "next_iteration", 0)) if saved else None,
+            "resumed_from": resumed_from,
         }
+    if checkpoint is not None:
+        _clear_checkpoint(checkpoint)   # done: nothing left to resume
     rows, total = usage_breakdown(result.usage_summary, cfg.report_cost)
     answer = result.response or ""
     # turns ~= number of root-model calls (one per orchestrator iteration).
@@ -194,6 +287,7 @@ def run_query(cfg: Config, context_text: str, question: str,
         "sub_model": sub_model,
         "usage": rows,
         "cost_usd": total,
+        "resumed_from": resumed_from,
     }
 
 

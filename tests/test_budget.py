@@ -648,8 +648,12 @@ def test_the_query_ceiling_is_derived_from_config_alone(bcfg):
 def test_the_query_ceiling_says_what_it_is_and_is_not(bcfg):
     text = budget.render_query_ceiling(budget.query_ceiling(bcfg), cap=5_800_000)
     assert "ceiling, not an estimate" in text
-    assert "bounded by the clock, not by tokens" in text
-    assert "cannot be resumed" in text
+    # Both sides of the bound are now stated: the floor stops it, a stop is resumable.
+    # The earlier footer said "not gated ... cannot be resumed"; that was true then and
+    # is exactly what the transport floor and the engine checkpoint closed.
+    assert "stops itself before the wall" in text
+    assert "resume" in text
+    assert "cannot be resumed" not in text, "the footer still describes the old, unfixed rlm_query"
     assert "x the whole window" in text, "worst case should be stated relative to the window"
 
 
@@ -658,3 +662,32 @@ def test_the_estimate_tool_appends_the_query_ceiling(monkeypatch, batch_ctx):
     out = bt.estimate(d, "ctx_1", "audit", reduce=False)
     assert "## Estimate" in out
     assert "rlm_query on this context" in out
+
+
+# --------------------------- the hard floor under every caller ----------------------- #
+def test_the_floor_refuses_exactly_past_the_stop_line_and_not_before(bcfg):
+    """`>` not `>=`: a call that lands exactly on the line is allowed. The margin above
+    it is what absorbs the concurrency overshoot the docstring admits to."""
+    cfg = dataclasses.replace(bcfg, session_budget_tokens=100_000, budget_stop_fraction=0.95)
+    budget.record(cfg, "m", 90_000, 0)                 # usable = 95_000
+
+    budget.check_or_raise(cfg, 5_000)                  # exactly on the line: allowed
+    with pytest.raises(budget.BudgetStopError) as ei:
+        budget.check_or_raise(cfg, 5_001)
+    assert ei.value.spent == 90_000 and ei.value.usable == 95_000
+
+
+def test_the_floor_never_fires_with_an_unknown_ceiling(bcfg):
+    """Unknown must not mean zero: a machine that has never hit a limit must not have
+    every call refused."""
+    budget.check_or_raise(bcfg, 10**9)
+
+
+def test_a_budget_stop_carries_both_engine_markers():
+    """The engine never imports us; it honours two duck-typed attributes. Drop either and
+    the behaviour silently degrades -- fan-outs re-issue doomed calls, or the root loop
+    lets the stop escape as a traceback."""
+    from rlm.utils.exceptions import aborts_batch, stops_run
+    e = budget.BudgetStopError(1, 2, 3)
+    assert aborts_batch(e), "batched fan-outs must abort on it"
+    assert stops_run(e), "the root loop must convert it to a resumable limit"
