@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import threading
 import uuid
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,6 +95,16 @@ class CommandRun:
     @property
     def ok(self) -> bool:
         return self.returncode == 0 and not self.timed_out
+
+
+def _text_digest(text: str) -> str:
+    """sha256 of one chunk's text — the identity the answer cache is keyed on.
+
+    Its encode arguments must stay in step with ``results.content_key``: both hash the
+    same characters, so a divergence here would silently stop every stored digest from
+    matching a freshly computed one and quietly cost the cache every hit.
+    """
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
 
 
 def _stat_path(path: Path) -> tuple[int, int, str]:
@@ -462,8 +473,57 @@ class ContextStore:
         """
         meta = self.get(ctx_id)
         meta.chunk_strategy = strategy
-        meta.chunks = self._with_byte_offsets(meta, chunks, text)
+        # Resolved once, here, rather than inside each pass: two passes each defaulting
+        # `text` to a fresh read_text would decode a multi-GB context twice.
+        if text is None:
+            text = self.read_text(ctx_id)
+        meta.chunks = self._with_byte_offsets(meta, self._with_digests(chunks, text), text)
         return self._save(meta)
+
+    @staticmethod
+    def _with_digests(chunks: list[dict], text: str) -> list[dict]:
+        """Return copies of ``chunks`` carrying ``sha256`` of each chunk's own text.
+
+        Computed here because this is the one moment the whole decoded text and the chunk
+        boundaries are both in hand. It is what lets the answer-cache scan stop taking a
+        full extra pass over the context: ``batch._scan_cache`` used to read every selected
+        chunk purely to hash it, and the batch then read each un-cached one AGAIN inside
+        its worker.
+
+        Independent of the byte-offset walk below, and deliberately not gated on it: the
+        digest is of ``text[start:end]``, which is what BOTH read paths return, so it is
+        correct even for the CRLF and invalid-UTF-8 files that decline byte offsets
+        entirely -- exactly the files that would otherwise get no speedup at all.
+
+        Copies, not edits in place, for the reason ``_with_byte_offsets`` gives.
+        """
+        return [{**c, "sha256": _text_digest(text[c["start"]:c["end"]])} for c in chunks]
+
+    def chunk_digests(self, ctx_id: str, indices: Sequence[int]) -> dict[int, str]:
+        """sha256 per requested chunk, from the stored meta where that can be trusted --
+        turning the answer-cache scan's pass over every selected chunk into one probe read.
+
+        TRUST IS EARNED TWICE, NOT ASSUMED. The file must still be the size it was when the
+        digests were computed (``_offsets_still_apply``, the same staleness proxy the byte
+        offsets use), AND the first requested chunk's stored digest must match a real read
+        of it. That probe is to this method what ``_probe_mapping`` is to the offset walk:
+        one bounded read that buys proof instead of an argument. It catches a
+        size-preserving edit, and it catches a caller that handed ``set_chunks`` text not
+        matching the file -- which cannot corrupt a cache key today, and this change must
+        not be what makes it able to.
+
+        Any doubt falls back to reading and hashing every chunk, which is precisely the
+        behaviour this replaced: slower, never wrong.
+        """
+        meta = self.get(ctx_id)
+        idx = list(indices)
+        stored = {i: str(meta.chunks[i].get("sha256", ""))
+                  for i in idx if 0 <= i < len(meta.chunks)}
+        if idx and all(stored.get(i) for i in idx) and self._offsets_still_apply(meta):
+            probe = idx[0]
+            if stored[probe] == _text_digest(self.read_chunk(ctx_id, probe)):
+                return stored
+        return {i: _text_digest(self.read_chunk(ctx_id, i)) for i in idx}
 
     def _with_byte_offsets(self, meta: ContextMeta, chunks: list[dict],
                            text: str | None = None) -> list[dict]:

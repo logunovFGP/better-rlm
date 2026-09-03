@@ -64,12 +64,17 @@ class Saved:
 # --------------------------------------------------------------------------- #
 # Content-addressed cache
 # --------------------------------------------------------------------------- #
-def content_key(chunk_text: str, prompt: str, model: str, system: str = "") -> str:
-    """Identity of an answer: the exact chunk text the model saw, the user's prompt, the
-    SYSTEM prompt it ran under, and the model that answered. NOT the assembled prompt —
-    that embeds ``CHUNK i/n``, which changes with position and would defeat reuse of
-    identical content at a new index. The fidelity trade (the model does not learn it is
+def content_key(chunk_digest: str, prompt: str, model: str, system: str = "") -> str:
+    """Identity of an answer: a digest of the exact chunk text the model saw, the user's
+    prompt, the SYSTEM prompt it ran under, and the model that answered. NOT the assembled
+    prompt — that embeds ``CHUNK i/n``, which changes with position and would defeat reuse
+    of identical content at a new index. The fidelity trade (the model does not learn it is
     "chunk 5 of 12" this time) is small and deliberate.
+
+    A DIGEST, not the text: ``ContextStore.chunk_digests`` stamps each chunk's sha256 into
+    the chunk meta at chunking time, so the cache scan no longer reads every selected chunk
+    just to hash it. Callers must hand this the digest that store produces — passing raw
+    text still yields a stable key, but not the same one, so it would simply never hit.
 
     ``system`` is in the key because it changes the answer. The batch map used to send
     none at all and now sends ``batch.MAP_SYSTEM``, which turns a page of prose into a
@@ -78,7 +83,7 @@ def content_key(chunk_text: str, prompt: str, model: str, system: str = "") -> s
     merge prose and envelopes into a single synthesis. The TEXT is hashed, not a version
     tag, so editing that constant self-invalidates with no manual bump."""
     h = hashlib.sha256()
-    h.update(chunk_text.encode("utf-8", "replace"))
+    h.update(chunk_digest.encode("utf-8", "replace"))
     h.update(b"\x00")
     h.update(prompt.encode("utf-8", "replace"))
     h.update(b"\x00")

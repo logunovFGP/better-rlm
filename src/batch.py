@@ -129,7 +129,7 @@ def _ensure_chunked(d: Deps, ctx_id: str):
 def _scan_cache(d: Deps, ctx_id: str, sel: list[int], prompt: str, model: str, *,
                 fresh: bool = False,
                 system: str = "") -> tuple[dict[int, str], dict[int, results.Saved]]:
-    """Hash every selected chunk's text and look each one up in the answer cache.
+    """Look every selected chunk up in the answer cache by its digest.
 
     Returns ``(keys, cached)``: the content key per chunk index (the run needs it to store
     new answers under), and the answers already on disk. ``fresh`` deletes instead of
@@ -139,17 +139,16 @@ def _scan_cache(d: Deps, ctx_id: str, sel: list[int], prompt: str, model: str, *
     that produced it; see ``results.content_key``. It must be the same value the map
     actually sends, or the scan reports hits the run cannot use.
 
-    This reads every selected chunk once, and the batch reads each un-cached one again
-    lazily inside its worker. Reads are seek-based and bounded to one chunk at a time, so
-    the cost is one extra pass over the file and the memory stays flat.
-    ponytail: if that double read ever shows in a profile, store the per-chunk hash in
-    the chunk meta at chunking time — then this scan needs no reads at all.
+    The digests come from ``ContextStore.chunk_digests``, which serves them from the chunk
+    meta stamped at chunking time. This scan used to read every selected chunk purely to
+    hash it, while the batch then read each un-cached one AGAIN inside its worker — a full
+    extra pass over the context before a single call went out.
     """
     keys: dict[int, str] = {}
     cached: dict[int, results.Saved] = {}
+    digests = d.store.chunk_digests(ctx_id, sel)
     for i in sel:
-        text = d.store.read_chunk(ctx_id, i)
-        k = results.content_key(text, prompt, model, system)
+        k = results.content_key(digests[i], prompt, model, system)
         keys[i] = k
         if fresh:
             results.cache_delete(d.cfg, k)

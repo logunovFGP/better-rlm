@@ -3,7 +3,7 @@ import json
 import pytest
 
 from src.chunking import chunk_text
-from src.context_store import ContextStore
+from src.context_store import ContextStore, _text_digest
 
 
 def _lines(store, meta, text, *, chunk_lines=1, **kw):
@@ -421,3 +421,94 @@ def test_set_chunks_declines_offsets_when_the_file_vanished_before_the_probe(cfg
     stored = store.get(meta.ctx_id).chunks
     assert len(stored) == 2
     assert all((c["byte_start"], c["byte_end"]) == (-1, -1) for c in stored)
+
+
+# --- per-chunk digests: the answer cache's identity, stamped once at chunk time -------
+
+def test_set_chunks_stamps_a_digest_matching_every_chunks_own_text(cfg):
+    """The digest IS the answer cache's identity, so it has to equal what a reader gets
+    back. Stamped at chunk time because this is the one moment the whole decoded text and
+    the chunk boundaries are both in hand."""
+    store = ContextStore(cfg)
+    meta = store.load_text("a\nbb\nccc\n", source="t")
+    _lines(store, meta, store.read_text(meta.ctx_id))
+
+    for i, c in enumerate(store.get(meta.ctx_id).chunks):
+        assert c["sha256"] == _text_digest(store.read_chunk(meta.ctx_id, i))
+
+
+def test_a_digest_is_stamped_even_when_byte_offsets_are_refused(cfg, tmp_path):
+    """Mixed line endings price under neither walk, so byte offsets are refused. The
+    digest must survive that: it is of text[start:end], which is what BOTH read paths
+    return, so it never depended on the offsets. These files are exactly the ones that
+    would otherwise get no speedup at all."""
+    store = ContextStore(cfg)
+    p = tmp_path / "mixed.txt"
+    p.write_bytes(b"one\r\ntwo\nthree\r\nfour\n")
+    meta = store.load_file(str(p))
+    _lines(store, meta, store.read_text(meta.ctx_id))
+
+    for i, c in enumerate(store.get(meta.ctx_id).chunks):
+        assert (c["byte_start"], c["byte_end"]) == (-1, -1), "offsets should be refused here"
+        assert c["sha256"] == _text_digest(store.read_chunk(meta.ctx_id, i))
+
+
+def test_chunk_digests_serves_stored_hashes_with_one_probe_read(cfg, monkeypatch):
+    """The point of the change: the cache scan used to read every selected chunk purely to
+    hash it. One probe read buys the proof, the rest come from meta."""
+    store = ContextStore(cfg)
+    meta = store.load_text("".join(f"line{i}\n" for i in range(6)), source="t")
+    _lines(store, meta, store.read_text(meta.ctx_id))
+
+    reads: list[int] = []
+    real = ContextStore.read_chunk
+    monkeypatch.setattr(ContextStore, "read_chunk",
+                        lambda self, c, i: (reads.append(i), real(self, c, i))[1])
+    digests = store.chunk_digests(meta.ctx_id, range(6))
+
+    assert len(reads) == 1, f"read {len(reads)} chunks to hash 6"
+    assert digests == {i: c["sha256"]
+                       for i, c in enumerate(store.get(meta.ctx_id).chunks)}
+
+
+def test_chunk_digests_falls_back_when_the_file_changed_size(cfg, tmp_path):
+    """load_file references user files IN PLACE, so a file can change under a chunk index.
+    Serving a stored digest for content that is no longer there is a FALSE cache HIT -- an
+    answer handed back for bytes the model never saw.
+
+    The first chunk is deliberately left BYTE-IDENTICAL across the rewrite, because the
+    probe read only ever proves the chunk it reads. A rewrite that preserves the opening
+    chunk and changes a later one sails past the probe, and the size check is the only
+    thing left standing between it and a stale digest. Written the obvious way -- change
+    everything -- this test passed with the size check deleted.
+    """
+    store = ContextStore(cfg)
+    p = tmp_path / "log.txt"
+    p.write_text("aaa\nbbb\nccc\n", encoding="utf-8")
+    meta = store.load_file(str(p))
+    _lines(store, meta, store.read_text(meta.ctx_id))
+    stored = [c["sha256"] for c in store.get(meta.ctx_id).chunks]
+
+    p.write_text("aaa\nZZZ\n", encoding="utf-8")   # chunk 0 survives, chunk 1 does not
+    fresh = store.chunk_digests(meta.ctx_id, [0, 1])
+
+    assert fresh[0] == stored[0], "chunk 0 really is unchanged, so the probe cannot help"
+    assert fresh[1] != stored[1], "served a digest for content that is no longer there"
+    assert fresh[1] == _text_digest(store.read_chunk(meta.ctx_id, 1))
+
+
+def test_chunk_digests_probe_catches_a_size_preserving_edit(cfg, tmp_path):
+    """_offsets_still_apply cannot see an edit that preserves the byte count -- its own
+    docstring says so. The probe read is the second half of the trust: without it, a
+    same-size edit would serve every stored digest for content that changed."""
+    store = ContextStore(cfg)
+    p = tmp_path / "log.txt"
+    p.write_text("aaa\nbbb\n", encoding="utf-8")
+    meta = store.load_file(str(p))
+    _lines(store, meta, store.read_text(meta.ctx_id))
+
+    p.write_text("AAA\nBBB\n", encoding="utf-8")   # same byte count, different bytes
+    fresh = store.chunk_digests(meta.ctx_id, [0, 1])
+
+    assert fresh[0] == _text_digest("AAA\n"), "the probe did not catch a same-size edit"
+    assert fresh[1] == _text_digest("BBB\n")
