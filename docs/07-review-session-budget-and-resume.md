@@ -358,10 +358,70 @@ in `docs/08`.
 **Verify is 394 passed, 1 skipped** (was 377). Twenty-five mutants across the three leaves,
 all twenty-five caught — three only after the test that should have caught them was rebuilt.
 
-**Still unverified, and needing real tokens rather than another reading.** The 5x output
+**Still unverified, and needing real tokens rather than another reading.** (Measured in
+§12, which corrects this paragraph: the reduction in EMITTED TEXT is ~100x, the reduction
+in BILLED output ~6%, because 99.4% of billed output is thinking tokens.) The 5x output
 reduction is a HYPOTHESIS: no batch has run under the new contract. Re-run the same 33
 chunks and read `otok` from the run's own `sub_batch` record or the ledger, never from
 `rlm_estimate`, which stays pessimistic for up to 48 hours while the verbose records age
 out of `expected_output`'s window. If output does not fall by most of 5x, the diagnosis in
 this section is wrong. §9's live gaps — an `rlm_query` stop→resume against Docker, and a
 real floor hit — are also still open.
+
+## 12. The receipt (2026-09-03) — measured, and it corrects §11
+
+§11 called the 5x output reduction a hypothesis and said to measure it. Measured. **The
+contract did what it controls and almost nothing to the bill**, because billed output on
+this path is not the text the model emits.
+
+Run: 43 repo modules bundled, `files` chunking, 5 chunks of ~30k tokens, the same
+adversarial prompt shape as §10 — a review that states its own `output exactly NO ISSUES`
+format, now competing with the envelope. Server confirmed on the new code first, for free,
+by finding `sha256` in the chunk meta.
+
+**What the contract achieved.** Every chunk came back as one raw `{"findings": [...]}`
+object, the empty case as `{"findings": []}`, no fences, no preamble — including under the
+competing format instruction, so the precedence clause holds. §10's "page of reasoning
+ending in NO ISSUES" is gone: the visible answer is **91 tokens** where it used to be a
+page. Answers are uniform and parseable, and the report is legible for the first time.
+
+**What it did not achieve.** Billed output per call went 9,953 → ~9,350, about 6%. One
+chunk measured raw against the CLI:
+
+| | value |
+|---|---|
+| visible answer | 366 chars ≈ 91 tokens |
+| billed `output_tokens` | 15,768 |
+| of which `thinking_tokens` | **15,666 — 99.4%** |
+| `input_tokens` | 10 |
+| `cache_creation` + `cache_read` | 38,470 + 25,679 = 64,149 |
+| cost, one call | $0.1943 |
+
+**99.4% of billed output is thinking**, which no system prompt suppresses. §10 and §11
+attributed the 328,453 to the default persona padding its answer; that was at most a small
+part of it. The persona explains the *shape* of the old answers, not their cost.
+
+`--effort low` is not the lever either: same chunk, thinking went **up** (15,666 → 18,011)
+while the answer degraded to `{"findings": []}`, losing the real defect default effort
+found. Cost fell 32% ($0.1943 → $0.1325), so `--effort` moves pricing rather than
+reasoning volume — a false-negative review is not worth that.
+
+**What this validates.** `budget.expected_output` was right for a better reason than §10
+knew. Pricing output at the ledger's measured mean rather than the cap is correct precisely
+*because* thinking dominates and is stable per chunk size — the cap was never going to
+predict it, and no prompt change will.
+
+**A new defect of the same family, and it is the one worth fixing next.** THE INPUT SIDE IS
+UNDER-COUNTED ABOUT 2x. `_est_in` records a local estimate — 30,232 for chunk 0 — while the
+account was billed 64,149. The gap is the CLI's own per-call baseline: a
+`Reply with exactly: ok` call, 22 characters, created **29,268** cache tokens before seeing
+any of our content. So every sub-call carries ~29k of input we never ledger, ~960k across a
+33-chunk batch. This is exactly §10's defect with the operands swapped: the forecast and the
+floor reserve against a number that is not what gets billed. `_est_in` needs the same
+treatment `expected_output` got — a measured per-call floor, not an arithmetic estimate.
+
+Also worth noting for anyone reading a batch report: its `tokens: N in` line is the CLI's
+`input_tokens`, which EXCLUDES cache creation and reads. It read `49 in` for a run that
+billed ~320k. The ledger's `est_in` is closer and still 2x low.
+
+**Verify unchanged at 394 passed, 1 skipped** — no code changed for this section.
