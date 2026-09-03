@@ -193,14 +193,26 @@ def batch_ctx(deps, monkeypatch):
     module's config.
     """
     def _make(n_chunks: int = 3, *, est_tokens: int = 1000, strategy: str = "lines",
-              on_read=None, text_for=None):
+              on_read=None, text_for=None, digests_stored: bool = False):
         """``text_for(i)`` overrides a chunk's text. The answer cache is keyed by chunk
         bytes, so a test that wants to prove "only the CHANGED chunk is re-asked" needs
-        to change exactly one chunk's bytes and nothing else."""
+        to change exactly one chunk's bytes and nothing else.
+
+        ``digests_stored`` picks which side of ``ContextStore.chunk_digests`` runs: True
+        serves digests from the stub's meta (one probe read for the whole scan), False
+        makes every digest come from a real ``read_chunk``. A test that counts reads has
+        to be able to choose, and the counts only mean anything if the stub mirrors the
+        real method's read pattern rather than inventing its own."""
         import src.batch as batch_mod
+        from src.context_store import _text_digest
+
+        def _chunk_text(i):
+            return text_for(i) if text_for is not None else f"chunk{i}"
 
         class _Meta:
-            chunks = [{"i": i, "est_tokens": est_tokens} for i in range(n_chunks)]
+            chunks = [{"i": i, "est_tokens": est_tokens,
+                       **({"sha256": _text_digest(_chunk_text(i))} if digests_stored else {})}
+                      for i in range(n_chunks)]
             chunk_strategy = strategy
 
         class _Store:
@@ -210,7 +222,19 @@ def batch_ctx(deps, monkeypatch):
             def read_chunk(self, ctx_id, i):
                 if on_read is not None:
                     on_read(i)   # lets a test prove WHEN a chunk was read, not just that it was
-                return text_for(i) if text_for is not None else f"chunk{i}"
+                return _chunk_text(i)
+
+            def chunk_digests(self, ctx_id, indices):
+                """Mirrors ContextStore.chunk_digests, probe read included -- a stub that
+                skipped the probe would let a read-counting test assert a number the real
+                store never produces."""
+                idx = list(indices)
+                stored = {i: _Meta.chunks[i].get("sha256", "")
+                          for i in idx if 0 <= i < len(_Meta.chunks)}
+                if idx and all(stored.get(i) for i in idx):
+                    if stored[idx[0]] == _text_digest(self.read_chunk(ctx_id, idx[0])):
+                        return stored
+                return {i: _text_digest(self.read_chunk(ctx_id, i)) for i in idx}
 
             def read_text(self, ctx_id):
                 return "".join(f"chunk{i}\n" for i in range(n_chunks))

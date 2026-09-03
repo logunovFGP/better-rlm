@@ -35,6 +35,11 @@ class Chunk:
     label: str = ""
     byte_start: int = -1   # -1 = unknown; set by ContextStore.set_chunks, readers must fall back
     byte_end: int = -1
+    #: sha256 of this chunk's own text. "" = unknown; set by ContextStore.set_chunks for
+    #: the same reason as the offsets above, and readers must fall back the same way. It
+    #: is the identity the answer cache keys on, so storing it here is what lets the cache
+    #: scan skip re-reading every chunk purely to hash it.
+    sha256: str = ""
 
     def as_dict(self) -> dict:
         return asdict(self)

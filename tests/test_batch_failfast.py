@@ -396,6 +396,23 @@ def test_the_map_fans_out_with_the_output_contract_in_the_system_slot(monkeypatc
     assert '{"findings": []}' in bt.MAP_SYSTEM
 
 
+def test_the_cache_scan_no_longer_reads_every_chunk_to_hash_it(monkeypatch, batch_ctx):
+    """`_scan_cache` used to read EVERY selected chunk purely to hash it, and the batch
+    then read each un-cached one again inside its worker -- a full extra pass over the
+    context before a single call went out. With the digest stamped into the chunk meta the
+    scan costs one probe read, whatever the chunk count.
+    """
+    reads: list[int] = []
+    d, _ = batch_ctx(3, on_read=reads.append, digests_stored=True)
+    monkeypatch.setattr(
+        bt, "sub_query_batch", lambda cfg, prompts, model, concurrency=1, **kw: [
+            sq.SubResult(i, "x", 1, 1) for i in range(len(prompts))])
+
+    bt.run(d, "ctx_x", "audit", reduce=False)
+
+    assert reads == [0], f"the scan read {reads} to hash 3 chunks"
+
+
 def test_a_single_sub_query_also_carries_the_terse_contract(monkeypatch, batch_ctx):
     """rlm_sub_query is the same default-persona exposure as the batch, one call wide --
     and it is uncapped in practice on the OAuth path, so a padded answer costs whatever
