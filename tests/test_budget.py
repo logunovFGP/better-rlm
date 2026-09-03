@@ -360,6 +360,39 @@ def test_the_key_separates_text_prompt_and_model(bcfg):
     assert results.content_key("same text", "same prompt", "same-model") == base
 
 
+def test_the_key_separates_output_contracts(bcfg):
+    """An answer's key must name everything that produced it. The map used to send no
+    system prompt and now sends batch.MAP_SYSTEM, which turns a page of prose into a JSON
+    envelope: same chunk, same prompt, same model, DIFFERENT answer. Without `system` in
+    the key a resumed run serves the old contract's answers under the new one, and with
+    reduce=True merges prose and envelopes into a single synthesis.
+    """
+    base = results.content_key("same text", "same prompt", "m")
+    keyed = results.content_key("same text", "same prompt", "m", bt.MAP_SYSTEM)
+    assert keyed != base
+    assert keyed == results.content_key("same text", "same prompt", "m", bt.MAP_SYSTEM)
+    # The TEXT is hashed, not a version tag, so editing the constant self-invalidates.
+    assert results.content_key("same text", "same prompt", "m", bt.MAP_SYSTEM + "!") != keyed
+    # The manifest too: one holding answers from two contracts mislabels them as badly.
+    assert results.run_key("p", "m", "files", 3, bt.MAP_SYSTEM) != results.run_key(
+        "p", "m", "files", 3)
+
+
+def test_the_estimate_counts_the_system_prompt_it_will_send(bcfg):
+    """estimate_batch's contract is that every number in it is the number that will
+    actually be sent. MAP_SYSTEM rides on EVERY map call, so omitting it under-counts
+    input by its size times the chunk count -- small next to a 300K overshoot, but this
+    module exists to stop a forecast drifting from its receipt.
+    """
+    kw = {"prompt": "audit", "max_output_tokens": 2048, "reduce": False}
+    without = budget.estimate_batch(bcfg, [1000] * 10, **kw)
+    with_sys = budget.estimate_batch(bcfg, [1000] * 10, system=bt.MAP_SYSTEM, **kw)
+
+    delta = with_sys.input_tokens - without.input_tokens
+    assert delta == budget.estimate_tokens(bt.MAP_SYSTEM) * 10
+    assert with_sys.output_tokens == without.output_tokens, "output must not move"
+
+
 def test_a_corrupt_cache_entry_is_a_miss_not_a_crash(bcfg):
     """Entries are written atomically so torn files should not exist, but a bad one
     must still cost one re-ask rather than take the batch down."""

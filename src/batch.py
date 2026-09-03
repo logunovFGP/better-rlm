@@ -38,6 +38,50 @@ BATCH_MAX_TOKENS = 2048
 #: was 4096 at the call site while the forecast priced it at 2048.
 REDUCE_MAX_TOKENS = 4096
 
+#: The map's output contract. Every sub-model call used to run with NO system prompt at
+#: all -- `sub_query`/`sub_query_batch` and both transports have always accepted one and
+#: no caller ever passed it -- so each chunk was answered by the `claude` CLI's default
+#: coding-assistant persona, which explains its work. Measured cost of that: 328,453
+#: output tokens on a 33-chunk run capped at 2048, 4.9x the cap (docs/07 §10).
+#:
+#: A schema, not a plea. "Output exactly X" is the instruction that already failed; a
+#: model holds an envelope far more tightly than a phrasing rule. Four parts earn their
+#: tokens: the envelope; the EMPTY case shown as its own example and named correct, since
+#: that is the one a model resists and showing it only filled teaches that filled is the
+#: goal; the fence ban, or the same padding returns wearing a json fence; and the
+#: precedence clause, because the caller's own "output exactly NO ISSUES" now COMPETES
+#: with this, and competing instructions are what produce hedging in the first place.
+#:
+#: Deliberately generic. This tool maps ANY prompt over chunks -- "summarize each",
+#: "extract every IP" -- so the field is `findings`, already this module's word for the
+#: per-chunk answers (`_render` builds `findings`, `_reduce` consumes them), and never
+#: anything review-specific.
+MAP_SYSTEM = (
+    "You analyze ONE chunk of a larger document for an automated pipeline. Your "
+    "output is parsed by a program, not read by a person.\n"
+    "Reply with one raw JSON object and nothing else — no prose around it, no code "
+    "fences, no reasoning:\n"
+    '{"findings": ["<one self-contained sentence>", "..."]}\n'
+    "Nothing to report is the empty list. That is a complete, correct answer, and the "
+    "expected one for most chunks:\n"
+    '{"findings": []}\n'
+    'Example — request: "find hardcoded credentials", chunk contains one:\n'
+    '{"findings": ["Line 412 assigns API_KEY to the literal \'sk-live-4f...\'."]}\n'
+    "The user's request may describe its own output format. That describes the CONTENT "
+    "of a finding string; the JSON envelope above always wins."
+)
+
+#: The same obedience contract WITHOUT the envelope, for the three calls whose answer is
+#: rendered straight to a reader: the synthesis, a single sub-query, and the auth probe.
+#: A findings array there would destroy the deliverable -- `_reduce` exists to produce one
+#: coherent prose answer -- so only the map, which fans out N-wide and is read by a
+#: program, gets the schema.
+TERSE_SYSTEM = (
+    "You are answering inside an automated pipeline. Emit only the answer the request "
+    "asks for: no preamble, no restating the task, no reasoning, no closing summary. "
+    "If the request names an exact string to reply with, reply with that string alone."
+)
+
 
 # --------------------------------------------------------------------------- #
 # Chunking default
@@ -83,12 +127,17 @@ def _ensure_chunked(d: Deps, ctx_id: str):
 # Cache scan
 # --------------------------------------------------------------------------- #
 def _scan_cache(d: Deps, ctx_id: str, sel: list[int], prompt: str, model: str, *,
-                fresh: bool = False) -> tuple[dict[int, str], dict[int, results.Saved]]:
+                fresh: bool = False,
+                system: str = "") -> tuple[dict[int, str], dict[int, results.Saved]]:
     """Hash every selected chunk's text and look each one up in the answer cache.
 
     Returns ``(keys, cached)``: the content key per chunk index (the run needs it to store
     new answers under), and the answers already on disk. ``fresh`` deletes instead of
     looking up — the deliberate way to re-ask.
+
+    ``system`` rides into the key so a cached answer is only reused under the contract
+    that produced it; see ``results.content_key``. It must be the same value the map
+    actually sends, or the scan reports hits the run cannot use.
 
     This reads every selected chunk once, and the batch reads each un-cached one again
     lazily inside its worker. Reads are seek-based and bounded to one chunk at a time, so
@@ -100,7 +149,7 @@ def _scan_cache(d: Deps, ctx_id: str, sel: list[int], prompt: str, model: str, *
     cached: dict[int, results.Saved] = {}
     for i in sel:
         text = d.store.read_chunk(ctx_id, i)
-        k = results.content_key(text, prompt, model)
+        k = results.content_key(text, prompt, model, system)
         keys[i] = k
         if fresh:
             results.cache_delete(d.cfg, k)
@@ -135,12 +184,14 @@ def estimate(d: Deps, ctx_id: str, prompt: str = "", max_chunks: int = 0,
     sub_model = models.select(d.cfg, models.Role.SUB)
     # The cache scan needs the exact chunk text, which only a chunked context can serve;
     # an unchunked one reports zero hits and says so rather than guess.
-    cached = _scan_cache(d, ctx_id, sel, prompt, sub_model)[1] if chunked else {}
+    cached = (_scan_cache(d, ctx_id, sel, prompt, sub_model, system=MAP_SYSTEM)[1]
+              if chunked else {})
     done_pos = {pos for pos, i in enumerate(sel) if i in cached}
     est = budget.estimate_batch(
         d.cfg, [int(chunks[i].get("est_tokens", 0)) for i in sel], prompt=prompt,
         max_output_tokens=BATCH_MAX_TOKENS, reduce=reduce,
-        reduce_output_tokens=REDUCE_MAX_TOKENS, done=done_pos, now=d.clock)
+        reduce_output_tokens=REDUCE_MAX_TOKENS, done=done_pos, system=MAP_SYSTEM,
+        now=d.clock)
     cap, _src = budget.ceiling(d.cfg)
     body = budget.render(budget.judge(d.cfg, est, now=d.clock),
                          what=f"batch over {ctx_id} ({strategy}, {n} chunks)")
@@ -204,7 +255,8 @@ def one(d: Deps, ctx_id: str, prompt: str, chunk_index: int = -1) -> str:
             )
         body = d.store.read_text(ctx_id)
     sub_model = models.select(d.cfg, models.Role.SUB)
-    res = sub_query(d.cfg, f"{prompt}\n\n--- CONTEXT ---\n{body}", sub_model)
+    res = sub_query(d.cfg, f"{prompt}\n\n--- CONTEXT ---\n{body}", sub_model,
+                    system=TERSE_SYSTEM)
     if res.error:
         return d.bound(f"ERROR ({sub_model}): {res.error}")
     return d.answer(
@@ -244,10 +296,11 @@ def run(d: Deps, ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = T
     # --- what is already answered? ------------------------------------------------
     # Keyed by chunk CONTENT, so a re-loaded file or a re-bundled repo hits on every
     # byte-identical chunk. The manifest is per run and only for the human.
-    rkey = results.run_key(prompt, sub_model, strategy, n)
+    rkey = results.run_key(prompt, sub_model, strategy, n, MAP_SYSTEM)
     if fresh:
         results.manifest_clear(d.cfg, ctx_id, rkey)
-    keys, cached = _scan_cache(d, ctx_id, sel, prompt, sub_model, fresh=fresh)
+    keys, cached = _scan_cache(d, ctx_id, sel, prompt, sub_model, fresh=fresh,
+                               system=MAP_SYSTEM)
     todo = [i for i in sel if i not in cached]
 
     # --- what will the REMAINDER cost? --------------------------------------------
@@ -256,7 +309,7 @@ def run(d: Deps, ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = T
     est = budget.estimate_batch(d.cfg, sel_tokens, prompt=prompt,
                                 max_output_tokens=BATCH_MAX_TOKENS, reduce=reduce,
                                 reduce_output_tokens=REDUCE_MAX_TOKENS,
-                                done=done_pos, now=d.clock)
+                                done=done_pos, system=MAP_SYSTEM, now=d.clock)
     verdict = budget.judge(d.cfg, est, now=d.clock)
 
     # A fully resumed run is not a free run: with reduce=True the synthesis still reads
@@ -325,7 +378,7 @@ def run(d: Deps, ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = T
               concurrency=d.cfg.subquery_concurrency)
     fresh_results = sub_query_batch(
         d.cfg, prompts, sub_model, concurrency=d.cfg.subquery_concurrency,
-        max_tokens=BATCH_MAX_TOKENS, indices=todo, gate=gate,
+        max_tokens=BATCH_MAX_TOKENS, indices=todo, gate=gate, system=MAP_SYSTEM,
         on_result=lambda r: _persist(d, ctx_id, rkey, keys[r.index], r),
     )
     deferred = sum(1 for r in fresh_results if (r.error or "").startswith("deferred"))
@@ -479,7 +532,8 @@ def _reduce(d: Deps, findings: str, prompt: str, sub_model: str, *, ctx_id: str,
         "Synthesize ONE coherent, de-duplicated answer to the original request across "
         "all chunks. Use only what the findings contain; do not invent anything."
     )
-    red = sub_query(d.cfg, reduce_prompt, sub_model, max_tokens=REDUCE_MAX_TOKENS)
+    red = sub_query(d.cfg, reduce_prompt, sub_model, max_tokens=REDUCE_MAX_TOKENS,
+                    system=TERSE_SYSTEM)
     if not red.error:
         itok += red.input_tokens
         otok += red.output_tokens

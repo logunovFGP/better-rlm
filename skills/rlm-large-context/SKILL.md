@@ -159,7 +159,7 @@ sittings rather than one. Its verdict is one of:
 | **Window budget: unknown** | No `session_budget_tokens` is configured, so spend is measured and reported but nothing is gated. Set it in `config.yaml` to gate. If the server has already hit a real usage limit it prints the local spend it saw at that moment — a floor under your true ceiling, and the number to start from. |
 
 **Answers are cached by CONTENT, not by context.** Every chunk answer is stored under a
-hash of `(chunk bytes, prompt, model)`. Call `rlm_sub_query_batch` again with the same
+hash of `(chunk bytes, prompt, model, output contract)`. Call `rlm_sub_query_batch` again with the same
 prompt — on the same ctx_id, on a **re-loaded copy of the same file**, or on a new bundle
 that happens to contain the same files — and every byte-identical chunk is free. Only
 chunks whose text actually changed are sent. Practical consequences:
@@ -178,6 +178,16 @@ chunks whose text actually changed are sent. Practical consequences:
 - A run that stopped at the budget line reports **STOPPED AT THE BUDGET LINE** with the
   chunk it will resume at. That is a scheduled continuation, not a failure — do not
   report it to the user as an error, and do not retry it in a loop hoping it will finish.
+
+**The batch owns the output shape — say WHAT to find, not how to format it.** Each map
+answer comes back as one JSON object, `{"findings": [...]}`, an empty list meaning nothing
+to report. `rlm_sub_query_batch` sends that contract itself, in the system prompt, and it
+takes precedence over any format your prompt asks for. So write "find every hardcoded
+credential", not "output exactly NO ISSUES if clean" — a competing format instruction is
+now dead weight at best, and at worst it is the thing that makes the sub-model hedge. This
+matters in tokens: for the run that motivated it, the sub-model answered under the `claude`
+CLI's default assistant persona and emitted **328,453 output tokens against a 2,048-per-call
+cap** — pages of reasoning wrapped around a two-word answer. The envelope exists to stop that.
 
 **`rlm_query` cannot be estimated, only bounded — but it is bounded on both sides.** The
 root model decides at run time how many sub-calls to make, so `rlm_estimate` prints a
@@ -209,6 +219,16 @@ prevent.
   That is the paper's `CodeAct (+BM25)` row — a code-executing ReAct agent with a retriever,
   i.e. exactly context offloading — and it scored **22–24%**, worst in the table and barely
   above the bare base model (20–24%). Dense questions spanning the whole repo stay here.
+- **Reviewing a diff or a changeset for defects — and a clean pass here is not a clean bill
+  of health.** A batch maps each chunk *independently*, so a per-file map sees one side of
+  every seam: a caller in one chunk and its callee in another are never held in the same
+  call, and a defect that exists only in the disagreement between them cannot be seen from
+  either side. Measured on this server's own diff: 33 files mapped, 8 candidates raised, all
+  8 refuted on inspection, and the one real cross-module defect — an argument silently
+  dropped between two modules — was invisible to it, while two humans-plus-reading found it.
+  Reviewing a change wants a reader that can pull up a caller and its callee together; that
+  is not this tool. Use it to *inventory* a large diff ("list every file that touches auth"),
+  not to judge one.
 
 ## Workflow
 
