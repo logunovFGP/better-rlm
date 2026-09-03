@@ -24,12 +24,24 @@ as EVIDENCE and reported, but never promoted to the ceiling on its own: it is a 
 under the real one, and gating on a floor puts the stop line below the spend that taught
 it. See ``ceiling``.
 
-INPUT TOKENS ARE ESTIMATED LOCALLY, NEVER TAKEN FROM THE TRANSPORT. The claude-CLI path
-reports the piped prompt at a token count that is not merely low but useless: the failing
-run logged ``itok=1027`` for 103 chunks whose real input was ~3M tokens — three orders of
-magnitude off. Any budget built on the reported figure would have promised near-infinite
-headroom right up to the wall. ``estimate_tokens`` over the bytes we are about to send is
-crude (~4 chars/token) but honest, and it is what both the estimate and the ledger use.
+INPUT TOKENS: THE TRANSPORT'S TOTAL WHERE IT HAS ONE, THE LOCAL ESTIMATE OTHERWISE. The
+claude-CLI path reports ``usage.input_tokens`` at a count that is not merely low but
+useless — the failing run logged ``itok=1027`` for 103 chunks whose real input was ~3M
+tokens, three orders of magnitude off — so for a long time this module estimated input
+locally and ignored the transport entirely.
+
+That was half right. The number is not missing, it is SPLIT: prompt caching puts the bulk
+in ``cache_creation_input_tokens`` and ``cache_read_input_tokens``, and ``input_tokens`` is
+only the uncached remainder. Summing all three (``transport._total_input``) gives the real
+figure, and the ledger now records ``max(local_estimate, reported_total)`` — which needs no
+knowledge of which transport is in play and can only move the recorded number toward the
+truth.
+
+The local estimate still matters, for the two places that must run BEFORE the call: the
+pre-call floor and the forecast. ``estimate_tokens`` over the bytes we are about to send is
+crude (~4 chars/token) and, on its own, ~2x low — it cannot see the harness context the CLI
+prepends, measured at ~29k per call. ``input_overhead`` learns that gap from the ledger and
+both callers add it.
 """
 
 from __future__ import annotations
@@ -84,14 +96,19 @@ def _read_lines(path: Path, since_ts: float) -> list[dict]:
     return out
 
 
-def record(cfg: Config, model: str, itok: int, otok: int, *,
+def record(cfg: Config, model: str, itok: int, otok: int, *, est: int = 0,
            now: Clock = time.time) -> None:
     """Append one call's spend. Best-effort: ledger failure must never fail the call.
 
-    ``itok`` is the caller's LOCAL estimate of what it sent, not the transport's report
-    — see the module docstring for why the reported figure cannot be used.
+    ``itok`` is the best available figure for what the call actually consumed on input —
+    the transport's total when it reports one (cache included, see
+    ``transport._total_input``), otherwise the caller's local estimate. ``est`` is that
+    local estimate, kept beside it so ``input_overhead`` can learn the difference. Records
+    written before ``est`` existed simply carry none and are skipped there.
     """
     rec = {"ts": now(), "model": model, "itok": int(itok), "otok": int(otok)}
+    if est:
+        rec["est"] = int(est)
     try:
         cfg.budget_ledger.parent.mkdir(parents=True, exist_ok=True)
         with _LOCK:
@@ -250,6 +267,10 @@ _OUTPUT_SAMPLE_MIN = 8
 #: runaway completion would inflate every later reservation until the floor refused every
 #: call -- the mistake ``ceiling`` documents for a learned ceiling, in another guise.
 _MAX_OUTPUT_FACTOR = 8.0
+#: Ceiling on the learned per-call input overhead (``input_overhead``). Measured at ~29k
+#: for the `claude` CLI's baseline context; 128k leaves room for a much chattier harness
+#: while still refusing to let one anomalous ledger record reserve a whole window.
+_MAX_INPUT_OVERHEAD = 131_072
 
 
 def estimate_batch(cfg: Config, chunk_tokens: list[int], *, prompt: str,
@@ -274,12 +295,14 @@ def estimate_batch(cfg: Config, chunk_tokens: list[int], *, prompt: str,
     """
     skip = done or set()
     todo = [t for i, t in enumerate(chunk_tokens) if i not in skip]
-    # prompt + system + "--- CHUNK i/n ---" frame: every per-call input that is not the
-    # chunk itself. Sent on each call, so it is priced per call, not once. The `if system`
-    # is load-bearing: estimate_tokens floors at 1 so that a non-empty string never prices
-    # at zero, which would otherwise bill an ABSENT system prompt one token on every call.
+    # prompt + system + "--- CHUNK i/n ---" frame + the harness context the transport adds
+    # of its own: every per-call input that is not the chunk itself. Sent on each call, so
+    # it is priced per call, not once. The `if system` is load-bearing: estimate_tokens
+    # floors at 1 so that a non-empty string never prices at zero, which would otherwise
+    # bill an ABSENT system prompt one token on every call.
     per_prompt_overhead = (estimate_tokens(prompt) + 32
-                           + (estimate_tokens(system) if system else 0))
+                           + (estimate_tokens(system) if system else 0)
+                           + input_overhead(cfg, now=now))
     out_per_call = expected_output(cfg, max_output_tokens, now=now)
     itok = sum(todo) + per_prompt_overhead * len(todo)
     otok = out_per_call * len(todo)
@@ -363,6 +386,42 @@ def expected_output(cfg: Config, max_tokens: int, *, now: Clock = time.time) -> 
         return max_tokens
     mean = sum(int(r.get("otok", 0)) for r in recs) / len(recs)
     return int(min(max(float(max_tokens), mean), max_tokens * _MAX_OUTPUT_FACTOR))
+
+
+def input_overhead(cfg: Config, *, now: Clock = time.time) -> int:
+    """Input tokens a call costs BEYOND the content we hand it, measured from the ledger.
+
+    THE SAME DEFECT AS ``expected_output``, WITH THE OPERANDS SWAPPED. A local estimate of
+    what we send is not what the account is billed: measured on a 30k-token review chunk,
+    ``_est_in`` said 30,232 and the call consumed 64,149. The difference is the `claude`
+    CLI's own baseline context, which arrives before any of ours — a 22-character prompt
+    still created 29,268 cache tokens. Unbudgeted, that is ~960k tokens across a 33-chunk
+    batch, and it lands on the one number a floor exists to keep honest.
+
+    Learned rather than hardcoded, and learned as a DIFFERENCE rather than a mean. Input
+    per call swings with chunk size, so a mean of ``itok`` would forecast nothing; the
+    overhead is the stable part. Each record carries both figures, so the per-call
+    overhead is ``itok - est`` and its median is what this returns.
+
+    The median, not the mean: a batch mixes one small tail chunk with several full ones,
+    and cache creation vs cache read moves ``itok`` by a factor of its own between the
+    first call of a run and the rest. One outlier should not move a floor.
+
+    Bounded like ``expected_output`` and for the same reasons. Below
+    ``_OUTPUT_SAMPLE_MIN`` records there is no measurement, so it returns 0 and the floor
+    behaves exactly as it did before this existed — the cold-start gap, self-correcting
+    after one batch. Negative differences clamp to 0: a transport that reports less than
+    we estimated (or none at all, leaving ``itok`` as the estimate itself) has no overhead
+    to add, and must never be able to *lower* a reservation. ``_MAX_INPUT_OVERHEAD``
+    caps it, because a reservation derived from an unbounded observation stops being an
+    estimate and starts refusing every call (see ``ceiling``).
+    """
+    recs = [r for r in _read_lines(cfg.budget_ledger, now() - _PRUNE_AFTER_H * 3600)
+            if r.get("est")]
+    if len(recs) < _OUTPUT_SAMPLE_MIN:
+        return 0
+    deltas = sorted(max(0, int(r.get("itok", 0)) - int(r.get("est", 0))) for r in recs)
+    return min(deltas[len(deltas) // 2], _MAX_INPUT_OVERHEAD)
 
 
 # --------------------------------------------------------------------------- #

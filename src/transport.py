@@ -262,6 +262,32 @@ class CompletionTransport(ABC):
                         max_tokens: int) -> CompletionResult: ...
 
 
+#: The three fields that together are one call's real input. Prompt caching splits it,
+#: and ``input_tokens`` alone is only the UNCACHED remainder.
+_INPUT_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+
+
+def _total_input(usage) -> int:
+    """Every input token a call consumed, cache included. Accepts a dict (CLI JSON) or an
+    SDK usage object.
+
+    ``input_tokens`` on its own is badly misleading wherever prompt caching is in play. A
+    real 30k-token review chunk reported **10** while the account was billed **64,149** —
+    the rest sat in ``cache_creation_input_tokens`` and ``cache_read_input_tokens``. A
+    22-character prompt reported 10 against 29,268 of cache creation, which is the CLI's
+    own baseline context arriving before any of ours. docs/07 §4 wrote the transport's
+    input figure off as unusable on the strength of that one field; it is usable, just not
+    from that field alone.
+
+    Summed unweighted. Cache creation and reads are priced differently from fresh input
+    (1.25x and 0.1x on the API), so this is tokens PROCESSED rather than a cost-weighted
+    number — the right quantity for a context-window budget, and the honest one to report
+    while the weighting for a subscription window is undocumented.
+    """
+    get = usage.get if isinstance(usage, dict) else lambda k, d=0: getattr(usage, k, d)
+    return sum(int(get(k, 0) or 0) for k in _INPUT_FIELDS)
+
+
 def _result_from_sdk_response(resp, model: str) -> CompletionResult:
     text = "".join(
         getattr(b, "text", "") for b in resp.content
@@ -270,7 +296,7 @@ def _result_from_sdk_response(resp, model: str) -> CompletionResult:
     usage = resp.usage
     return CompletionResult(
         text=text,
-        input_tokens=usage.input_tokens,
+        input_tokens=_total_input(usage),
         output_tokens=usage.output_tokens,
         model=model,
     )
@@ -475,7 +501,7 @@ def _parse_cli_output(returncode: int, stdout: str, stderr: str,
     cost = data.get("total_cost_usd")
     return CompletionResult(
         text=data.get("result") or "",
-        input_tokens=int(usage.get("input_tokens") or 0),
+        input_tokens=_total_input(usage),
         output_tokens=int(usage.get("output_tokens") or 0),
         model=model,
         cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
@@ -527,9 +553,16 @@ class _LedgeredTransport(CompletionTransport):
         flag, so on the OAuth path the cap is never sent and a call can emit several times
         it. Reserving the cap there under-reserves, which is how a floor whose whole job is
         to stop short of the wall lets a single call step over it.
+
+        Input is the local estimate PLUS ``budget.input_overhead``, for the mirror-image
+        reason: the estimate covers what we hand over and not the harness context that
+        rides along with it, measured at roughly 29k per call on the CLI path. Both terms
+        are learned from the ledger and both return the un-learned value on a cold one, so
+        a fresh install reserves exactly what it used to.
         """
-        return self._est_in(messages, system) + budget.expected_output(
-            self._cfg, max_tokens)
+        return (self._est_in(messages, system)
+                + budget.input_overhead(self._cfg)
+                + budget.expected_output(self._cfg, max_tokens))
 
     def complete(self, messages, system, model, max_tokens) -> CompletionResult:
         est_in = self._est_in(messages, system)
@@ -542,7 +575,12 @@ class _LedgeredTransport(CompletionTransport):
         except Exception as exc:
             self._note_if_limit(exc)
             raise
-        budget.record(self._cfg, res.model or model, est_in, res.output_tokens)
+        # The transport's total when it has one (cache included -- see _total_input),
+        # the estimate otherwise. max() needs no knowledge of which transport is in
+        # play and can only ever move the recorded figure UP, toward the truth; est_in
+        # rides along so input_overhead can learn the gap between them.
+        budget.record(self._cfg, res.model or model,
+                      max(est_in, res.input_tokens), res.output_tokens, est=est_in)
         return res
 
     async def acomplete(self, messages, system, model, max_tokens) -> CompletionResult:
@@ -553,7 +591,12 @@ class _LedgeredTransport(CompletionTransport):
         except Exception as exc:
             self._note_if_limit(exc)
             raise
-        budget.record(self._cfg, res.model or model, est_in, res.output_tokens)
+        # The transport's total when it has one (cache included -- see _total_input),
+        # the estimate otherwise. max() needs no knowledge of which transport is in
+        # play and can only ever move the recorded figure UP, toward the truth; est_in
+        # rides along so input_overhead can learn the gap between them.
+        budget.record(self._cfg, res.model or model,
+                      max(est_in, res.input_tokens), res.output_tokens, est=est_in)
         return res
 
     def _note_if_limit(self, exc: BaseException) -> None:

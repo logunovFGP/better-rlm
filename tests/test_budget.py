@@ -968,3 +968,71 @@ def test_a_budget_stop_carries_both_engine_markers():
     e = budget.BudgetStopError(1, 2, 3)
     assert aborts_batch(e), "batched fan-outs must abort on it"
     assert stops_run(e), "the root loop must convert it to a resumable limit"
+
+
+# --- input_overhead: the output-cap defect with the operands swapped -------------------
+
+def test_input_overhead_learns_the_median_difference(bcfg):
+    """Learned as a DIFFERENCE, not a mean. Input per call swings with chunk size, so a
+    mean of itok would forecast nothing; the harness context riding along with every call
+    is the stable part, and each record carries both figures so it is derivable.
+
+    The median, because a batch mixes one small tail chunk with several full ones and the
+    cache-creation/cache-read split moves itok by a factor of its own between the first
+    call of a run and the rest. One outlier must not move a floor.
+    """
+    for _ in range(7):
+        budget.record(bcfg, "m", 30_000, 10, est=1_000)      # difference 29,000
+    budget.record(bcfg, "m", 999_000, 10, est=1_000)         # one wild outlier
+
+    assert budget.input_overhead(bcfg) == 29_000
+
+
+def test_input_overhead_is_zero_on_a_cold_ledger(bcfg):
+    """Below the sample minimum there is no measurement, so it contributes nothing and the
+    floor behaves exactly as it did before this existed. The same deliberate cold-start gap
+    expected_output has, self-correcting after one batch -- seeding it would mean inventing
+    a measurement."""
+    for _ in range(3):
+        budget.record(bcfg, "m", 30_000, 10, est=1_000)
+
+    assert budget.input_overhead(bcfg) == 0
+
+
+def test_input_overhead_ignores_records_that_predate_it_and_never_goes_negative(bcfg):
+    """Two guards. Records written before `est` existed carry none and cannot contribute a
+    difference; and a transport reporting LESS than we estimated -- or nothing at all,
+    leaving itok as the estimate itself -- has no overhead to add. A learned term must
+    never be able to LOWER a reservation."""
+    for _ in range(8):
+        budget.record(bcfg, "m", 30_000, 10)          # no est: the old record shape
+    assert budget.input_overhead(bcfg) == 0, "learned from records with no estimate"
+
+    for _ in range(8):
+        budget.record(bcfg, "m", 500, 10, est=30_000)  # reported < estimated
+    assert budget.input_overhead(bcfg) == 0, "a negative difference lowered the floor"
+
+
+def test_input_overhead_is_clamped(bcfg):
+    """A reservation derived from an unbounded observation stops being an estimate and
+    starts refusing every call -- the reason `ceiling` refuses to learn from a usage limit
+    and `expected_output` clamps at _MAX_OUTPUT_FACTOR."""
+    for _ in range(8):
+        budget.record(bcfg, "m", 10_000_000, 10, est=1_000)
+
+    assert budget.input_overhead(bcfg) == budget._MAX_INPUT_OVERHEAD
+
+
+def test_the_estimate_prices_the_harness_context_once_per_call(bcfg):
+    """estimate_batch's contract is that every number in it is what will actually be sent.
+    The harness context rides on EVERY call, so it is priced per call -- 10 chunks means
+    ten times, not once."""
+    for _ in range(8):
+        budget.record(bcfg, "m", 30_000, 10, est=1_000)
+    assert budget.input_overhead(bcfg) == 29_000
+
+    est = budget.estimate_batch(bcfg, [1000] * 10, prompt="audit",
+                                max_output_tokens=2048, reduce=False)
+
+    # 10 chunks of 1,000, plus per call: prompt 1 + frame 32 + overhead 29,000.
+    assert est.input_tokens == 10 * 1_000 + 10 * (1 + 32 + 29_000)
