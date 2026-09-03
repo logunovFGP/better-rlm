@@ -83,10 +83,10 @@ def test_auth_label_on_the_sdk_path_never_shells_out(monkeypatch):
 
 
 # --- the model that actually answered ----------------------------------------
-def test_sub_result_carries_the_model_the_transport_reported(monkeypatch):
+def test_sub_result_carries_the_model_the_transport_reported(monkeypatch, cfg):
     monkeypatch.setattr(sq, "_call", lambda *a, **k: ("hi", 1, 2, "claude-haiku-4-5"))
-    assert sq.sub_query("p", "asked-for-id").model == "claude-haiku-4-5"
-    assert sq.sub_query_batch(["a", "b"], "asked-for-id", concurrency=1)[0].model == \
+    assert sq.sub_query(cfg, "p", "asked-for-id").model == "claude-haiku-4-5"
+    assert sq.sub_query_batch(cfg, ["a", "b"], "asked-for-id", concurrency=1)[0].model == \
         "claude-haiku-4-5"
 
 

@@ -38,4 +38,5 @@ include = ["src*", "rlm*"]
 [tool.pytest.ini_options]
 markers = [
     "docker: needs a running Docker daemon; excluded from the daemon-free guarantee",
+    "live: makes a real model call; excluded from the no-spend guarantee",
 ]

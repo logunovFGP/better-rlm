@@ -729,25 +729,25 @@ Role→model mapping lives in one place — `src/models.py` — not hardcoded ac
 
 `rlm_status` prints both configured and resolved models for the active auth mode.
 
-### Providers — one vendor locally, any vendor remotely
+### Providers — Anthropic only, on purpose
 
-`provider` (`config.yaml` or `RLM_PROVIDER`) selects the vendor: **`anthropic`** (default) ·
-`gemini` · `openai` · `azure_openai` · `portkey`.
+`provider` (`config.yaml` or `RLM_PROVIDER`) accepts **`anthropic`** and nothing else. Any other
+value raises `NotImplementedError` at the first model call — not at startup, so the read-only tools
+(`rlm_grep`, `rlm_exec`, `rlm_chunk_context`, `rlm_inspect_context`) keep working regardless.
 
-- **`anthropic` is the only provider needing no API key** — it authenticates through the local
-  `claude` CLI login. That's why it's the default and why local runs stay zero-setup.
-- **Every other provider needs its key** (`GEMINI_API_KEY`, `OPENAI_API_KEY`, …) plus that vendor's
-  model IDs in `root_model`/`sub_model`. A missing key is a loud error at resolve time, not a
-  failed call halfway through.
-- **This exists for remote deploys.** A container has no keychain for the `claude` CLI to read, so
-  `anthropic` + OAuth cannot work there; a keyed provider can.
+**Why the restriction exists.** The session-window budget — the spend ledger, the 95% floor under
+every completion, the resumable stop — lives in the Anthropic transport wrapper
+(`transport._LedgeredTransport`). Other vendors were served by the vendored engine's own clients,
+which never resolve a transport of ours, so those runs recorded no spend, passed no gate and
+learned no ceiling. The budget existed on paper and refused nothing, and the next `rlm_estimate`
+then reported headroom that had already been consumed. A budget that silently does not apply is
+worse than no budget, so the unsupported path is refused rather than half-served.
 
-No per-vendor code is written by hand: the vendored engine at `./rlm` already ships clients for all of
-the above, so a non-Anthropic provider reuses *its* client through one adapter
-(`transport.EngineClientTransport`) and gains only our shared throttle and 429 retry. Anthropic
-keeps two dedicated transports (`CliTransport`, `ApiTransport`) precisely because it's the odd one
-out with a keyless path. Mixing vendors per role (Claude root + a cheaper sub elsewhere) is
-possible — the engine takes `other_backends` separately — but isn't wired to config yet.
+**`anthropic` also needs no API key** — it authenticates through the local `claude` CLI login, which
+is why local runs stay zero-setup. `mode: api` with `ANTHROPIC_API_KEY` covers the case where no CLI
+keychain exists, such as a container. Re-enabling another vendor means giving it a transport that
+passes through the same ledger and floor; the engine's own clients are still vendored and ready for
+that.
 
 ---
 

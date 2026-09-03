@@ -9,6 +9,7 @@ reference, not memory.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -65,17 +66,10 @@ def _sub_ctx(m: dict) -> int:
     # sub_context_tokens explicitly to override in either direction.
     return min(limit, SUB_CONTEXT_CAP)
 
-# Provider → env var holding its API key. The engine (rlm.clients.get_client) already
-# routes these backends; this map is only how we locate the credential. Anthropic is
-# listed but special: it is the ONE provider that can authenticate with no key at all,
-# through the local `claude` CLI login — see auth.resolve_auth_mode.
-PROVIDER_KEY_ENV: dict[str, str] = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "gemini": "GEMINI_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "azure_openai": "AZURE_OPENAI_API_KEY",
-    "portkey": "PORTKEY_API_KEY",
-}
+# There is no provider → API-key map any more. Anthropic is the only supported provider
+# (auth.require_anthropic refuses the rest, because only its transport passes through the
+# session-window ledger and floor), and it reads ANTHROPIC_API_KEY directly on the `api`
+# path — or needs no key at all on the default one, through the local `claude` CLI login.
 
 _DEFAULTS: dict[str, Any] = {
     "root_model": MODEL_SONNET_5,
@@ -139,6 +133,29 @@ _DEFAULTS: dict[str, Any] = {
     "cli_no_session_persistence": True,  # --no-session-persistence : stateless calls
     "cli_fallback_model": "",            # optional --fallback-model on overload
     "cli_extra_args": [],                # escape hatch: extra argv tokens
+    # ---- Session-window token budget (see budget.py) ----------------------------
+    # A subscription's usage limit is a ROLLING WINDOW, not a per-call cap: one 103-chunk
+    # batch drew 60% of a 4-hour window, was interrupted, and returned nothing — the whole
+    # spend bought no result. These knobs let the server estimate a run BEFORE it starts,
+    # refuse to walk off the cliff mid-run, and resume what a stopped run already paid for.
+    "session_window_h": 5.0,          # rolling usage window the vendor enforces
+    # 0 = UNKNOWN, and unknown is the honest default: Anthropic publishes no token
+    # ceiling for a subscription and exposes no endpoint to read one, so a baked-in
+    # number would be fiction. With 0 the server still estimates and still resumes; it
+    # just cannot gate on an absolute cap — until it LEARNS one by hitting a usage limit
+    # (budget.note_limit_hit records the window spend at the wall). Set it explicitly to
+    # gate from the first run.
+    "session_budget_tokens": 0,
+    "budget_stop_fraction": 0.95,     # stop a run at this share of the window budget
+    "budget_ledger": "~/.rlm/usage.jsonl",   # append-only per-call spend record
+    "budget_state": "~/.rlm/budget.json",    # learned ceiling + last observed limit
+    # ---- Content-addressed answer cache (see results.py) -------------------------------
+    # Keyed by (chunk bytes, prompt, model), so a re-loaded file or a re-bundled repo reuses
+    # every answer whose chunk is byte-identical. No TTL: an entry stays correct for as
+    # long as those three match. Disk is bounded by bytes with LRU eviction instead.
+    "cache_dir": "~/.rlm/cache",
+    "cache_max_bytes": 256 * 1024 * 1024,   # ~32k answers at the 2048-token map cap
+    "cache_sweep_cooldown_s": 300,          # one sweep per window across the daemon pool
     # Structured file logging + bounded retention (see logsetup.py). Per-PID rotated
     # files in log_dir; a startup sweep caps total files/bytes/age across ALL processes
     # so many churning server processes can never fill the disk.
@@ -221,6 +238,14 @@ class Config:
     cli_no_session_persistence: bool
     cli_fallback_model: str
     cli_extra_args: tuple[str, ...]
+    session_window_h: float
+    session_budget_tokens: int
+    budget_stop_fraction: float
+    budget_ledger: Path
+    budget_state: Path
+    cache_dir: Path
+    cache_max_bytes: int
+    cache_sweep_cooldown_s: int
     log_level: str
     log_to_file: bool
     log_max_bytes: int
@@ -282,6 +307,14 @@ def load_config() -> Config:
         cli_no_session_persistence=bool(m["cli_no_session_persistence"]),
         cli_fallback_model=str(m["cli_fallback_model"]),
         cli_extra_args=tuple(str(x) for x in m["cli_extra_args"]),
+        session_window_h=float(m["session_window_h"]),
+        session_budget_tokens=int(m["session_budget_tokens"]),
+        budget_stop_fraction=float(m["budget_stop_fraction"]),
+        budget_ledger=Path(os.path.expanduser(str(m["budget_ledger"]))),
+        budget_state=Path(os.path.expanduser(str(m["budget_state"]))),
+        cache_dir=Path(os.path.expanduser(str(m["cache_dir"]))),
+        cache_max_bytes=int(m["cache_max_bytes"]),
+        cache_sweep_cooldown_s=int(m["cache_sweep_cooldown_s"]),
         log_level=str(m["log_level"]).upper(),
         log_to_file=bool(m["log_to_file"]),
         log_max_bytes=int(m["log_max_bytes"]),
@@ -294,6 +327,17 @@ def load_config() -> Config:
         store_dir=Path(os.path.expanduser(str(m["store_dir"]))),
         sources_file=Path(os.path.expanduser(str(m["sources_file"]))),
     )
+
+
+#: A source of wall-clock seconds. Injected as a keyword with ``time.time`` as the
+#: default, so production reads the real clock and a test can hand over a frozen one.
+#:
+#: ONLY wall-clock positions take this. ``time.monotonic()`` elapsed-duration reads
+#: (tool_call dur_ms, the throttle's inter-dispatch gap, cli_spawn timing) deliberately
+#: do NOT: freezing them makes every measured duration zero, which tests nothing and
+#: would break the throttle's spacing. The distinction is "where are we on the calendar"
+#: versus "how long did that take".
+Clock = Callable[[], float]
 
 
 def estimate_tokens(text_or_len: str | int) -> int:

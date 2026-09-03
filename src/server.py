@@ -27,31 +27,30 @@ from itertools import islice
 
 from mcp.server.fastmcp import FastMCP
 
-from . import auth, models, sources, transport
+from . import auth, batch, budget, models, sources, transport
 from .chunking import STRATEGIES, chunk_text
-from .config import (
-    PROVIDER_KEY_ENV,
-    cost_usd,
-    estimate_tokens,
-    load_config,
-)
-from .context_store import ContextStore
-from .engine import ReplSession, run_query
-from .logsetup import configure_logging, log_event, logged_tool, note_startup
+from .deps import Deps
+from .engine import ReplSession, query_checkpoint_path, run_query
+from .subquery import sub_query
+from .logsetup import log_event, logged_tool, note_startup
 # meta_block keeps its old private name: tests reach for srv._meta_block. It and
 # skipped_block are pure ContextMeta presentation, moved to output.py to keep this file
 # under 800 lines; skipped_block is called from meta_block there, not from here.
-from .output import bound_output
 from .output import meta_block as _meta_block
 from .sandbox_reap import container_image_status
 from .shutdown import install_shutdown_hooks
-from .subquery import sub_query, sub_query_batch
 
-CFG = load_config()
-# stdout is the JSON-RPC channel; detailed logs go to a per-PID file in log_dir with
-# bounded retention, and stderr stays WARNING-only (see logsetup.py).
-LOG = configure_logging(CFG)
-STORE = ContextStore(CFG)
+#: THE COMPOSITION ROOT. The one place in this package that resolves real config, opens
+#: real log handlers and points at the real store — built once, at import, and passed
+#: down explicitly from here. Nothing below reaches for config on its own, which is what
+#: lets a test construct its own Deps over tmp_path instead of patching these globals
+#: (see deps.py for the pollution bug that motivated it).
+#: stdout stays the JSON-RPC channel; logs go to a per-PID file with bounded retention
+#: and stderr stays WARNING-only (see logsetup.py).
+DEPS = Deps.create()
+CFG = DEPS.cfg      # read-only aliases, kept because ~20 call sites below are plain
+LOG = DEPS.log      # presentation over these and reading DEPS.cfg everywhere adds noise
+STORE = DEPS.store  # without adding a seam — the seam is DEPS itself.
 mcp = FastMCP("rlm")
 
 _repl: ReplSession | None = None
@@ -64,26 +63,14 @@ def _get_repl() -> ReplSession:
     return _repl
 
 
+# Output bounding lives on Deps so batch.py can reach it without importing server.
+# These stay as one-liners because the raw-content tools below read better with them.
 def _bound(text: str) -> str:
-    # Raw-content tools (load/inspect/chunk/grep/read/list/exec/status): keep the tiny cap so
-    # raw file content never floods the root context.
-    return bound_output(text, CFG.output_cap_bytes)
+    return DEPS.bound(text)
 
 
 def _answer(text: str) -> str:
-    # Synthesis tools (rlm_query / rlm_sub_query[_batch]): the answer IS the
-    # deliverable (already bounded by the model's max_output_tokens), so bound it
-    # generously, not at the raw-content cap.
-    return bound_output(text, CFG.answer_cap_bytes)
-
-
-def _cost_note(model: str, itok: int, otok: int) -> str:
-    """`  |  cost: $x.xxxx` when report_cost is on, else nothing. Off by default: the
-    rate table is Anthropic-only and the CLI path under-counts input tokens, so a
-    printed figure would be confidently wrong."""
-    if not CFG.report_cost:
-        return ""
-    return f"  |  cost: ${cost_usd(model, itok, otok):.4f}"
+    return DEPS.answer(text)
 
 
 def _resolve_root_model(model_override: str) -> str:
@@ -299,8 +286,16 @@ def rlm_chunk_context(ctx_id: str, strategy: str = "", size: int = 0, overlap: i
     context. strategy: lines | paragraphs | functions | headings | semantic | files
     (default from config). 'size' = lines-per-chunk for the lines strategy.
     Returns chunk count + per-chunk metadata (no content). Chunk defaults stay well
-    under the sub-model's context ceiling (config: sub_context_tokens) so sub-queries fit."""
-    strategy = strategy or CFG.chunk_strategy
+    under the sub-model's context ceiling (config: sub_context_tokens) so sub-queries fit.
+
+    Leave strategy empty for the content-aware default: `files` when the context is a
+    dir load or carries `===== FILE:` markers. File boundaries survive edits elsewhere,
+    so a re-analysis after changing 3 of 1,000 files re-asks about 3 chunks, not 1,000 --
+    under `lines`, one edit shifts every later boundary and nearly nothing is reused."""
+    # Empty strategy = the content-aware default: `files` for a dir load or a bundle
+    # with FILE markers (boundaries that survive edits, so cached answers keep hitting),
+    # else the configured default. See batch.default_strategy for why this matters.
+    strategy = strategy or batch.default_strategy(DEPS, STORE.get(ctx_id))
     if strategy not in STRATEGIES:
         return _bound(f"ERROR: unknown strategy '{strategy}'. Choose from {', '.join(STRATEGIES)}.")
     text = STORE.read_text(ctx_id)
@@ -409,7 +404,36 @@ def rlm_drop_context(ctx_id: str) -> str:
 # ============================================================================
 @mcp.tool()
 @logged_tool
-def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
+def rlm_estimate(ctx_id: str, prompt: str = "", max_chunks: int = 0, reduce: bool = True) -> str:
+    """ESTIMATE BEFORE YOU EXECUTE. Forecast what rlm_sub_query_batch over this context
+    would cost — chunks, model calls, tokens, wall time — and judge it against what is
+    left in the current session window. Costs nothing: no model call is made.
+
+    Call this BEFORE any batch over a large context. A 103-chunk run silently consumed
+    ~60% of a 4-hour window and returned nothing when it was interrupted; this is the
+    tool that would have said so in advance.
+
+    Reports how many chunks are ALREADY ANSWERED on disk -- cached by chunk CONTENT, so a
+    re-loaded file counts too -- and the forecast covers only the work that remains. A run
+    that does not fit this window is not a dead end: start it, let it stop at the budget
+    line, and call the batch again next window. Also prints the ceiling for rlm_query on
+    this context, which cannot be estimated, only bounded.
+    """
+    return batch.estimate(DEPS, ctx_id, prompt, max_chunks, reduce)
+
+
+@mcp.tool()
+@logged_tool
+def rlm_budget() -> str:
+    """Show the session-window token budget: what this server has spent inside the
+    rolling window, the ceiling it is gating against (configured, learned, or unknown),
+    and when headroom next grows. No model call."""
+    return batch.budget_report(DEPS)
+
+
+@mcp.tool()
+@logged_tool
+def rlm_query(ctx_id: str, question: str, model_override: str = "", fresh: bool = False) -> str:
     """Answer a question over a loaded context using the FULL recursive RLM loop:
     the root model (Sonnet 5 by default) writes Python in the configured sandbox to
     explore the context and delegates chunk-level work to Haiku 4.5, then returns
@@ -422,21 +446,45 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
 
     model_override: '' (Sonnet) | 'opus' (Opus 4.8, hardest tasks) | explicit model id.
     Models are resolved by the selection strategy (closest OAuth sibling when on OAuth).
+
+    COST CANNOT BE ESTIMATED, ONLY BOUNDED. The root model decides at run time how many
+    sub-calls to make. rlm_estimate prints the ceiling: what config permits (usually
+    several times a whole session window) and what query_timeout_s allows in practice.
+
+    GATED AND RESUMABLE. Every model call passes a hard floor at `budget_stop_fraction`
+    of the session window, so the run stops itself before the wall. Any stop -- budget,
+    timeout, error threshold -- checkpoints the transcript and the sandbox's REPL
+    variables; call this tool again with the SAME ctx_id and question and it continues
+    from the failed iteration instead of starting over. fresh=True discards a checkpoint.
+    Spend is ledgered, so the next estimate sees it. Prefer rlm_exec/rlm_grep (free) and
+    rlm_sub_query_batch (estimable) unless the question truly needs multi-hop reasoning.
     """
     root_model = _resolve_root_model(model_override)
-    sub_model = models.select(CFG, models.Role.SUB)
-    text = STORE.read_text(ctx_id)
-    res = run_query(CFG, text, question, root_model, sub_model)
+    sub_model = models.select(DEPS.cfg, models.Role.SUB)
+    text = DEPS.store.read_text(ctx_id)
+    ckpt = query_checkpoint_path(DEPS.cfg, ctx_id, question, root_model, sub_model)
+    res = run_query(DEPS.cfg, text, question, root_model, sub_model,
+                    checkpoint=ckpt, fresh=fresh)
+    resumed = (f" · resumed from iteration {res['resumed_from']}"
+               if res.get("resumed_from") else "")
     if res.get("limit"):
         # ERROR-prefixed so logsetup records outcome=error; the partial answer still
         # travels, because a stopped run that found something is not a dead loss.
-        partial = res["answer"]
-        return _answer(
-            f"ERROR: rlm_query stopped on {res['limit']} — {res['limit_detail']}\n"
-            + (f"\n--- best answer before the limit ---\n{partial}\n" if partial
-               else "\nNo partial answer was available.\n")
-            + "\nRaise query_timeout_s / query_max_errors in config.yaml, or narrow the "
-              "question. rlm_exec and rlm_grep need no model call at all."
+        partial_answer = res["answer"]
+        if res.get("resumable"):
+            how = (f"\n**Resumable.** The transcript and REPL state are checkpointed. Call "
+                   f"rlm_query again with the same ctx_id and question to continue from "
+                   f"iteration {res['next_iteration']}"
+                   + (" once the window has rolled" if res["limit"] == "SessionBudgetError" else "")
+                   + "; fresh=True discards the checkpoint instead.")
+        else:
+            how = ("\nRaise query_timeout_s / query_max_errors in config.yaml, or narrow the "
+                   "question. rlm_exec and rlm_grep need no model call at all.")
+        return DEPS.answer(
+            f"ERROR: rlm_query stopped on {res['limit']} — {res['limit_detail']}{resumed}\n"
+            + (f"\n--- best answer before the limit ---\n{partial_answer}\n"
+               if partial_answer else "\nNo partial answer was available.\n")
+            + how
         )
     rows = "\n".join(
         f"  - {r['model']}: {r['calls']} calls, "
@@ -445,9 +493,9 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "") -> str:
         for r in res["usage"]
     )
     total = res["cost_usd"]
-    return _answer(
+    return DEPS.answer(
         f"## RLM answer (root: {res['root_model']}, sub: {res['sub_model']}"
-        f" · auth: {transport.auth_label(CFG)})\n\n{res['answer']}\n\n"
+        f" · auth: {transport.auth_label(DEPS.cfg)}{resumed})\n\n{res['answer']}\n\n"
         f"---\n**Model routing / usage:**\n{rows}\n"
         + (f"**Total cost:** ${total:.4f}  |  " if total is not None else "")
         + f"**Time:** {res['execution_time']}s"
@@ -461,158 +509,33 @@ def rlm_sub_query(ctx_id: str, prompt: str, chunk_index: int = -1) -> str:
     Use for targeted questions. If chunk_index < 0 the whole context is used — only do
     that when it fits the sub-model's context window (config: sub_context_tokens),
     else chunk first."""
-    meta = STORE.get(ctx_id)
-    if chunk_index >= 0:
-        body = STORE.read_chunk(ctx_id, chunk_index)
-    else:
-        if meta.est_tokens > 0.9 * CFG.sub_context_tokens:
-            return _bound(
-                f"ERROR: context ~{meta.est_tokens:,} tokens exceeds Haiku's "
-                f"{CFG.sub_context_tokens:,}-token window. Run rlm_chunk_context then "
-                f"rlm_sub_query_batch, or use rlm_query."
-            )
-        body = STORE.read_text(ctx_id)
-    sub_model = models.select(CFG, models.Role.SUB)
-    res = sub_query(f"{prompt}\n\n--- CONTEXT ---\n{body}", sub_model)
-    if res.error:
-        return _bound(f"ERROR ({sub_model}): {res.error}")
-    return _answer(
-        f"## Sub-query answer ({res.model or sub_model}"
-        f" · auth: {transport.auth_label(CFG)})\n\n{res.answer}\n\n---\n"
-        f"tokens: {res.input_tokens:,} in / {res.output_tokens:,} out"
-    )
-
-
-def _mk_batch_prompt(ctx_id: str, prompt: str, i: int, n: int) -> str:
-    return f"{prompt}\n\n--- CHUNK {i + 1}/{n} ---\n{STORE.read_chunk(ctx_id, i)}"
+    return batch.one(DEPS, ctx_id, prompt, chunk_index)
 
 
 @mcp.tool()
 @logged_tool
-def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = True) -> str:
+def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = True,
+                        fresh: bool = False) -> str:
     """Map a prompt over the chunks of a context via Haiku 4.5 (concurrent), then by
     default REDUCE the per-chunk findings into one synthesized answer. Map-reduce that
     YOU orchestrate (vs rlm_query, where the engine does it). Auto-chunks with config
     defaults if the context wasn't chunked yet.
 
+    RESUMABLE AND BUDGET-AWARE. Every chunk answer is written to disk the moment it
+    lands, so calling this again with the SAME ctx_id and prompt reuses what is already
+    answered and pays only for the rest — after a crash, after a budget stop, or in a new
+    session tomorrow. The run also stops ITSELF at `budget_stop_fraction` of the session
+    window instead of being killed at the wall, reporting the remaining chunks as
+    deferred. Call rlm_estimate first to see size, cost and headroom before starting.
+
+    fresh=True: discard the cached answers for this exact prompt+chunking and re-ask.
+
     reduce=True  (default): one coherent, de-duplicated synthesis across all chunks —
                  best for "summarize / aggregate / what's the overall picture".
     reduce=False: the raw per-chunk findings concatenated — when you want every piece.
     """
-    meta = STORE.get(ctx_id)
-    if not meta.chunks:
-        text = STORE.read_text(ctx_id)
-        chunks = chunk_text(text, CFG.chunk_strategy, chunk_lines=CFG.chunk_lines,
-                            chunk_chars=CFG.chunk_chars, overlap=CFG.chunk_overlap)
-        STORE.set_chunks(ctx_id, CFG.chunk_strategy, [c.as_dict() for c in chunks],
-                         text=text)   # reuse this decode; don't make a second copy
-        meta = STORE.get(ctx_id)
-        del text   # the full decode has served chunking; don't hold it for the whole batch
-    n = len(meta.chunks)
-    sel = range(n if max_chunks <= 0 else min(max_chunks, n))
-    # Built lazily, one at a time inside each pool worker (sub_query_batch), not here —
-    # holding all N prompt strings at once is ~= the whole context in RAM for the entire
-    # multi-minute batch. Leaf 2's seek-based read_chunk is what makes per-worker reads
-    # cheap enough that this stays lazy without re-introducing slow reads serially.
-    prompts = [partial(_mk_batch_prompt, ctx_id, prompt, i, n) for i in sel]
-    sub_model = models.select(CFG, models.Role.SUB)
-    # BEFORE the map, not only after it: this batch runs for tens of minutes on a
-    # large context, and until it returns the only trace is N indistinguishable
-    # cli_spawn lines under one rid — no ctx_id, and no denominator to count them
-    # against. That is the difference between "377 of 408" and "possibly hung".
-    log_event(LOG, "sub_batch", phase="map_start", ctx_id=ctx_id,
-              chunks=len(prompts), total_chunks=n,
-              concurrency=CFG.subquery_concurrency)
-    results = sub_query_batch(prompts, sub_model, concurrency=CFG.subquery_concurrency)
-    itok = sum(r.input_tokens for r in results)
-    otok = sum(r.output_tokens for r in results)
-    errs = [r for r in results if r.error]
-    # Models as REPORTED BY THE TRANSPORT, not the id we asked for: on OAuth
-    # models.select maps a configured id to its closest subscription sibling.
-    used = sorted({r.model for r in results if r.model}) or [sub_model]
-    used_label = ", ".join(used)
-    # Unconditional, not only on failure: the parent tool_call record carries neither
-    # a chunk count nor token counts, so without this a successful batch is just N
-    # indistinguishable cli_spawn lines under one rid. Same rid ties it back.
-    log_event(LOG, "sub_batch", phase="map", ctx_id=ctx_id, chunks=len(prompts),
-              errors=len(errs), itok=itok, otok=otok,
-              err_sample=errs[0].error if errs else None)
-    # Every chunk failed: that is a failed tool call, not a result with notes.
-    # Returning the usual success string here is exactly how a dead login reads
-    # back as "no findings". The ERROR prefix is what logsetup maps to outcome=error.
-    if errs and len(errs) == len(results):
-        return _bound(f"ERROR: all {len(results)} chunk(s) failed — {errs[0].error}")
+    return batch.run(DEPS, ctx_id, prompt, max_chunks, reduce, fresh)
 
-    note = ""
-    if max_chunks > 0 and max_chunks < n:
-        note += f"\n_NOTE: limited to first {max_chunks} of {n} chunks._"
-    if errs:
-        note += f"\n_NOTE: {len(errs)} of {len(prompts)} chunk(s) errored and were skipped._"
-    per_chunk = "\n".join(
-        f"### chunk {r.index}\n" + (f"[ERROR: {r.error}]" if r.error else r.answer.strip())
-        for r in results
-    )
-
-    def _raw(extra: str = "") -> str:
-        head = (f"## Batch sub-query — map over {len(prompts)} chunks ({used_label}"
-                f" · auth: {transport.auth_label(CFG)})\n"
-                f"tokens: {itok:,} in / {otok:,} out{_cost_note(sub_model, itok, otok)}"
-                f"{note}{extra}\n\n")
-        return _answer(head + per_chunk)
-
-    # findings = just the successful answers, for the reduce pass
-    findings = "\n".join(f"[chunk {r.index}] {r.answer.strip()}"
-                         for r in results if not r.error and r.answer.strip())
-    if not reduce:
-        return _raw()
-    if not findings:
-        return _raw("\n_(no findings to reduce)_")
-    if estimate_tokens(findings) > 0.9 * CFG.sub_context_tokens:
-        return _raw("\n_(findings too large to reduce in one pass — showing raw; use "
-                    "fewer/larger chunks, or rlm_query for engine-side reduction)_")
-
-    return _reduce_findings(findings, prompt, sub_model, ctx_id=ctx_id, note=note,
-                            n_prompts=len(prompts), n_errors=len(errs), used_label=used_label,
-                            itok=itok, otok=otok, raw=_raw)
-
-
-def _reduce_findings(findings: str, prompt: str, sub_model: str, *, ctx_id: str, note: str,
-                     n_prompts: int, n_errors: int, used_label: str, itok: int, otok: int,
-                     raw: Callable[[str], str]) -> str:
-    """Fold the per-chunk findings into one synthesis (one more sub-model call), and
-    render it. Falls back to ``raw(extra)`` — the caller's per-chunk report — when the
-    reduce call fails, so a failed synthesis never discards the findings it was given.
-
-    The parameter list is wide because every item is load-bearing: findings/prompt/
-    sub_model drive the call, ctx_id/n_errors the log record, and note/n_prompts/
-    used_label/itok/otok the report header. ``itok``/``otok`` are locals here on purpose —
-    the reduce call's tokens are added to them for the success header and the log, while
-    ``raw`` still renders the caller's map-only totals on the failure path.
-    """
-    reduce_prompt = (
-        "Reduce these independent per-chunk findings from one large document into a "
-        "single answer.\n"
-        f"Original request: {prompt}\n\n"
-        f"Per-chunk findings:\n{findings}\n\n"
-        "Synthesize ONE coherent, de-duplicated answer to the original request across "
-        "all chunks. Use only what the findings contain; do not invent anything."
-    )
-    red = sub_query(reduce_prompt, sub_model, max_tokens=4096)
-    if not red.error:
-        itok += red.input_tokens
-        otok += red.output_tokens
-    # On success too: a reduce that works still spends a call and tokens, and the map
-    # totals would otherwise understate every reduce batch. itok/otok are map+reduce.
-    log_event(LOG, "sub_batch", phase="reduce", ctx_id=ctx_id, chunks=n_prompts,
-              errors=n_errors, itok=itok, otok=otok, reduce_error=red.error)
-    if red.error:
-        return raw(f"\n_(reduce pass failed: {red.error}; showing raw findings)_")
-    return _answer(
-        f"## Batch sub-query — map+reduce over {n_prompts} chunks ({used_label}"
-        f" · auth: {transport.auth_label(CFG)})\n"
-        f"tokens: {itok:,} in / {otok:,} out{_cost_note(sub_model, itok, otok)}{note}\n\n"
-        f"{red.answer.strip()}"
-    )
 
 
 # ============================================================================
@@ -670,9 +593,9 @@ def rlm_status(probe: bool = False) -> str:
         src_line = f"UNREADABLE — {type(exc).__name__}: {exc}"
     return _bound(
         "## RLM MCP status\n"
-        f"- provider: {CFG.provider}   (anthropic needs no key — it uses the claude CLI login; "
-        f"any other needs its {PROVIDER_KEY_ENV.get(CFG.provider, '<PROVIDER>_API_KEY')}; "
-        "RLM_PROVIDER env overrides)\n"
+        f"- provider: {CFG.provider}   (anthropic is the only supported provider and needs "
+        "no key — it uses the claude CLI login; any other raises NotImplementedError at "
+        "the first model call, because only this one routes through the session budget)\n"
         f"- mode (configured): {CFG.mode}   (auto | claude-cli | api; RLM_MODE env overrides)\n"
         f"- transport (resolved): {transport_desc}\n"
         f"- claude CLI ({CFG.cli_path}): {'found at ' + claude_cli if claude_cli else 'NOT FOUND on PATH'}"
@@ -746,9 +669,18 @@ def _auth_probe_line() -> str:
         st = transport.cli_auth_status(CFG)
         if st is not None and not st.get("loggedIn"):
             return "\n- auth probe: SKIPPED — cli login is dead, a probe would only confirm it"
+    # The same reasoning one step further: past the stop line the transport refuses the
+    # probe before dispatch, and the refusal printed as "auth probe: FAILED — session
+    # budget stop", sending an operator to re-authenticate a login that was fine.
+    # rlm_status is what people reach for when something looks broken, so it must not
+    # misname what is broken.
     try:
-        res = sub_query("Reply with exactly: ok",
-                        models.select(CFG, models.Role.SUB), max_tokens=16)
+        budget.check_or_raise(DEPS.cfg, 16, now=DEPS.clock)
+    except budget.BudgetStopError as stop:
+        return f"\n- auth probe: SKIPPED — session budget reached, not an auth problem ({stop})"
+    try:
+        res = sub_query(DEPS.cfg, "Reply with exactly: ok",
+                        models.select(DEPS.cfg, models.Role.SUB), max_tokens=16)
     except Exception as exc:                      # noqa: BLE001 - report, never raise
         return f"\n- auth probe: FAILED — {type(exc).__name__}: {exc}"
     if res.error:

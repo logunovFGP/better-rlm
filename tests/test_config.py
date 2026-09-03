@@ -41,3 +41,28 @@ def test_cost_usd_sonnet():
 
 def test_estimate_tokens():
     assert estimate_tokens("abcd" * 25) == 25  # 100 chars / 4
+
+
+
+def test_every_config_path_is_redirected_by_the_cfg_fixture(cfg, tmp_path):
+    """The `cfg` fixture must redirect EVERY Path-typed field, discovered from the
+    dataclass -- not a hand-kept list.
+
+    Four times this session a path was added to Config and the fixture was not updated:
+    the log dir, the context store, the spend ledger, and finally the answer cache. Each
+    time tests wrote into the operator's real ~/.rlm, and the last one made five tests
+    pass or fail on each other's cached entries. A hand-enumerated redirect loses to the
+    next field added; enumerating the dataclass does not.
+    """
+    import dataclasses
+    from pathlib import Path
+
+    strays = []
+    for f in dataclasses.fields(cfg):
+        v = getattr(cfg, f.name)
+        if isinstance(v, Path) and f.name != "sources_file":   # read-only registry, never written
+            try:
+                v.resolve().relative_to(tmp_path.resolve())
+            except ValueError:
+                strays.append(f"{f.name}={v}")
+    assert not strays, f"Config path(s) not redirected under tmp_path by the cfg fixture: {strays}"

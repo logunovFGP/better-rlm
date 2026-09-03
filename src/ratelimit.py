@@ -35,6 +35,20 @@ import anthropic
 from .config import load_config
 from .logsetup import log_event
 
+#: Module-level ON PURPOSE, and the one place in this package where that is the right
+#: answer. This module owns two things, and neither belongs to a caller:
+#:
+#:  * _THROTTLE is a PROCESS resource. Its whole job is "at most N calls in flight across
+#:    this process"; handing each caller its own would multiply the vendor's limit by the
+#:    number of callers, which is the opposite of a throttle. It must be shared.
+#:  * _CFG supplies only the backoff SCHEDULE (oauth_retry_waits / apikey_retry_waits) and
+#:    the throttle's shape. It touches no filesystem path, so unlike the config globals
+#:    that were removed elsewhere, a test cannot pollute anything through it -- and the
+#:    ceiling-learning that DID write to disk now lives in transport, next to its cfg.
+#:
+#: The retry decorator also wraps engine methods whose first argument is `self`
+#: (src/auth.py patches AnthropicClient.completion), so cfg cannot be threaded in
+#: positionally the way subquery's was.
 _CFG = load_config()
 _LOG = logging.getLogger("rlm-mcp")
 
@@ -91,7 +105,7 @@ def _next_delay(exc: BaseException, attempt: int, waits: list[float]) -> float |
     """Seconds to wait before retrying ``exc``, or None if it must propagate.
 
     The single home of the retry decision, so the sync and async wrappers below
-    cannot drift apart.
+    cannot drift apart. Ceiling-learning lives in transport, next to the cfg it writes with.
     """
     if not _is_rate_limit(exc) or attempt >= len(waits):
         return None

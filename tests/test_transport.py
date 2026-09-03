@@ -60,30 +60,49 @@ def test_content_blocks_join_to_text():
 
 
 # --------------------------- strategy selection --------------------------- #
+def inner_of(transport):
+    """Look through the ledger wrapper get_transport applies to every backend."""
+    return getattr(transport, "inner", transport)
+
+
 def test_get_transport_selects_by_mode(cfg):
     tp._CACHE.clear()
-    assert isinstance(get_transport("oauth", cfg), CliTransport)
-    assert isinstance(get_transport("apikey", cfg), ApiTransport)
+    assert isinstance(inner_of(get_transport("oauth", cfg)), CliTransport)
+    assert isinstance(inner_of(get_transport("apikey", cfg)), ApiTransport)
     tp._CACHE.clear()
 
 
-def test_get_transport_selects_by_provider(cfg, monkeypatch):
-    """Anthropic keeps its two dedicated transports (the local path); every other
-    provider goes through the engine's own client."""
+def test_get_transport_refuses_every_provider_it_cannot_ledger(cfg, monkeypatch):
+    """Anthropic keeps its two dedicated transports (the local path). Every other provider
+    is refused HERE rather than handed the engine's own client, which resolved no
+    transport of ours and so recorded no spend, passed no floor and learned no ceiling."""
     import dataclasses
 
     tp._CACHE.clear()
     monkeypatch.setenv("GEMINI_API_KEY", "dummy-not-a-real-key")
     assert cfg.provider == "anthropic"                      # default = the local run
-    assert isinstance(get_transport("oauth", cfg), CliTransport)
+    assert isinstance(inner_of(get_transport("oauth", cfg)), CliTransport)
 
     for provider in ("gemini", "openai", "azure_openai", "portkey"):
         other = dataclasses.replace(cfg, provider=provider)
-        t = get_transport("apikey", other)
-        assert isinstance(t, tp.EngineClientTransport), provider
-        assert get_transport("apikey", other) is t          # cached per provider
-    # the anthropic entry must not have been clobbered by the shared "apikey" mode
-    assert isinstance(get_transport("oauth", cfg), CliTransport)
+        with pytest.raises(NotImplementedError, match=provider):
+            get_transport("apikey", other)
+        assert not any(k.startswith(provider) for k in tp._CACHE), (
+            f"{provider} left a cached transport behind; a refusal must build nothing")
+    # the anthropic entry must not have been disturbed by the refusals
+    assert isinstance(inner_of(get_transport("oauth", cfg)), CliTransport)
+    tp._CACHE.clear()
+
+
+def test_the_inner_transport_is_cached_but_the_ledger_wrapper_is_not(cfg):
+    """The INNER transport is cached (it owns the client and the neutral cwd). The ledger
+    wrapper is rebuilt per call ON PURPOSE, because it binds a cfg -- caching it would
+    hand the first caller's config, and its spend ledger, to every later caller."""
+    tp._CACHE.clear()
+    first = get_transport("oauth", cfg)
+    second = get_transport("oauth", cfg)
+    assert inner_of(first) is inner_of(second)
+    assert first is not second
     tp._CACHE.clear()
 
 
@@ -212,3 +231,63 @@ def test_auth_failure_carries_the_remediation():
     assert "claude auth login" in msg
     assert "claude setup-token" in msg
     assert "does NOT sign in the CLI" in msg
+
+
+
+# --------------------------- the floor sits under EVERY completion ------------------ #
+def test_the_transport_refuses_a_call_that_would_cross_the_line_without_spending(cfg):
+    """rlm_query's recursive fan-out had no stop at all; the batch's Gate only reached
+    the batch. Placing the check here, where the ledger already is, makes it structural:
+    the refused call must never reach the backend and must not be ledgered."""
+    import dataclasses
+    import src.budget as budget
+
+    cfg = dataclasses.replace(cfg, session_budget_tokens=100_000, budget_stop_fraction=0.95)
+    budget.record(cfg, "m", 94_000, 0)
+    calls = []
+
+    class _Backend:
+        def complete(self, messages, system, model, max_tokens):
+            calls.append(1)
+            return tp.CompletionResult(text="ok", input_tokens=1, output_tokens=1, model="m")
+
+        async def acomplete(self, *a):
+            raise AssertionError("not used")
+
+    w = tp._LedgeredTransport(_Backend(), cfg)
+    with pytest.raises(budget.BudgetStopError):
+        w.complete([{"role": "user", "content": "x" * 400}], None, "m", 2048)   # ~100 + 2048
+
+    assert calls == [], "the refused call reached the backend"
+    assert budget.spent(cfg).tokens == 94_000, "a refused call was ledgered"
+
+
+def test_the_floor_reserves_what_a_call_emits_not_the_cap_the_cli_discards(cfg):
+    """CliTransport is handed max_tokens and has nowhere to put it — `claude` takes no
+    output flag — so on the OAuth path a call can emit several times the cap. Reserving the
+    cap under-reserves, and a floor whose whole job is to stop short of the wall lets one
+    call step over it. Ceiling picked so the cap fits and the measured figure does not."""
+    import dataclasses
+    import src.budget as budget
+
+    cfg = dataclasses.replace(cfg, session_budget_tokens=90_000, budget_stop_fraction=0.95)
+    for _ in range(8):                       # measured mean output: 10,000 per call
+        budget.record(cfg, "m", 0, 10_000)
+    assert budget.spent(cfg).tokens == 80_000
+    calls = []
+
+    class _Backend:
+        def complete(self, messages, system, model, max_tokens):
+            calls.append(1)
+            return tp.CompletionResult(text="ok", input_tokens=1, output_tokens=1, model="m")
+
+        async def acomplete(self, *a):
+            raise AssertionError("not used")
+
+    w = tp._LedgeredTransport(_Backend(), cfg)
+    # est_in ~100. Reserving the cap gives 82,148 — under the 85,500 line, so it would be
+    # admitted. Reserving what the path actually emits gives 90,100, which is not.
+    with pytest.raises(budget.BudgetStopError):
+        w.complete([{"role": "user", "content": "x" * 400}], None, "m", 2048)
+
+    assert calls == [], "reserved the unenforceable cap, so the floor admitted the call"

@@ -4,6 +4,7 @@ import logging
 import logging.handlers
 import os
 import sys
+from pathlib import Path
 
 from src.config import load_config
 import src.logsetup as ls
@@ -236,3 +237,67 @@ def test_sweep_collects_orphaned_tmps_but_spares_one_in_flight(tmp_path):
 
     assert not old.exists()
     assert fresh.exists()
+
+
+def test_the_suite_never_attaches_a_file_handler_to_the_real_log_dir():
+    """Regression guard for the conftest fixture that keeps pytest out of ~/.rlm/logs.
+
+    Importing src.server runs ``configure_logging(CFG)`` against the REAL config, which
+    is how 18 of 20 files in the operator's live log dir came to be pytest debris. The
+    autouse fixture strips that handler before every test; this asserts it is gone even
+    right after the import that installs it.
+    """
+    import src.server  # noqa: F401 - the import IS the thing under test
+
+    real_dir = load_config().log_dir.resolve()
+    for h in logging.getLogger(ls.LOGGER_NAME).handlers:
+        base = getattr(h, "baseFilename", None)
+        if base is not None:
+            assert Path(base).resolve().parent != real_dir, (
+                f"a file handler is writing to the real log dir: {base}"
+            )
+
+
+# --------------------------- frozen clock: the age cap --------------------------- #
+def test_the_age_cap_keeps_a_file_one_second_inside_the_window(tmp_path, clock):
+    """The realistic age boundary, which no existing test covered.
+
+    The two age tests above dodge the clock entirely — one sets log_retention_days=0 so
+    everything is expired, the other backdates an mtime to epoch 1970. Neither would
+    notice an off-by-one-day error in the cutoff, or a sign flip. With a frozen clock the
+    cutoff is exact: 7 days, one file a second inside it and one a second outside.
+    """
+    cfg = _cfg(tmp_path, log_retention_days=7, log_sweep_cooldown_s=0,
+               log_retention_files=100, log_retention_total_bytes=10**9)
+    day = 86400
+    keep = tmp_path / "rlm-mcp-keep.log"
+    drop = tmp_path / "rlm-mcp-drop.log"
+    for p, age in ((keep, 7 * day - 1), (drop, 7 * day + 1)):
+        p.write_text("x")
+        os.utime(p, (clock.now - age, clock.now - age))
+
+    ls._run_retention_sweep(cfg, tmp_path / "rlm-mcp-own.log", now_fn=clock)
+
+    assert keep.exists(), "a file inside the retention window was deleted"
+    assert not drop.exists(), "a file past the retention window survived"
+
+
+def test_the_sweep_cooldown_is_measured_against_the_sentinel_mtime(tmp_path, clock):
+    """Two processes starting seconds apart must not both sweep. Pinning this needs a
+    fixed now: the assertion is about a 60-second window, and the sentinel's mtime and
+    the sweep's clock have to be the same instant for the comparison to mean anything."""
+    cfg = _cfg(tmp_path, log_retention_days=0, log_sweep_cooldown_s=60,
+               log_retention_files=0, log_retention_total_bytes=0)
+    old = tmp_path / "rlm-mcp-old.log"
+    old.write_text("x")
+    os.utime(old, (clock.now - 99 * 86400, clock.now - 99 * 86400))
+
+    sentinel = tmp_path / ".sweep"
+    sentinel.write_text("recent")
+    os.utime(sentinel, (clock.now - 59, clock.now - 59))     # inside the cooldown
+    ls._run_retention_sweep(cfg, tmp_path / "own.log", now_fn=clock)
+    assert old.exists(), "the sweep ran despite a sentinel inside the cooldown"
+
+    os.utime(sentinel, (clock.now - 61, clock.now - 61))     # cooldown elapsed
+    ls._run_retention_sweep(cfg, tmp_path / "own.log", now_fn=clock)
+    assert not old.exists(), "the sweep did not run after the cooldown elapsed"
