@@ -520,12 +520,23 @@ class _LedgeredTransport(CompletionTransport):
         n = sum(len(str(m.get("content", ""))) for m in messages) + len(str(system or ""))
         return estimate_tokens(n)
 
+    def _reserve(self, messages, system, max_tokens) -> int:
+        """Tokens to hold against the floor for the call about to be made.
+
+        Output is ``budget.expected_output``, not ``max_tokens``: the CLI takes no output
+        flag, so on the OAuth path the cap is never sent and a call can emit several times
+        it. Reserving the cap there under-reserves, which is how a floor whose whole job is
+        to stop short of the wall lets a single call step over it.
+        """
+        return self._est_in(messages, system) + budget.expected_output(
+            self._cfg, max_tokens)
+
     def complete(self, messages, system, model, max_tokens) -> CompletionResult:
         est_in = self._est_in(messages, system)
         # The hard floor, for EVERY caller. The batch's Gate stops politely one layer
         # up; this is what stops rlm_query's recursive fan-out, which had nothing. It
         # raises BEFORE the call, so a refused call costs zero tokens.
-        budget.check_or_raise(self._cfg, est_in + max_tokens)
+        budget.check_or_raise(self._cfg, self._reserve(messages, system, max_tokens))
         try:
             res = self._inner.complete(messages, system, model, max_tokens)
         except Exception as exc:
@@ -536,7 +547,7 @@ class _LedgeredTransport(CompletionTransport):
 
     async def acomplete(self, messages, system, model, max_tokens) -> CompletionResult:
         est_in = self._est_in(messages, system)
-        budget.check_or_raise(self._cfg, est_in + max_tokens)
+        budget.check_or_raise(self._cfg, self._reserve(messages, system, max_tokens))
         try:
             res = await self._inner.acomplete(messages, system, model, max_tokens)
         except Exception as exc:

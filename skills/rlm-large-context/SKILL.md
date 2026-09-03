@@ -253,3 +253,9 @@ prevent.
   sent rather than the transport's number (which read 1,027 tokens for a batch whose real
   input was ~3M). It also sees only this server's own spend — other Claude sessions on the
   same account are invisible to it — so treat reported headroom as an upper bound.
+- **On that path the output cap is a request, not a bound.** `claude` takes no
+  output-token flag, so the per-call cap is never sent and answers routinely run several
+  times longer than it (measured: 328,453 output tokens for a 33-chunk batch capped at
+  2,048). The forecast therefore prices output at the mean the ledger has actually seen,
+  falling back to the cap only while the ledger is too thin to measure — so the FIRST
+  batch on a fresh install is forecast optimistically, and every one after it is not.

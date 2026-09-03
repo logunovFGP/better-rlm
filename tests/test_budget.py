@@ -196,6 +196,79 @@ def test_the_reduce_call_is_priced_at_the_cap_it_actually_runs_with(bcfg):
     assert honest.output_tokens - at_map_cap.output_tokens == REDUCE_MAX_TOKENS - BATCH_MAX_TOKENS
 
 
+def test_a_fully_cached_batch_still_forecasts_the_synthesis_it_will_run(bcfg):
+    """A resumed run re-pays for no chunk, but with reduce=True it still issues one
+    synthesis over the cached answers. Keyed on the REMAINING work, the forecast reported
+    zero calls and zero tokens for a run that spends — an estimate of nothing at all."""
+    est = budget.estimate_batch(bcfg, [10_000] * 4, prompt="p", max_output_tokens=2048,
+                                reduce=True, reduce_output_tokens=4096,
+                                done={0, 1, 2, 3})
+
+    assert (est.chunks_todo, est.chunks_done) == (0, 4)
+    assert est.calls == 1, "the synthesis over the cached answers was not forecast"
+    assert est.total_tokens > 0, "a run that spends was forecast at zero tokens"
+    assert est.min_call_tokens == est.max_call_tokens > 0, \
+        "with one call left, that call is both the largest and the smallest"
+
+
+def test_the_synthesis_is_priced_over_every_chunk_not_just_the_uncached_ones(bcfg):
+    """The reduce pass reads the CACHED answers back too, so its input does not shrink as
+    chunks get answered. Pricing it over `todo` under-counted every resumed run."""
+    kw = dict(prompt="p", max_output_tokens=2048, done={0, 1, 2})
+    map_only = budget.estimate_batch(bcfg, [10_000] * 4, reduce=False, **kw)
+    with_reduce = budget.estimate_batch(bcfg, [10_000] * 4, reduce=True, **kw)
+
+    assert with_reduce.input_tokens - map_only.input_tokens == 2048 * 4, \
+        "the synthesis was priced over the 1 remaining chunk, not all 4 answers it reads"
+
+
+# --------------------------- output is not capped on the CLI path --------------------- #
+def test_expected_output_is_the_cap_until_the_ledger_has_something_to_say(bcfg):
+    """A cold ledger holds no measurement worth trusting, so the requested cap stands and
+    the first run of a fresh install is forecast optimistically. Known, self-correcting."""
+    assert budget.expected_output(bcfg, 2048) == 2048
+
+    for _ in range(3):
+        budget.record(bcfg, "m", 100, 9_000)
+    assert budget.expected_output(bcfg, 2048) == 2048, \
+        "three records is not a measurement; the cap must still stand"
+
+
+def test_expected_output_follows_what_the_cli_actually_emits(bcfg):
+    """`claude` accepts no output-token flag, so CliTransport is handed max_tokens and has
+    nowhere to put it: the cap is a request, not a bound. Measured on a real 33-chunk batch
+    capped at 2048 — 328,453 output tokens, 4.9x the cap it was reserved against."""
+    for _ in range(10):
+        budget.record(bcfg, "m", 100, 10_000)
+
+    assert budget.expected_output(bcfg, 2048) == 10_000
+
+
+def test_one_runaway_completion_cannot_make_the_floor_refuse_everything(bcfg):
+    """Same trap as a learned ceiling: a reservation derived from an unbounded observation
+    stops being an estimate and starts refusing every call. See `ceiling`."""
+    for _ in range(8):
+        budget.record(bcfg, "m", 0, 5_000_000)
+
+    assert budget.expected_output(bcfg, 2048) == 2048 * 8
+
+
+def test_the_forecast_prices_output_at_what_the_path_emits_not_the_cap_it_ignores(bcfg):
+    """The forecast said a 33-chunk review needed ~5% of headroom; it took ~10%, because
+    output was priced at a cap the CLI never receives. A 2x error is the difference between
+    "fits" and a stopped run at the sizes this module exists for."""
+    thin = budget.estimate_batch(bcfg, [1_000] * 4, prompt="p", max_output_tokens=2048,
+                                 reduce=False)
+    for _ in range(10):
+        budget.record(bcfg, "m", 100, 10_000)
+    measured = budget.estimate_batch(bcfg, [1_000] * 4, prompt="p", max_output_tokens=2048,
+                                     reduce=False)
+
+    assert thin.output_tokens == 2048 * 4
+    assert measured.output_tokens == 10_000 * 4, \
+        "the forecast still priced output at a cap this transport cannot enforce"
+
+
 def test_a_resumed_estimate_prices_only_the_gaps(bcfg):
     """Resume leaves GAPS, not a prefix: workers finish out of order, so chunks 0 and 3
     can be done while 1 and 2 are not. Treating `done` as a count would re-price the

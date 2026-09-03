@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from .auth import resolve_auth_mode
-from .budget import BudgetStopError
+from .budget import BudgetStopError, expected_output
 from .config import Config, estimate_tokens
 from .logsetup import bind_rid, current_rid
 from .ratelimit import is_fatal_auth, retry_and_queue_retries
@@ -86,6 +86,11 @@ def sub_query_batch(cfg: Config, prompts: Sequence[str | Callable[[], str]], mod
     # flight finish; a threading.Event only matters if that ever costs something.
     fatal: list[str] = []
     budget_stop: list[bool] = []   # same benign-race shape as `fatal`, same reason
+    # What a call EMITS, not the cap we ask for: the CLI takes no output flag, so on the
+    # OAuth path `max_tokens` is never sent and reserving it lets the gate admit calls it
+    # cannot afford. Resolved once for the batch — it is the same for every chunk, and it
+    # reads the ledger.
+    out_reserve = expected_output(cfg, max_tokens)
 
     def work(item: tuple[int, str | Callable[[], str]]) -> SubResult:
         pos, entry = item
@@ -103,7 +108,7 @@ def sub_query_batch(cfg: Config, prompts: Sequence[str | Callable[[], str]], mod
         # Asked AFTER the prompt is built because only then is its size known, and the
         # gate reserves against the size of the call it is about to admit.
         est_in = estimate_tokens(prompt)
-        if gate is not None and not gate.allow(est_in + max_tokens):
+        if gate is not None and not gate.allow(est_in + out_reserve):
             return SubResult(idx, "", 0, 0, error="deferred — session budget reached")
         with bind_rid(parent_rid):
             try:

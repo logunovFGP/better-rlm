@@ -244,6 +244,12 @@ class Estimate:
 #: Fallback per-call latency when the ledger has no history to measure. The failing run
 #: averaged ~52s/call on Haiku through the CLI; a cold guess of 45s is the right order.
 _DEFAULT_CALL_S = 45.0
+#: Ledger records needed before a MEASURED output-per-call is trusted over the cap.
+_OUTPUT_SAMPLE_MIN = 8
+#: Hard bound on how far a measured output may exceed the requested cap. Without it one
+#: runaway completion would inflate every later reservation until the floor refused every
+#: call -- the mistake ``ceiling`` documents for a learned ceiling, in another guise.
+_MAX_OUTPUT_FACTOR = 8.0
 
 
 def estimate_batch(cfg: Config, chunk_tokens: list[int], *, prompt: str,
@@ -256,29 +262,40 @@ def estimate_batch(cfg: Config, chunk_tokens: list[int], *, prompt: str,
     resumable run. It is a SET of indices, not a count: a run stopped by the budget gate
     leaves gaps rather than a clean prefix, because workers finish out of order.
 
-    Output is priced at the FULL cap per call. A forecast that assumes short answers is the
-    one that walks into the wall. ``reduce_output_tokens`` is the reduce call's own cap,
-    which is NOT the map cap — the caller passes both because the estimate is only an
-    estimate of this run if every number in it is the number that will actually be sent.
+    Output is priced at what a call can actually EMIT — the cap where the transport can
+    enforce it, the measured mean where it cannot. See ``expected_output``: pricing at the
+    requested cap on the CLI path under-forecast a real 33-chunk run by 1.9x.
+    ``reduce_output_tokens`` is the reduce call's own cap, which is NOT the map cap — the
+    caller passes both because the estimate is only an estimate of this run if every number
+    in it is the number that will actually be sent.
     """
     skip = done or set()
     todo = [t for i, t in enumerate(chunk_tokens) if i not in skip]
     per_prompt_overhead = estimate_tokens(prompt) + 32  # prompt + "--- CHUNK i/n ---" frame
+    out_per_call = expected_output(cfg, max_output_tokens, now=now)
     itok = sum(todo) + per_prompt_overhead * len(todo)
-    otok = max_output_tokens * len(todo)
+    otok = out_per_call * len(todo)
     calls = len(todo)
-    per_call = per_prompt_overhead + max_output_tokens
+    per_call = per_prompt_overhead + out_per_call
     biggest_map = (max(todo) + per_call) if todo else 0
-    smallest = (min(todo) + per_call) if todo else 0
-    biggest = biggest_map
-    if reduce and calls:
+    #: Every call this run will make, so "largest" and "smallest" are both taken over the
+    #: same list and neither can silently omit a call the other counts.
+    call_sizes = [t + per_call for t in todo]
+    if reduce and chunk_tokens:
         # The reduce pass reads every map answer back in and emits one more. Its INPUT is
         # therefore the whole map output — at 103 chunks that is one ~211K-token call
         # against ~32K for the largest map call, so leaving it out of `biggest` hid the
         # largest call in the run from the one check that asks "can this be sent at all".
-        red_out = reduce_output_tokens or max_output_tokens
-        biggest = max(biggest, otok + per_prompt_overhead + red_out)
-        itok += otok
+        #
+        # Keyed on `chunk_tokens`, NOT on the work remaining: the synthesis re-reads the
+        # CACHED answers too, so a fully resumed run still pays for it. Keyed on `todo`,
+        # this forecast a fully-cached re-run at zero calls and zero tokens while
+        # `batch.run` went on issuing the call — an estimate of nothing, for a run that
+        # spends.
+        red_out = expected_output(cfg, reduce_output_tokens or max_output_tokens, now=now)
+        answers_in = out_per_call * len(chunk_tokens)
+        call_sizes.append(answers_in + per_prompt_overhead + red_out)
+        itok += answers_in
         otok += red_out
         calls += 1
     conc = max(1, cfg.subquery_concurrency)
@@ -286,8 +303,9 @@ def estimate_batch(cfg: Config, chunk_tokens: list[int], *, prompt: str,
                     seconds=(calls / conc) * _observed_call_s(cfg, now),
                     chunks_total=len(chunk_tokens), chunks_todo=len(todo),
                     chunks_done=len(chunk_tokens) - len(todo),
-                    max_call_tokens=biggest, max_map_call_tokens=biggest_map,
-                    min_call_tokens=smallest)
+                    max_call_tokens=max(call_sizes) if call_sizes else 0,
+                    max_map_call_tokens=biggest_map,
+                    min_call_tokens=min(call_sizes) if call_sizes else 0)
 
 
 def _observed_call_s(cfg: Config, now: Clock = time.time) -> float:
@@ -300,6 +318,35 @@ def _observed_call_s(cfg: Config, now: Clock = time.time) -> float:
     span = stamps[-1] - stamps[0]
     per_call = span / max(1, len(stamps) - 1) * max(1, cfg.subquery_concurrency)
     return per_call if 1.0 <= per_call <= 600.0 else _DEFAULT_CALL_S
+
+
+def expected_output(cfg: Config, max_tokens: int, *, now: Clock = time.time) -> int:
+    """What one call can actually EMIT — ``max_tokens`` only where a transport enforces it.
+
+    THE CAP IS A REQUEST, NOT A BOUND, ON THE OAUTH PATH. The `claude` CLI accepts no
+    output-token flag, so ``CliTransport`` is handed ``max_tokens`` and has nowhere to put
+    it; ``ApiTransport`` passes it to the SDK, where it is enforced. Measured on a real
+    33-chunk batch at ``max_tokens=2048``: 328,453 output tokens, 4.9x the cap that both
+    the forecast and the pre-call floor had reserved against, and 1.9x the total estimate.
+    An estimate that reads "needs 5% of headroom" for a run that takes 10% is the exact
+    failure this module exists to prevent, one level down.
+
+    Taking the max of the cap and the measured mean needs no knowledge of which transport
+    is in play: where the cap IS enforced the measurement cannot exceed it, so the cap wins
+    by construction and the SDK path is unaffected.
+
+    Bounded on both sides deliberately. Below ``_OUTPUT_SAMPLE_MIN`` records there is no
+    measurement worth trusting, so a cold ledger returns the cap and the first run of a
+    fresh install is forecast optimistically — the known gap, self-correcting after one
+    batch. Above ``_MAX_OUTPUT_FACTOR`` the measurement is clamped, because a reservation
+    derived from an unbounded observation is how a learned number stops being an estimate
+    and starts refusing every call (see ``ceiling``).
+    """
+    recs = _read_lines(cfg.budget_ledger, now() - _PRUNE_AFTER_H * 3600)
+    if len(recs) < _OUTPUT_SAMPLE_MIN:
+        return max_tokens
+    mean = sum(int(r.get("otok", 0)) for r in recs) / len(recs)
+    return int(min(max(float(max_tokens), mean), max_tokens * _MAX_OUTPUT_FACTOR))
 
 
 # --------------------------------------------------------------------------- #

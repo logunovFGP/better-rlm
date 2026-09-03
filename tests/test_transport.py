@@ -260,3 +260,34 @@ def test_the_transport_refuses_a_call_that_would_cross_the_line_without_spending
 
     assert calls == [], "the refused call reached the backend"
     assert budget.spent(cfg).tokens == 94_000, "a refused call was ledgered"
+
+
+def test_the_floor_reserves_what_a_call_emits_not_the_cap_the_cli_discards(cfg):
+    """CliTransport is handed max_tokens and has nowhere to put it — `claude` takes no
+    output flag — so on the OAuth path a call can emit several times the cap. Reserving the
+    cap under-reserves, and a floor whose whole job is to stop short of the wall lets one
+    call step over it. Ceiling picked so the cap fits and the measured figure does not."""
+    import dataclasses
+    import src.budget as budget
+
+    cfg = dataclasses.replace(cfg, session_budget_tokens=90_000, budget_stop_fraction=0.95)
+    for _ in range(8):                       # measured mean output: 10,000 per call
+        budget.record(cfg, "m", 0, 10_000)
+    assert budget.spent(cfg).tokens == 80_000
+    calls = []
+
+    class _Backend:
+        def complete(self, messages, system, model, max_tokens):
+            calls.append(1)
+            return tp.CompletionResult(text="ok", input_tokens=1, output_tokens=1, model="m")
+
+        async def acomplete(self, *a):
+            raise AssertionError("not used")
+
+    w = tp._LedgeredTransport(_Backend(), cfg)
+    # est_in ~100. Reserving the cap gives 82,148 — under the 85,500 line, so it would be
+    # admitted. Reserving what the path actually emits gives 90,100, which is not.
+    with pytest.raises(budget.BudgetStopError):
+        w.complete([{"role": "user", "content": "x" * 400}], None, "m", 2048)
+
+    assert calls == [], "reserved the unenforceable cap, so the floor admitted the call"

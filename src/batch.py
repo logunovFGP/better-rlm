@@ -259,13 +259,12 @@ def run(d: Deps, ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = T
                                 done=done_pos, now=d.clock)
     verdict = budget.judge(d.cfg, est, now=d.clock)
 
-    if not todo:
-        # Everything asked for is already answered. This is the payoff of persistence:
-        # repeating the 30-minute run that returned nothing costs zero model calls.
-        merged = [SubResult(i, cached[i].answer, cached[i].itok, cached[i].otok,
-                            model=cached[i].model) for i in sel]
-        return _render(d, ctx_id, prompt, merged, sub_model, reduce=reduce, n=n,
-                       max_chunks=max_chunks, from_cache=len(sel), deferred=0, key=rkey)
+    # A fully resumed run is not a free run: with reduce=True the synthesis still reads
+    # every CACHED answer and still costs a call. So the budget gates below run BEFORE the
+    # all-cached return — returning first made the one call such a run does make the one
+    # call nothing checked.
+    what = (f"{len(todo)} chunk(s) of {ctx_id}" if todo else
+            f"the synthesis over {len(sel)} cached chunk(s) of {ctx_id}")
 
     # Two different refusals, because they call for different actions. A chunk larger
     # than the stop line can NEVER be sent — waiting is useless, re-chunk. A chunk larger
@@ -281,10 +280,7 @@ def run(d: Deps, ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = T
                  if usable and est.max_map_call_tokens > usable else
                  "the reduce pass reads every chunk answer at once and can never fit the "
                  "session window — re-run with reduce=False, or use fewer, larger chunks")
-        return d.answer(
-            f"ERROR: {blame}.\n\n"
-            + budget.render(verdict, what=f"{len(todo)} chunk(s) of {ctx_id}")
-        )
+        return d.answer(f"ERROR: {blame}.\n\n" + budget.render(verdict, what=what))
     # The SMALLEST remaining call, not the largest: with `files` chunking one big file
     # sits beside many small ones, and refusing the whole batch because the biggest does
     # not fit — while announcing that not even one chunk fits — threw away the chunks that
@@ -292,13 +288,24 @@ def run(d: Deps, ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = T
     if verdict.headroom_tokens is not None and est.min_call_tokens > verdict.headroom_tokens:
         wait = (f" Headroom returns in ~{budget.fmt_dur(verdict.spend.oldest_expires_in_s)}."
                 if verdict.spend.oldest_expires_in_s else "")
+        lack = ("not enough headroom for even one chunk" if todo else
+                "not enough headroom for the synthesis over the cached answers")
         return d.answer(
-            "ERROR: session budget exhausted — not enough headroom for even one chunk."
-            + wait + "\n\n"
-            + budget.render(verdict, what=f"{len(todo)} chunk(s) of {ctx_id}")
+            f"ERROR: session budget exhausted — {lack}." + wait + "\n\n"
+            + budget.render(verdict, what=what)
             + f"\n\n_{len(cached)} chunk(s) already answered are safe on disk; re-run this "
               "tool once the window has rolled and it resumes there._"
         )
+
+    if not todo:
+        # Everything asked for is already answered. This is the payoff of persistence:
+        # repeating the 30-minute run that returned nothing re-pays for no chunk. It is
+        # not free with reduce=True — the synthesis above was budgeted for, and is what
+        # the gates just admitted.
+        merged = [SubResult(i, cached[i].answer, cached[i].itok, cached[i].otok,
+                            model=cached[i].model) for i in sel]
+        return _render(d, ctx_id, prompt, merged, sub_model, reduce=reduce, n=n,
+                       max_chunks=max_chunks, from_cache=len(sel), deferred=0, key=rkey)
 
     gate = budget.Gate(d.cfg, now=d.clock)
     # Built lazily, one at a time inside each pool worker (sub_query_batch), not here —

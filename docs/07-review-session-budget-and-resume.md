@@ -238,3 +238,44 @@ longer installed was false in that venv, and nothing detects it if it returns.
 **Not fixed, deliberately.** The retention gaps in §5 stand. So does the double read in
 `_scan_cache`. A live `rlm_query` stop→resume against Docker and a live floor hit are still
 unverified.
+
+## 10. Second review round (2026-09-03) — two defects in the budget's own premise
+
+Reviewed again after §9, once by hand and once by driving this branch's own
+`rlm_sub_query_batch` over its own diff. **The rlm-driven pass found nothing real** — 33
+files mapped, 8 candidates, all 8 refuted under three independent lenses, no cross-file
+defect. It also could not rediscover the first finding below, which spans two modules: a
+per-file map sees one side of every seam. Worth remembering before treating a clean rlm
+pass over a diff as a clean bill of health. Both real findings came from elsewhere.
+
+**The forecast under-counted a fully resumed run to zero.** `estimate_batch` added the
+reduce call under `if reduce and calls:`, where `calls` counts only UNCACHED chunks — so a
+batch whose every chunk was already answered forecast 0 calls and 0 tokens, while
+`batch.run`'s "nothing left to map" early return went on to issue the synthesis over the
+cached answers. That return also sat above both budget gates, making the one call such a
+run does make the one call nothing checked. The synthesis is now keyed on the chunk count
+rather than the remaining work, priced over every answer it reads, and both gates run
+before the all-cached return.
+
+**The output cap is unenforceable on the default path, and three places assumed it held.**
+`claude` accepts no output-token flag: `CliTransport` is handed `max_tokens` and has
+nowhere to put it, so on the OAuth path the cap is never sent. Measured by running this
+branch's own 33-chunk review at `max_output_tokens=2048` — **328,453 output tokens, 4.9x
+the cap**, and 541,468 total against a 281,461 forecast, 1.9x. The forecast, the
+transport's pre-call floor and the batch `Gate`'s reserve all priced output at that cap.
+All three now use `budget.expected_output`, the max of the cap and the mean the ledger has
+actually seen; where a transport DOES enforce the cap the measurement cannot exceed it, so
+the SDK path is untouched and no auth-mode plumbing is needed. Clamped at
+`_MAX_OUTPUT_FACTOR` for the reason §9 records for the learned ceiling: a reservation
+derived from an unbounded observation stops being an estimate and starts refusing
+everything.
+
+Nothing found this by reading. Three static passes — five parallel reviewers, an
+adversarial verifier, and the rlm map — all walked past `_prepare(messages, system, model)`
+without noticing the argument it drops. It surfaced from spending real tokens and checking
+the forecast against the receipt.
+
+**Verify is 377 passed, 1 skipped** (was 368). Ten mutants written against the nine new
+tests, all ten caught. Cold-start gap left standing on purpose: with fewer than
+`_OUTPUT_SAMPLE_MIN` ledger records there is no measurement, so the first batch after a
+fresh install is still forecast at the cap.

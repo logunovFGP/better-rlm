@@ -605,6 +605,45 @@ def test_findings_too_large_to_reduce_fall_back_to_raw_instead_of_being_truncate
     assert big in out, "the raw findings are still returned"
 
 
+def test_a_fully_cached_batch_is_still_gated_on_the_synthesis_it_runs(monkeypatch, batch_ctx):
+    """A resumed run re-pays for no chunk, but reduce=True still sends every cached answer
+    back as one synthesis call. Returning early on "nothing left to map" put that call
+    ahead of every budget check — the one call in such a run, and nothing saw it."""
+    d, _events = batch_ctx(2)
+
+    def _map(cfg, prompts, model, concurrency=1, **kw):
+        """Persists through on_result the way the real pool does — without that the
+        second run finds nothing cached and this test proves nothing."""
+        out = [sq.SubResult(0, "finding 0", 10, 3), sq.SubResult(1, "finding 1", 10, 3)]
+        for r in out:
+            if kw.get("on_result") is not None:
+                kw["on_result"](r)
+        return out
+
+    monkeypatch.setattr(bt, "sub_query_batch", _map)
+    reduce_calls = []
+
+    def _synth(*a, **k):
+        reduce_calls.append(1)
+        return sq.SubResult(0, "synthesis", 1, 1)
+
+    monkeypatch.setattr(bt, "sub_query", _synth)
+
+    first = bt.run(d, "ctx_x", "audit every file", reduce=True)
+    assert "synthesis" in first and len(reduce_calls) == 1, "setup: the first run must map"
+
+    # Same prompt, same chunk bytes, so every answer is now on disk and there is no map
+    # work left. This ceiling cannot fit the synthesis over those answers.
+    tight = dataclasses.replace(d, cfg=dataclasses.replace(
+        d.cfg, session_budget_tokens=1_000, budget_stop_fraction=0.95))
+    out = bt.run(tight, "ctx_x", "audit every file", reduce=True)
+
+    assert out.startswith("ERROR"), f"a fully cached run spent unchecked: {out[:200]}"
+    assert len(reduce_calls) == 1, "the synthesis was issued without passing the budget"
+    assert "synthesis over 2 cached chunk(s)" in out, \
+        "the refusal must name what was refused, not '0 chunk(s)'"
+
+
 
 def test_the_transport_floor_defers_the_batch_instead_of_failing_it(monkeypatch, cfg):
     """If the floor fires under a worker (the Gate normally stops first), the chunk and
@@ -617,5 +656,32 @@ def test_the_transport_floor_defers_the_batch_instead_of_failing_it(monkeypatch,
     calls, results = _run_batch(monkeypatch, cfg, BudgetStopError(spent=1, usable=1, next_call=1))
     assert len(calls) == 1, "the floor was re-hit once per remaining chunk"
     assert len(results) == 10
+    assert all(r.error == "deferred — session budget reached" for r in results), \
+        [r.error for r in results]
+
+
+def test_the_gate_reserves_what_a_call_emits_not_the_cap_the_cli_discards(monkeypatch, cfg):
+    """The Gate reserves before admitting each chunk. Reserving max_tokens — which the CLI
+    never receives, so a call can emit several times it — let the Gate admit work the
+    window could not pay for, running past the line it exists to stop short of."""
+    import dataclasses
+    import src.budget as budget
+
+    cfg = dataclasses.replace(cfg, session_budget_tokens=90_000, budget_stop_fraction=0.95)
+    for _ in range(8):                       # measured mean output: 10,000 per call
+        budget.record(cfg, "m", 0, 10_000)
+    calls: list[str] = []
+
+    def fake_call(cfg_, model, prompt, max_tokens, system):
+        calls.append(prompt)
+        return "ok", 1, 1, "m"
+
+    monkeypatch.setattr(sq, "_call", fake_call)
+    # Spend 80,000 against an 85,500 line. Reserving the cap projects 82,048 and admits;
+    # reserving what the path emits projects 90,000 and does not.
+    results = sq.sub_query_batch(cfg, ["p0", "p1"], "m", concurrency=1,
+                                 max_tokens=2048, gate=budget.Gate(cfg))
+
+    assert calls == [], "the Gate admitted a call it had reserved only the cap for"
     assert all(r.error == "deferred — session budget reached" for r in results), \
         [r.error for r in results]
