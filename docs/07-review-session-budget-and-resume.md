@@ -88,7 +88,26 @@ what the last run spent.
   The CLI path reported `itok=1027` for ~3M tokens of real input.
 - **Stop at 95%, not 100%.** The last 5% buys a couple of chunks; being killed mid-call
   costs the exit path. The floor is read-and-compare, not reserve, so overshoot is bounded
-  by concurrency × one call (~3 × 32k vs a ~290k margin). The batch `Gate` *does* reserve.
+  by concurrency × one call. The batch `Gate` *does* reserve.
+
+  **Re-derived after `expected_output` (2026-09-03, §11).** That fix raised the per-call
+  output figure from the 2,048 cap to the ledger's measured mean, so this bound moved and
+  the old "~3 × 32k vs a ~290k margin" no longer describes it. Computed from the shipped
+  config — `subquery_concurrency` 3, `chunk_chars` 120,000 (30,173 tokens in, plus 173 for
+  `MAP_SYSTEM`), `session_budget_tokens` 5,800,000 at `budget_stop_fraction` 0.95, so a
+  290,000-token margin:
+
+  | output per call | per call | 3 in flight | share of margin |
+  |---|---|---|---|
+  | 9,953 (measured 48h mean) | 40,126 | 120,378 | 41.5% |
+  | 16,384 (`_MAX_OUTPUT_FACTOR` clamp — worst case) | 46,557 | 139,671 | 48.2% |
+
+  Still inside the margin, so the read-and-compare trade stands and no code changed. But
+  the safety factor roughly halved, from ~3x to ~2.1x, and the threshold is now concrete:
+  **below about 2.8M configured `session_budget_tokens` three worst-case calls in flight
+  can overshoot the entire margin** (139,671 > 5% of the budget once the budget drops
+  under 2,793,420). §5 said this "would matter more with a small
+  `session_budget_tokens`"; that is the number where it starts to.
 - **No TTL on the cache.** Same bytes + prompt + model ⇒ same answer; model id is in the
   key. Disk is bounded by bytes with LRU. A 1-hour TTL was proposed and rejected on purpose.
 - **Chunk position is not in the cache key.** `_mk_prompt` frames each chunk as

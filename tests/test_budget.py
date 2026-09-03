@@ -467,6 +467,111 @@ def test_the_sweep_respects_its_cooldown(bcfg, clock):
     assert results.cache_get(cfg, k, index=0) is not None, "swept inside the cooldown"
 
 
+def _store_artifacts(cfg, clock, *, n=3, size=40, age_s=0, tag=""):
+    """Lay down n manifest/checkpoint pairs under the store, oldest first. Returns the
+    paths newest-last so a test can name which it expects to survive. ``tag`` keeps two
+    calls in one test from writing the same ctx dirs and silently overwriting each other."""
+    import os
+    made = []
+    for i in range(n):
+        base = cfg.store_dir / f"ctx{tag}{i}"
+        man = base / "results" / f"run{i}.jsonl"
+        ck = base / "query" / f"q{i}.json"
+        dill = base / "query" / f"q{i}.state.dill"
+        for p in (man, ck, dill):
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("x" * size, encoding="utf-8")
+            stamp = clock.now - age_s - (n - i)
+            os.utime(p, (stamp, stamp))
+        made.append((man, ck, dill))
+    return made
+
+
+def test_the_store_sweep_bounds_manifests_and_checkpoints_on_one_budget(bcfg, clock):
+    """docs/07 section 5's first gap: the answer cache and the log dir had sweeps, these
+    two had none. A checkpoint is deleted on success and on fresh=True, so what
+    accumulated was the ABANDONED stop -- carrying a context-sized state.dill.
+
+    One budget across both patterns, not one each: pruning them separately would let two
+    patterns quietly permit twice the configured ceiling.
+    """
+    import dataclasses as dc
+    cfg = dc.replace(bcfg, results_retention_days=3650)
+    made = _store_artifacts(cfg, clock)
+    one = made[0][0].stat().st_size
+    cfg = dc.replace(cfg, results_max_bytes=4 * one)   # room for 4 of the 9 files
+
+    results.sweep_store(cfg, now=clock)
+
+    alive = [p.exists() for grp in made for p in grp]
+    assert sum(alive) == 4, f"expected 4 survivors under a 4-file budget, got {sum(alive)}"
+    assert alive[-1] and alive[-2], "evicted the NEWEST artifacts instead of the oldest"
+
+
+def test_the_store_sweep_expires_by_age_even_well_inside_the_byte_cap(bcfg, clock):
+    """Kept longer than the cache, but not forever: a manifest records paid-for work, and
+    30 days of them is still a bound.
+
+    The byte cap is deliberately generous here so it CANNOT be what deletes anything. An
+    earlier version of this test used a tight cap and passed with the age check disabled
+    entirely -- expired files are also the oldest, so the byte cap evicted them first and
+    the age cap was never the thing under test.
+    """
+    import dataclasses as dc
+    old = _store_artifacts(bcfg, clock, n=1, age_s=40 * 86400, tag="old")
+    new = _store_artifacts(bcfg, clock, n=1, tag="new")
+    cfg = dc.replace(bcfg, results_retention_days=30,
+                     results_max_bytes=512 * 1024 * 1024)
+
+    results.sweep_store(cfg, now=clock)
+
+    assert not any(p.exists() for p in old[0]), "kept an artifact past the age cap"
+    assert all(p.exists() for p in new[0]), "the age cap took a file inside its window"
+
+
+def test_the_store_sweep_takes_the_dill_beside_the_transcript(bcfg, clock):
+    """A checkpoint is a .json transcript AND a roughly context-sized .state.dill.
+    Globbing query/*.json would sweep the small half and leave the large half for good."""
+    import dataclasses as dc
+    cfg = dc.replace(bcfg, results_retention_days=1,
+                     results_max_bytes=512 * 1024 * 1024)
+    made = _store_artifacts(cfg, clock, n=1, age_s=10 * 86400)
+
+    results.sweep_store(cfg, now=clock)
+
+    assert not made[0][2].exists(), "left the state.dill behind — the large half"
+
+
+def test_startup_sweeps_both_the_cache_and_the_store(bcfg, monkeypatch):
+    """A sweep nothing calls is a sweep that never runs. Both belong to the startup
+    housekeeping in Deps.create, beside log retention -- and deleting either call is
+    otherwise invisible to every test in this file, which exercises the sweeps directly.
+    """
+    import src.deps as deps_mod
+    called: list[str] = []
+    monkeypatch.setattr(deps_mod, "configure_logging", lambda cfg: None)
+    monkeypatch.setattr(deps_mod.results, "sweep", lambda c: called.append("cache"))
+    monkeypatch.setattr(deps_mod.results, "sweep_store", lambda c: called.append("store"))
+
+    deps_mod.Deps.create(bcfg)
+
+    assert called == ["cache", "store"], f"startup ran {called}"
+
+
+def test_the_store_sweep_never_takes_a_tmp_a_peer_is_writing(bcfg, clock):
+    """Every writer here is tmp-then-replace, so a *.tmp is always somebody's live work.
+    Taking one corrupts a peer's atomic write for no gain."""
+    import dataclasses as dc
+    cfg = dc.replace(bcfg, results_max_bytes=1, results_retention_days=1)
+    tmp = cfg.store_dir / "ctx0" / "query" / "q0.json.tmp"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text("half-written", encoding="utf-8")
+
+    results.sweep_store(cfg, now=clock)
+
+    assert tmp.exists(), "swept a tmp another process was mid-write on"
+
+
 def test_the_manifest_records_what_a_run_produced_with_its_timestamps(bcfg, clock):
     key = results.run_key("audit", "haiku", "lines", 3)
     results.manifest_append(bcfg, "ctx_1", key, results.Saved(0, "a", 1, 1, "haiku"), now=clock)

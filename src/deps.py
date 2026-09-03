@@ -60,6 +60,10 @@ class Deps:
         # retention runs inside configure_logging). Cooldown-gated, so the pool of spare
         # daemons does not each walk the cache directory on start.
         results.sweep(c)
+        # Same window, second directory: the store's manifests and abandoned checkpoints
+        # had no retention at all, and one stopped run's state.dill outweighs thousands of
+        # cache entries.
+        results.sweep_store(c)
         return cls(cfg=c, store=ContextStore(c), log=configure_logging(c))
 
     @classmethod

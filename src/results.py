@@ -4,9 +4,11 @@ THE CACHE IS KEYED BY WHAT THE MODEL WAS ASKED, NOT BY WHICH CONTEXT ASKED IT. T
 version of this module stored answers under ``<ctx_id>/results/``. That worked for a
 re-run of the same ctx_id and for nothing else: load the same file again and you get a
 new ctx_id, every answer already paid for is orphaned, and the whole batch is re-spent.
-An answer's identity is ``(chunk bytes, prompt, model)`` — the ctx_id is an accident of
-when you loaded it. So the key is a hash of exactly those three, and a re-loaded file, a
-re-bundled repo, or a second context that happens to contain the same file all hit.
+An answer's identity is ``(chunk digest, prompt, model, system prompt)`` — the ctx_id is an
+accident of when you loaded it. So the key is a hash of exactly those four, and a re-loaded
+file, a re-bundled repo, or a second context that happens to contain the same file all hit.
+The system prompt is in there because it changes the answer, and the chunk arrives as a
+digest because ``ContextStore`` stamps one per chunk at chunk time.
 
 This is ordinary content-addressed memoization (git objects, the Nix store, Bazel's
 action cache, ccache). Its yield depends entirely on how stable chunk boundaries are:
@@ -143,49 +145,113 @@ def cache_delete(cfg: Config, key: str) -> bool:
 # --------------------------------------------------------------------------- #
 # LRU byte-cap sweep
 # --------------------------------------------------------------------------- #
-def sweep(cfg: Config, *, now: Clock = time.time) -> None:
-    """Keep the cache under ``cache_max_bytes``, evicting least-recently-used first.
+def _claim_sweep(root: Path, cooldown_s: float, t: float) -> bool:
+    """True if this process should sweep ``root`` now, having claimed the window.
 
-    Same shape as the log retention sweep, for the same reason: Claude Code runs many
-    server processes (a pool of pre-warmed spares), so a full directory walk on every
-    start is real cost, and the ``.sweep`` sentinel makes only one of them do it per
-    ``cache_sweep_cooldown_s``. Advisory, not a lock — correctness never depends on it,
-    and a file another process is mid-write on (``*.tmp``) is never taken.
+    Claude Code runs many server processes (a pool of pre-warmed spares), so a full
+    directory walk on every start is real cost, and the ``.sweep`` sentinel makes only one
+    of them do it per ``cooldown_s``. Advisory, not a lock — correctness never depends on
+    it, and the worst case of losing the race is a walk that finds nothing to do.
 
-    ponytail: near-duplicate of logsetup._run_retention_sweep minus the age cap. Fold the
-    two into one helper when a third caller appears; refactoring a tested sweep for two
-    callers is not yet worth its own risk.
+    Split out of ``sweep`` when the store's own artifacts became a third caller, which is
+    the condition the note here used to name. Only the sentinel dance is shared; the caps
+    are not, because the three callers genuinely disagree about them —
+    ``logsetup._run_retention_sweep`` keeps its own copy rather than grow an ``own_path``
+    and a file-count cap that nothing else wants.
     """
+    if not root.exists():
+        return False
+    sentinel = root / ".sweep"
+    with contextlib.suppress(FileNotFoundError):
+        if t - sentinel.stat().st_mtime < cooldown_s:
+            return False
+    tmp = root / f".sweep.{os.getpid()}.tmp"
     try:
-        root = cfg.cache_dir
-        if not root.exists():
-            return
-        t = now()
-        sentinel = root / ".sweep"
-        with contextlib.suppress(FileNotFoundError):
-            if t - sentinel.stat().st_mtime < cfg.cache_sweep_cooldown_s:
-                return
-        tmp = root / f".sweep.{os.getpid()}.tmp"
-        try:
-            tmp.write_text(str(t), encoding="utf-8")
-            os.replace(tmp, sentinel)
-        except OSError:
-            with contextlib.suppress(OSError):
-                tmp.unlink(missing_ok=True)
+        tmp.write_text(str(t), encoding="utf-8")
+        os.replace(tmp, sentinel)
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+    return True
 
-        entries: list[tuple[Path, float, int]] = []
-        for p in root.glob("*/*.json"):
+
+def _prune(root: Path, *patterns: str, t: float, max_bytes: int,
+           max_age_s: float = 0.0) -> None:
+    """Delete matches of ``patterns`` past ``max_age_s``, then past ``max_bytes``, newest
+    (most recently hit) first.
+
+    All patterns share ONE byte budget, taken together and sorted as one list. Pruning
+    them separately would give each the full cap, so two patterns would silently permit
+    twice the configured ceiling.
+
+    An age-expired file is skipped rather than charged to the byte budget. That is
+    bookkeeping tidiness and NOT a safety property, which is worth stating because it
+    looks like one: mtime is both the sort key and the age key, so an expired file is
+    always among the oldest and would be evicted by the byte cap anyway. A mutant that
+    charges it survives every test, correctly — there is no behaviour to test.
+
+    ``*.tmp`` is never taken. Every caller here writes atomically as tmp-then-replace, so
+    a tmp is always somebody's live work. ``max_age_s`` of 0 disables the age cap, which is
+    what the answer cache wants — an entry there stays correct indefinitely and a TTL was
+    rejected on purpose.
+    """
+    entries: list[tuple[Path, float, int]] = []
+    for pattern in patterns:
+        for p in root.glob(pattern):
+            if p.suffix == ".tmp":
+                continue
             with contextlib.suppress(OSError):
                 st = p.stat()
                 entries.append((p, st.st_mtime, st.st_size))
-        entries.sort(key=lambda e: e[1], reverse=True)   # newest (most recently hit) first
-        total = 0
-        for p, _mtime, size in entries:
-            total += size
-            if total > cfg.cache_max_bytes:
-                with contextlib.suppress(OSError):
-                    p.unlink()
+    entries.sort(key=lambda e: e[1], reverse=True)
+    total = 0
+    for p, mtime, size in entries:
+        if max_age_s and t - mtime > max_age_s:
+            with contextlib.suppress(OSError):
+                p.unlink()
+            continue
+        total += size
+        if total > max_bytes:
+            with contextlib.suppress(OSError):
+                p.unlink()
+
+
+def sweep(cfg: Config, *, now: Clock = time.time) -> None:
+    """Keep the answer cache under ``cache_max_bytes``, evicting least-recently-used
+    first. No age cap: see ``_prune``."""
+    try:
+        t = now()
+        if _claim_sweep(cfg.cache_dir, cfg.cache_sweep_cooldown_s, t):
+            _prune(cfg.cache_dir, "*/*.json", t=t, max_bytes=cfg.cache_max_bytes)
     except Exception:  # noqa: BLE001 - a cache sweep must never take down the server
+        pass
+
+
+def sweep_store(cfg: Config, *, now: Clock = time.time) -> None:
+    """Bound the store's OWN artifacts: run manifests and the checkpoints of stopped runs.
+
+    Neither had any retention. The answer cache and the log directory both have sweeps;
+    these two were the gap (docs/07 §5). A checkpoint is deleted on success and on
+    ``fresh=True``, so what accumulated was specifically the ABANDONED stop — and it
+    carries a roughly context-sized ``state.dill`` beside its transcript, so a handful of
+    them outweighs the entire answer cache.
+
+    Kept longer than the cache because a manifest and a checkpoint record work that was
+    PAID FOR and cannot be re-derived, where a cache entry can always be re-earned by
+    asking again. Hence an age cap as well as a byte cap, both larger than the cache's.
+
+    ``query/*`` rather than ``query/*.json``: a checkpoint is a ``.json`` transcript AND a
+    ``.state.dill`` blob, and sweeping only the transcript would leave the large half
+    behind for good.
+    """
+    try:
+        t = now()
+        if not _claim_sweep(cfg.store_dir, cfg.cache_sweep_cooldown_s, t):
+            return
+        _prune(cfg.store_dir, "*/results/*.jsonl", "*/query/*",
+               t=t, max_bytes=cfg.results_max_bytes,
+               max_age_s=cfg.results_retention_days * 86400)
+    except Exception:  # noqa: BLE001 - housekeeping must never take down the server
         pass
 
 
