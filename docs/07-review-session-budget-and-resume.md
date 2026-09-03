@@ -86,6 +86,15 @@ what the last run spent.
   taught it and refused everything after (§9).
 - **Input tokens are estimated locally (~4 chars/token), never taken from the transport.**
   The CLI path reported `itok=1027` for ~3M tokens of real input.
+
+  **Superseded 2026-09-03 (§13).** Half right: the transport's number was not missing, it
+  was SPLIT. Prompt caching puts the bulk in `cache_creation_input_tokens` and
+  `cache_read_input_tokens`, leaving `input_tokens` as the uncached remainder — which is
+  why it read 1027, and 10 for a 30k chunk. Summed (`transport._total_input`) it is the
+  real figure, and the ledger now records `max(local_estimate, reported_total)`. The local
+  estimate is still what the pre-call floor and the forecast must use, since both run
+  before the call; `budget.input_overhead` supplies the ~29k of harness context per call
+  that the estimate cannot see.
 - **Stop at 95%, not 100%.** The last 5% buys a couple of chunks; being killed mid-call
   costs the exit path. The floor is read-and-compare, not reserve, so overshoot is bounded
   by concurrency × one call. The batch `Gate` *does* reserve.
@@ -102,12 +111,28 @@ what the last run spent.
   | 9,953 (measured 48h mean) | 40,126 | 120,378 | 41.5% |
   | 16,384 (`_MAX_OUTPUT_FACTOR` clamp — worst case) | 46,557 | 139,671 | 48.2% |
 
-  Still inside the margin, so the read-and-compare trade stands and no code changed. But
-  the safety factor roughly halved, from ~3x to ~2.1x, and the threshold is now concrete:
-  **below about 2.8M configured `session_budget_tokens` three worst-case calls in flight
-  can overshoot the entire margin** (139,671 > 5% of the budget once the budget drops
-  under 2,793,420). §5 said this "would matter more with a small
-  `session_budget_tokens`"; that is the number where it starts to.
+  **Corrected again after §13, and this one matters.** Those rows counted input at the
+  local estimate, which §13 measured as ~29k per call short of what the account is billed.
+  Adding the measured overhead:
+
+  | output per call | per call | 3 in flight | share of margin |
+  |---|---|---|---|
+  | 9,953 (measured mean) | 69,126 | 207,378 | 71.5% |
+  | 16,384 (worst case) | 75,557 | 226,671 | **78.2%** |
+
+  **The overshoot did not get worse; the measurement got honest.** Those 29k per call were
+  always being spent — §13 only started counting them. So the read-and-compare trade has
+  been running at a **1.28x** safety factor, not the ~3x §4 originally claimed nor the
+  ~2.1x §11 recomputed, and the threshold moves from 2.8M to **4,533,420**: below roughly
+  4.5M configured `session_budget_tokens`, three worst-case calls in flight can overshoot
+  the whole margin. The shipped 5.8M clears it by 28%, which is thin.
+
+  §5 said this "would matter more with a small `session_budget_tokens`". 4.5M is not small.
+  **This is now the strongest argument for making the floor reserve rather than
+  read-and-compare** — still not changed here, because it is a behaviour change to the one
+  guard that stops a runaway fan-out and it deserves its own leaf and its own live test
+  (§9's un-run floor hit). Lowering `subquery_concurrency` to 2 is the one-line mitigation
+  in the meantime and costs wall time, not correctness.
 - **No TTL on the cache.** Same bytes + prompt + model ⇒ same answer; model id is in the
   key. Disk is bounded by bytes with LRU. A 1-hour TTL was proposed and rejected on purpose.
 - **Chunk position is not in the cache key.** `_mk_prompt` frames each chunk as
@@ -425,3 +450,63 @@ Also worth noting for anyone reading a batch report: its `tokens: N in` line is 
 billed ~320k. The ledger's `est_in` is closer and still 2x low.
 
 **Verify unchanged at 394 passed, 1 skipped** — no code changed for this section.
+
+## 13. The input side (2026-09-03) — §12's finding, fixed
+
+§12 measured the output side and found the next defect on the input side: `_est_in` said
+30,232 for a chunk the account was billed 64,149 for. This closes it. It is §10's defect
+with the operands swapped, and it was hiding behind a claim this document made in §4.
+
+**The transport's number was never missing — it was split.** §4 wrote it off because the
+CLI reported `itok=1027` for ~3M tokens of real input, and that reading was correct about
+`usage.input_tokens` and wrong about the transport. Prompt caching puts the bulk in
+`cache_creation_input_tokens` and `cache_read_input_tokens`; `input_tokens` is only the
+uncached remainder, which is why it read **10** for a 30k-token chunk whose call consumed
+**64,149**. `transport._total_input` sums all three, on both the CLI and SDK paths.
+
+**The ledger records `max(local_estimate, reported_total)`.** The same construction
+`expected_output` uses, for the same reason: it needs no knowledge of which transport is in
+play, and it can only ever move the recorded figure toward the truth. A transport reporting
+nothing leaves the estimate standing.
+
+**`budget.input_overhead` learns what the estimate cannot see.** The floor and the forecast
+both run BEFORE the call, so they need an estimate — and the local one is ~2x low because
+it counts only what we hand over, not the harness context the CLI prepends. Measured: a
+22-character prompt still created **29,268** cache tokens. Unbudgeted that is ~960k tokens
+across a 33-chunk batch, landing on the one number a floor exists to keep honest.
+
+Learned as a DIFFERENCE, not a mean, and this is the part worth challenging. Input per call
+swings with chunk size, so a mean of `itok` forecasts nothing; the overhead is the stable
+part, so each record carries `est` beside `itok` and the overhead is `itok - est`. Its
+MEDIAN, because a batch mixes one small tail chunk with several full ones and the
+cache-creation/cache-read split moves `itok` by a factor of its own between the first call
+of a run and the rest — one outlier must not move a floor. Bounded like `expected_output`:
+0 below `_OUTPUT_SAMPLE_MIN` records so a cold ledger behaves exactly as before, negatives
+clamped to 0 so a learned term can never LOWER a reservation, and `_MAX_INPUT_OVERHEAD` on
+top for the reason `ceiling` refuses to learn from a usage limit.
+
+**Two mutants survived the first pass, and both were tested-but-unreached wiring.**
+`_total_input` was correct and neither parser was proven to call it — deleting the call from
+either was invisible, the same gap Leaf 3 had with a sweep nothing invoked. One test now
+drives both parsers. A third defect came from writing the floor test the obvious way: 8
+records of 30,000 against a 60,000 ceiling exhausts the budget outright, so it passed with
+the overhead term deleted. It now asserts both directions — that the bare reserve fits and
+the reserve with overhead does not — with the ceiling picked so the headroom sits between
+them.
+
+**Verify is 403 passed, 1 skipped** (was 394). Fourteen mutants, all fourteen caught.
+
+**What this does NOT do.** It does not reduce spend by one token; it makes the forecast and
+the floor honest about spend that was always happening. Expect `rlm_estimate` to report
+noticeably larger numbers than before on the CLI path — roughly +29k per call — and that is
+the correction, not a regression. The cold-ledger case is unchanged, so the first batch
+after a fresh install still under-forecasts input, self-correcting after one run.
+
+**And it makes one existing trade look much worse than it did, which is the point.** §4's
+overshoot bound is recomputed there: counting the 29k, three concurrent calls can overshoot
+by 226,671 against a 290,000 margin — a **1.28x** safety factor, where §4 claimed ~3x and
+§11 recomputed ~2.1x. Those tokens were always being spent, so the floor has always been
+this close to the line; §13 only started counting them. It is the strongest argument yet
+for making the floor RESERVE rather than read-and-compare, and that is deliberately left
+for its own leaf: it changes the one guard that stops a runaway fan-out, and §9's live
+floor hit is still un-run. `subquery_concurrency: 2` is the one-line mitigation meanwhile.

@@ -291,3 +291,111 @@ def test_the_floor_reserves_what_a_call_emits_not_the_cap_the_cli_discards(cfg):
         w.complete([{"role": "user", "content": "x" * 400}], None, "m", 2048)
 
     assert calls == [], "reserved the unenforceable cap, so the floor admitted the call"
+
+
+# --- input accounting: the cap defect with the operands swapped ------------------------
+
+def test_total_input_counts_the_cache_not_just_the_uncached_remainder():
+    """`input_tokens` alone is what is left AFTER prompt caching, and on this path that is
+    almost nothing. Measured on a real 30k review chunk: input_tokens 10 against 38,470
+    cache_creation and 25,679 cache_read -- so reading that one field understated the
+    call's input by more than 6,000x (docs/07 §12)."""
+    usage = {"input_tokens": 10, "cache_creation_input_tokens": 38_470,
+             "cache_read_input_tokens": 25_679, "output_tokens": 15_768}
+    assert tp._total_input(usage) == 64_159
+
+    class _SdkUsage:            # the SDK hands an object, not a mapping
+        input_tokens = 10
+        cache_creation_input_tokens = 38_470
+        cache_read_input_tokens = 25_679
+
+    assert tp._total_input(_SdkUsage()) == 64_159
+    # A transport that reports no cache fields at all must still work, unchanged.
+    assert tp._total_input({"input_tokens": 700}) == 700
+
+
+def test_the_ledger_records_the_transports_total_when_it_beats_our_estimate(cfg):
+    """docs/07 §4 wrote the transport's input figure off as unusable, on the strength of a
+    field that reported 1027 for ~3M tokens. It is usable once the cache fields are added
+    in -- and max() picks whichever is closer to the truth with no knowledge of which
+    transport is in play, exactly as expected_output does for the output side."""
+    import json
+    import src.budget as budget
+
+    class _Backend:
+        def complete(self, messages, system, model, max_tokens):
+            # est_in for this message is ~4 tokens; the transport reports far more.
+            return tp.CompletionResult(text="ok", input_tokens=64_159,
+                                       output_tokens=15_768, model="m")
+
+        async def acomplete(self, *a):
+            raise AssertionError("not used")
+
+    tp._LedgeredTransport(_Backend(), cfg).complete(
+        [{"role": "user", "content": "hi"}], None, "m", 2048)
+
+    rec = json.loads(cfg.budget_ledger.read_text(encoding="utf-8").splitlines()[-1])
+    assert rec["itok"] == 64_159, "ledgered our estimate over the transport's real total"
+    assert rec["est"] < 100, "the local estimate must ride along for input_overhead"
+    assert rec["otok"] == 15_768
+
+
+def test_the_floor_reserves_the_measured_input_overhead(cfg):
+    """The mirror of the output defect. Our estimate covers what we hand over, not the
+    harness context that rides along with it -- ~29k per call on the CLI path, measured.
+    Unreserved, that is the one number a floor exists to keep honest.
+
+    Ceiling picked so the bare estimate fits and the estimate-plus-overhead does not.
+    """
+    import dataclasses
+    import src.budget as budget
+
+    # Teaching the overhead necessarily spends: 8 records of itok 29,001 against est 1.
+    # The ceiling is then picked so the leftover headroom sits BETWEEN the two reserves,
+    # which is the only arrangement where the overhead is what decides the refusal.
+    cfg = dataclasses.replace(cfg, session_budget_tokens=250_000, budget_stop_fraction=0.95)
+    for _ in range(8):
+        budget.record(cfg, "m", 29_001, 0, est=1)
+    assert budget.input_overhead(cfg) == 29_000
+    headroom = int(250_000 * 0.95) - budget.spent(cfg).tokens
+    assert 0 < headroom < 29_000, f"ceiling mis-picked: headroom {headroom:,}"
+
+    msg = [{"role": "user", "content": "x" * 40}]
+    # Asserted in BOTH directions, or this passes on a budget that was merely exhausted --
+    # which is exactly how the first draft of it passed with the overhead term deleted.
+    bare = tp._LedgeredTransport._est_in(msg, None) + budget.expected_output(cfg, 16)
+    budget.check_or_raise(cfg, bare)      # fits comfortably without the overhead
+
+    class _Backend:
+        def complete(self, messages, system, model, max_tokens):
+            raise AssertionError("the floor should have refused before dispatch")
+
+        async def acomplete(self, *a):
+            raise AssertionError("not used")
+
+    w = tp._LedgeredTransport(_Backend(), cfg)
+    with pytest.raises(budget.BudgetStopError):
+        w.complete(msg, None, "m", 16)    # ...and does not fit with it
+
+
+def test_both_parsers_route_input_through_total_input():
+    """_total_input can be correct and unreached. Nothing else in the suite proves either
+    parser calls it, so deleting the call from one -- or from both -- was invisible: the
+    same gap a tested-but-uncalled sweep had. One assertion per parser, on the wiring.
+    """
+    import json
+    usage = {"input_tokens": 10, "cache_creation_input_tokens": 38_470,
+             "cache_read_input_tokens": 25_679, "output_tokens": 15_768}
+
+    cli = tp._parse_cli_output(
+        0, json.dumps({"type": "result", "subtype": "success", "result": "ok",
+                       "usage": usage, "total_cost_usd": 0.1943}), "", "m")
+    assert cli.input_tokens == 64_159, "the CLI parser reported the uncached remainder"
+    assert cli.output_tokens == 15_768
+
+    resp = types.SimpleNamespace(
+        content=[types.SimpleNamespace(type="text", text="ok")],
+        usage=types.SimpleNamespace(**usage))
+
+    sdk = tp._result_from_sdk_response(resp, "m")
+    assert sdk.input_tokens == 64_159, "the SDK parser reported the uncached remainder"
