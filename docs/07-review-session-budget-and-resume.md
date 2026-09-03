@@ -298,3 +298,70 @@ the forecast against the receipt.
 tests, all ten caught. Cold-start gap left standing on purpose: with fewer than
 `_OUTPUT_SAMPLE_MIN` ledger records there is no measurement, so the first batch after a
 fresh install is still forecast at the cap.
+
+## 11. Third round (2026-09-03) — the output contract, and closing §5
+
+Planned end-to-end in `docs/08-plan-subquery-output-contract.md`, which maps every open
+item in this document to a leaf or to a stated refusal. Three leaves landed: `b0202a7`,
+`fbde525`, `158c432`.
+
+**No sub-model call had ever carried a system prompt.** `sub_query`, `sub_query_batch` and
+both transports have always accepted one; `grep -rn "system=" src/ tests/` returned
+nothing. So every chunk was answered by the `claude` CLI's default coding-assistant
+persona, which explains its work — the 328,453 output tokens §10 measured at a
+2,048-per-call cap. The contract sat in the user turn, prompt first and chunk after, ~10K
+tokens before the generation point.
+
+Three static passes and the rlm map in §10 all walked past this, as they walked past the
+dropped `max_tokens`. Both defects were in the same four lines of `_prepare`/`_argv`, and
+both surfaced only from spending real tokens.
+
+The map now sends a SCHEMA rather than a plea — `{"findings": [...]}`, with the empty case
+shown as its own example and named correct, a code-fence ban, and a clause making the
+envelope beat whatever format the caller's prompt asks for, because two competing format
+instructions are what produce hedging. 173 tokens, ~5,709 across a 33-chunk map. The
+synthesis, `rlm_sub_query` and the auth probe get a terseness contract without the
+envelope: their answers go to a reader, so an array there would destroy the deliverable.
+
+**The cache key had to move with the contract, and that is not a detail.** `content_key`
+and `run_key` hashed neither the system prompt nor anything derived from it, so every
+answer cached under the old persona would have stayed cache-valid under the new one — a
+resumed run serving prose for a JSON contract, and with `reduce=True` folding prose and
+envelopes into one synthesis. Four narrower tests all passed with `_scan_cache` keying on
+`""` while the map sent the contract; the test that catches it runs a batch, resumes it,
+then moves the contract and asserts it re-asks.
+
+**§5's two standing items are closed.** Per-chunk `sha256` is stamped into the chunk meta
+at chunk time, following `byte_start`/`byte_end` exactly, so the cache scan costs one probe
+read instead of a pass over every selected chunk. Trust is earned twice — the size check
+the offsets already use, plus a probe read compared against the stored digest, because
+without it a caller handing `set_chunks` text not matching the file could corrupt a cache
+key, which it cannot do today. Neither guard is redundant: the probe only proves the chunk
+it reads, so a rewrite preserving the opening chunk needs the size check. Manifests and
+abandoned checkpoints are now swept on their own caps, kept longer than the cache because
+they record work that was paid for and cannot be re-derived.
+
+**Three defects and one false claim came out of the mutation runs, not the reviews.**
+Adding the system prompt to the forecast billed an ABSENT one a token per call, because
+`estimate_tokens` floors at 1. The two store sweep patterns each got the full byte cap,
+together permitting twice the ceiling. `query/*.json` would have swept a checkpoint's
+transcript and left its context-sized `state.dill` behind for good. And the age-cap test
+passed with the age check deleted — expired files are also the oldest, so the byte cap
+evicted them first; the same run showed the expired-file budget skip is unobservable and
+its docstring no longer claims it as a safety property.
+
+**§4's overshoot bound is re-derived** (see §4) — 48.2% of the margin at worst against the
+~33% it used to claim, still inside, with the threshold that makes it matter now written
+down. `query_ceiling`'s missing root-turn input and the cold-start gap stand, with reasons,
+in `docs/08`.
+
+**Verify is 394 passed, 1 skipped** (was 377). Twenty-five mutants across the three leaves,
+all twenty-five caught — three only after the test that should have caught them was rebuilt.
+
+**Still unverified, and needing real tokens rather than another reading.** The 5x output
+reduction is a HYPOTHESIS: no batch has run under the new contract. Re-run the same 33
+chunks and read `otok` from the run's own `sub_batch` record or the ledger, never from
+`rlm_estimate`, which stays pessimistic for up to 48 hours while the verbose records age
+out of `expected_output`'s window. If output does not fall by most of 5x, the diagnosis in
+this section is wrong. §9's live gaps — an `rlm_query` stop→resume against Docker, and a
+real floor hit — are also still open.
