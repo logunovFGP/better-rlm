@@ -150,12 +150,22 @@ _DEFAULTS: dict[str, Any] = {
     "budget_ledger": "~/.rlm/usage.jsonl",   # append-only per-call spend record
     "budget_state": "~/.rlm/budget.json",    # learned ceiling + last observed limit
     # ---- Content-addressed answer cache (see results.py) -------------------------------
-    # Keyed by (chunk bytes, prompt, model), so a re-loaded file or a re-bundled repo reuses
-    # every answer whose chunk is byte-identical. No TTL: an entry stays correct for as
-    # long as those three match. Disk is bounded by bytes with LRU eviction instead.
+    # Keyed by (chunk digest, prompt, model, system prompt), so a re-loaded file or a
+    # re-bundled repo reuses every answer whose chunk is byte-identical. No TTL: an entry
+    # stays correct for as long as those four match. Disk is bounded by bytes with LRU
+    # eviction instead.
     "cache_dir": "~/.rlm/cache",
     "cache_max_bytes": 256 * 1024 * 1024,   # ~32k answers at the 2048-token map cap
     "cache_sweep_cooldown_s": 300,          # one sweep per window across the daemon pool
+    # The STORE's own artifacts, swept on the same cooldown but kept LONGER than the cache
+    # above (see results.sweep_store): a run manifest and a stopped run's checkpoint record
+    # work that was PAID FOR and cannot be re-derived, where a cache entry can always be
+    # re-earned by asking again. Both grew without bound before this: a checkpoint is
+    # deleted on success and on fresh=True, so only an ABANDONED stop accumulated -- and it
+    # carries a roughly context-sized state.dill beside its transcript (12.7 MB for the
+    # bundle that motivated the resume work), which is why the byte cap is the larger one.
+    "results_max_bytes": 512 * 1024 * 1024,  # manifests + abandoned checkpoints <= 512 MB
+    "results_retention_days": 30,            # ...and nothing older than this survives
     # Structured file logging + bounded retention (see logsetup.py). Per-PID rotated
     # files in log_dir; a startup sweep caps total files/bytes/age across ALL processes
     # so many churning server processes can never fill the disk.
@@ -246,6 +256,8 @@ class Config:
     cache_dir: Path
     cache_max_bytes: int
     cache_sweep_cooldown_s: int
+    results_max_bytes: int
+    results_retention_days: int
     log_level: str
     log_to_file: bool
     log_max_bytes: int
@@ -315,6 +327,8 @@ def load_config() -> Config:
         cache_dir=Path(os.path.expanduser(str(m["cache_dir"]))),
         cache_max_bytes=int(m["cache_max_bytes"]),
         cache_sweep_cooldown_s=int(m["cache_sweep_cooldown_s"]),
+        results_max_bytes=int(m["results_max_bytes"]),
+        results_retention_days=int(m["results_retention_days"]),
         log_level=str(m["log_level"]).upper(),
         log_to_file=bool(m["log_to_file"]),
         log_max_bytes=int(m["log_max_bytes"]),
