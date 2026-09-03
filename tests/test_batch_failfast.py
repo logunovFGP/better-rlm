@@ -186,8 +186,14 @@ def test_probe_survives_a_transport_that_explodes(monkeypatch, batch_ctx):
 
 def test_probe_reports_ok_on_a_live_transport(monkeypatch, batch_ctx):
     srv = _login_ok(monkeypatch)
-    monkeypatch.setattr(srv, "sub_query", lambda *a, **k: sq.SubResult(0, "ok", 1, 1))
+    seen: list[str | None] = []
+    monkeypatch.setattr(srv, "sub_query", lambda *a, **k: (
+        seen.append(k.get("system")) or sq.SubResult(0, "ok", 1, 1)))
     assert "auth probe: ok" in srv._auth_probe_line()
+    # "Reply with exactly: ok" is the same one-line contract the batch needed a system
+    # prompt to hold, and the probe truncates the answer to 20 chars either way -- so the
+    # padding was invisible here rather than absent.
+    assert seen == [bt.TERSE_SYSTEM], "the probe ran under the default persona"
 
 
 def test_probe_is_skipped_when_the_free_check_already_knows_it_is_dead(monkeypatch, batch_ctx):
@@ -363,6 +369,98 @@ def test_map_start_is_logged_before_the_fan_out(monkeypatch, batch_ctx):
     # ctx_id and the denominator are the two things the cli_spawn lines cannot supply.
     assert fields["ctx_id"] == "ctx_x"
     assert (fields["chunks"], fields["total_chunks"]) == (2, 3)
+
+
+def test_the_map_fans_out_with_the_output_contract_in_the_system_slot(monkeypatch, batch_ctx):
+    """Every sub-model call used to run with NO system prompt at all. `sub_query_batch`
+    and both transports have always accepted one and no caller ever passed it, so each
+    chunk was answered by the claude CLI's default coding-assistant persona -- which
+    explains its work. Measured: 328,453 output tokens on a 33-chunk run capped at 2048,
+    4.9x the cap (docs/07 §10). The contract has to travel in the system slot; in the user
+    turn it sits ~10K tokens before the generation point, the weakest position it can hold.
+    """
+    d, _ = batch_ctx(2)
+    seen: list[str | None] = []
+
+    def fake_batch(cfg, prompts, model, concurrency=1, **kw):
+        seen.append(kw.get("system"))
+        return [sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))]
+
+    monkeypatch.setattr(bt, "sub_query_batch", fake_batch)
+    bt.run(d, "ctx_x", "audit every file", reduce=False)
+
+    assert seen == [bt.MAP_SYSTEM], "the map fanned out with no output contract"
+    # A schema, not a plea: "output exactly X" is the instruction that already failed. The
+    # EMPTY case must be shown rather than described -- it is the one a model resists, and
+    # an example that is only ever filled teaches that filled is the goal.
+    assert '{"findings": []}' in bt.MAP_SYSTEM
+
+
+def test_a_single_sub_query_also_carries_the_terse_contract(monkeypatch, batch_ctx):
+    """rlm_sub_query is the same default-persona exposure as the batch, one call wide --
+    and it is uncapped in practice on the OAuth path, so a padded answer costs whatever
+    the model felt like emitting. No envelope here: its answer goes straight to a reader.
+    """
+    d, _ = batch_ctx(2)
+    seen: list[str | None] = []
+    monkeypatch.setattr(bt, "sub_query", lambda cfg, prompt, model, **kw: (
+        seen.append(kw.get("system")) or sq.SubResult(0, "answer", 1, 1)))
+
+    bt.one(d, "ctx_x", "what is in here?", chunk_index=0)
+
+    assert seen == [bt.TERSE_SYSTEM], "the single-query path ran under the default persona"
+
+
+def test_a_changed_output_contract_does_not_reuse_the_old_contracts_answers(monkeypatch, batch_ctx):
+    """The cache key must carry the system prompt the map ACTUALLY SENDS, not just the
+    user's prompt. Key without it and every answer cached under the old no-system persona
+    stays cache-valid under MAP_SYSTEM -- so a resumed run serves prose answers for a JSON
+    contract, and with reduce=True folds prose and envelopes into one synthesis. This is
+    the test the three narrower ones miss: they all still pass if `_scan_cache` keys with
+    "" while the map sends the contract.
+    """
+    d, _ = batch_ctx(2)
+    fanned: list[int] = []
+
+    def fake_batch(cfg, prompts, model, concurrency=1, **kw):
+        fanned.append(len(prompts))
+        out = [sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))]
+        for r in out:
+            kw["on_result"](r)      # persist as production does, or nothing is cached
+        return out
+
+    monkeypatch.setattr(bt, "sub_query_batch", fake_batch)
+    bt.run(d, "ctx_x", "audit", reduce=False)
+    bt.run(d, "ctx_x", "audit", reduce=False)
+    assert fanned == [2], "the second run re-asked chunks it had already paid for"
+
+    # Same chunks, same prompt, same model -- only the contract moved. Every answer on
+    # disk was produced under the other one and none of it is reusable.
+    monkeypatch.setattr(bt, "MAP_SYSTEM", bt.MAP_SYSTEM + "\nAlso: be brief.")
+    bt.run(d, "ctx_x", "audit", reduce=False)
+    assert fanned == [2, 2], "answers from the OLD output contract were reused under a new one"
+
+
+def test_the_synthesis_gets_terseness_without_the_envelope(monkeypatch, batch_ctx):
+    """`_reduce` exists to produce ONE coherent prose answer, rendered straight to the
+    reader. Handing it the map's findings-array contract would destroy that deliverable,
+    so only the map -- which fans out N-wide and is read by a program -- gets the schema.
+    """
+    d, _ = batch_ctx(2)
+    monkeypatch.setattr(
+        bt, "sub_query_batch", lambda cfg, prompts, model, concurrency=1, **kw: [
+            sq.SubResult(i, f"finding {i}", 1, 1) for i in range(len(prompts))])
+    seen: list[str | None] = []
+
+    def fake_reduce(cfg, prompt, model, **kw):
+        seen.append(kw.get("system"))
+        return sq.SubResult(0, "synthesis", 1, 1)
+
+    monkeypatch.setattr(bt, "sub_query", fake_reduce)
+    bt.run(d, "ctx_x", "audit every file", reduce=True)
+
+    assert seen == [bt.TERSE_SYSTEM], "the synthesis ran under the default persona"
+    assert "findings" not in bt.TERSE_SYSTEM, "the map's envelope leaked into prose calls"
 
 
 def _logged_batch(monkeypatch, batch_ctx, reduce, reduce_result=None):

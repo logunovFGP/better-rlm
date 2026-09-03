@@ -680,7 +680,8 @@ def _auth_probe_line() -> str:
         return f"\n- auth probe: SKIPPED — session budget reached, not an auth problem ({stop})"
     try:
         res = sub_query(DEPS.cfg, "Reply with exactly: ok",
-                        models.select(DEPS.cfg, models.Role.SUB), max_tokens=16)
+                        models.select(DEPS.cfg, models.Role.SUB), max_tokens=16,
+                        system=batch.TERSE_SYSTEM)
     except Exception as exc:                      # noqa: BLE001 - report, never raise
         return f"\n- auth probe: FAILED — {type(exc).__name__}: {exc}"
     if res.error:

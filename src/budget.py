@@ -254,7 +254,8 @@ _MAX_OUTPUT_FACTOR = 8.0
 
 def estimate_batch(cfg: Config, chunk_tokens: list[int], *, prompt: str,
                    max_output_tokens: int, reduce: bool, reduce_output_tokens: int = 0,
-                   done: set[int] | None = None, now: Clock = time.time) -> Estimate:
+                   done: set[int] | None = None, system: str = "",
+                   now: Clock = time.time) -> Estimate:
     """Forecast a map(-reduce) batch over ``chunk_tokens`` (est_tokens per chunk).
 
     ``done`` holds the indices (into ``chunk_tokens``) already answered and persisted, so
@@ -267,11 +268,18 @@ def estimate_batch(cfg: Config, chunk_tokens: list[int], *, prompt: str,
     requested cap on the CLI path under-forecast a real 33-chunk run by 1.9x.
     ``reduce_output_tokens`` is the reduce call's own cap, which is NOT the map cap — the
     caller passes both because the estimate is only an estimate of this run if every number
-    in it is the number that will actually be sent.
+    in it is the number that will actually be sent. ``system`` is here for that same
+    sentence: the map sends ``batch.MAP_SYSTEM`` on every call, so leaving it out
+    under-counts input by its size times the chunk count.
     """
     skip = done or set()
     todo = [t for i, t in enumerate(chunk_tokens) if i not in skip]
-    per_prompt_overhead = estimate_tokens(prompt) + 32  # prompt + "--- CHUNK i/n ---" frame
+    # prompt + system + "--- CHUNK i/n ---" frame: every per-call input that is not the
+    # chunk itself. Sent on each call, so it is priced per call, not once. The `if system`
+    # is load-bearing: estimate_tokens floors at 1 so that a non-empty string never prices
+    # at zero, which would otherwise bill an ABSENT system prompt one token on every call.
+    per_prompt_overhead = (estimate_tokens(prompt) + 32
+                           + (estimate_tokens(system) if system else 0))
     out_per_call = expected_output(cfg, max_output_tokens, now=now)
     itok = sum(todo) + per_prompt_overhead * len(todo)
     otok = out_per_call * len(todo)
@@ -341,6 +349,14 @@ def expected_output(cfg: Config, max_tokens: int, *, now: Clock = time.time) -> 
     batch. Above ``_MAX_OUTPUT_FACTOR`` the measurement is clamped, because a reservation
     derived from an unbounded observation is how a learned number stops being an estimate
     and starts refusing every call (see ``ceiling``).
+
+    IT LAGS BY UP TO ``_PRUNE_AFTER_H``, AND THAT IS THE SAFE DIRECTION. The mean is taken
+    over a 48-hour window, so a change that makes the sub-model *terser* — adding
+    ``batch.MAP_SYSTEM`` cut real output several-fold — keeps being forecast at the old
+    volume until the verbose records age out. `rlm_estimate` therefore over-states output
+    for up to two days after such a change. Do not read that as the change having failed,
+    and do not hand-seed the ledger to hurry it: measure the receipt (the run's own
+    ``sub_batch`` record, or the ledger) rather than the forecast.
     """
     recs = _read_lines(cfg.budget_ledger, now() - _PRUNE_AFTER_H * 3600)
     if len(recs) < _OUTPUT_SAMPLE_MIN:

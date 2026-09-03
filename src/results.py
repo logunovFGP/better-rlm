@@ -64,18 +64,27 @@ class Saved:
 # --------------------------------------------------------------------------- #
 # Content-addressed cache
 # --------------------------------------------------------------------------- #
-def content_key(chunk_text: str, prompt: str, model: str) -> str:
-    """Identity of an answer: the exact chunk text the model saw, the user's prompt, and
-    the model that answered. NOT the assembled prompt — that embeds ``CHUNK i/n``, which
-    changes with position and would defeat reuse of identical content at a new index.
-    The fidelity trade (the model does not learn it is "chunk 5 of 12" this time) is
-    small and deliberate."""
+def content_key(chunk_text: str, prompt: str, model: str, system: str = "") -> str:
+    """Identity of an answer: the exact chunk text the model saw, the user's prompt, the
+    SYSTEM prompt it ran under, and the model that answered. NOT the assembled prompt —
+    that embeds ``CHUNK i/n``, which changes with position and would defeat reuse of
+    identical content at a new index. The fidelity trade (the model does not learn it is
+    "chunk 5 of 12" this time) is small and deliberate.
+
+    ``system`` is in the key because it changes the answer. The batch map used to send
+    none at all and now sends ``batch.MAP_SYSTEM``, which turns a page of prose into a
+    JSON envelope: same chunk, same prompt, same model, different answer. Leaving it out
+    would serve an old-contract answer under the new one and — with ``reduce=True`` —
+    merge prose and envelopes into a single synthesis. The TEXT is hashed, not a version
+    tag, so editing that constant self-invalidates with no manual bump."""
     h = hashlib.sha256()
     h.update(chunk_text.encode("utf-8", "replace"))
     h.update(b"\x00")
     h.update(prompt.encode("utf-8", "replace"))
     h.update(b"\x00")
     h.update(model.encode("utf-8", "replace"))
+    h.update(b"\x00")
+    h.update(system.encode("utf-8", "replace"))
     return h.hexdigest()
 
 
@@ -178,16 +187,21 @@ def sweep(cfg: Config, *, now: Clock = time.time) -> None:
 # --------------------------------------------------------------------------- #
 # Per-run manifest
 # --------------------------------------------------------------------------- #
-def run_key(prompt: str, model: str, strategy: str, n_chunks: int) -> str:
+def run_key(prompt: str, model: str, strategy: str, n_chunks: int,
+            system: str = "") -> str:
     """Identity of one RUN — "this question over this chunking" — for the manifest file.
     Strategy and chunk count are in it because chunk 7 under ``files`` is different text
-    than chunk 7 under ``lines``, and a manifest that mixed them would mislabel answers."""
+    than chunk 7 under ``lines``, and a manifest that mixed them would mislabel answers.
+    ``system`` for the same reason it is in ``content_key``: a manifest holding answers
+    from two different output contracts mislabels them just as badly."""
     h = hashlib.sha256()
     h.update(prompt.encode("utf-8", "replace"))
     h.update(b"\x00")
     h.update(model.encode("utf-8", "replace"))
     h.update(b"\x00")
     h.update(f"{strategy}:{n_chunks}".encode())
+    h.update(b"\x00")
+    h.update(system.encode("utf-8", "replace"))
     return h.hexdigest()[:16]
 
 
