@@ -1,6 +1,10 @@
 [project]
 name = "rlm-mcp"
-version = "0.2.0"
+# Single source of truth: the VERSION file at the repo root. Plain text so every
+# consumer reads it without importing anything -- setuptools here, src/version.py at
+# runtime, scripts/sync_version.py for the plugin manifest. It was three literals
+# (here 0.2.0, plugin.json 0.1.0, handshake 1.28.1 from the mcp SDK); now it is one.
+dynamic = ["version"]
 description = "MCP server exposing Recursive Language Models (RLM) for oversized contexts, on Anthropic models with a Docker REPL sandbox."
 readme = "README.md"
 license = "MIT"
@@ -25,6 +29,9 @@ dependencies = [
 [project.optional-dependencies]
 pdf = ["pypdf>=4.0"]
 dev = ["pytest>=8.0"]
+
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}
 
 [build-system]
 requires = ["setuptools>=61"]

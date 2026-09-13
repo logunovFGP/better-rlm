@@ -55,5 +55,20 @@ def test_release_job_never_interpolates_the_version_into_a_shell_line():
 
 def test_project_version_is_plain_semver():
     # The workflow refuses anything else, and compares the input against this exact string.
-    version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     assert re.fullmatch(r"\d+\.\d+\.\d+", version), version
+
+
+def test_release_reads_the_version_from_the_same_file_the_package_does():
+    """The gate must read VERSION, not pyproject's [project] version.
+
+    pyproject declares the version dynamically now, so ['project']['version'] raises
+    KeyError -- the old read would have failed every release, and only at release time.
+    """
+    steps = _workflow()["jobs"]["release"]["steps"]
+    gate = [s for s in steps if "VERSION file does not declare" in (s.get("name") or "")]
+    assert gate, "the version-agreement gate is gone"
+    assert "< VERSION" in gate[0]["run"]
+    # The specific thing that would break: parsing a [project] version that no longer exists.
+    assert "tomllib" not in gate[0]["run"]
+    assert "['project']['version']" not in gate[0]["run"]

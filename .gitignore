@@ -14,9 +14,10 @@ env/
 dist/
 build/
 
-# IDE
+# IDE / agent tooling
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 

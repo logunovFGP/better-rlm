@@ -15,6 +15,9 @@ about not destroying that file.
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -304,3 +307,75 @@ def test_uninstall_unregisters_before_deleting(tmp_path, capsys):
     out = capsys.readouterr().out
     assert out.index("removed 1 hook entry") < out.index(f"removed {dst}")
     assert not dst.exists() and not _entries(cfg)
+
+
+def _python3_is_usable() -> bool:
+    """Is there a `python3` on PATH that actually runs?
+
+    On Windows the App Execution Alias at ``WindowsApps/python3.EXE`` exists even when
+    no Python is installed: ``shutil.which`` finds it, and running it opens the
+    Microsoft Store and exits non-zero. Catching that is precisely what ``probe`` is
+    FOR -- which makes "is python3 usable" a property of the machine, not of our code.
+    So the probe assertion below is skipped there rather than failed. The hook's own
+    validity is covered unconditionally by the sys.executable test above it.
+    """
+    exe = shutil.which("python3")
+    if exe is None:
+        return False
+    try:
+        return subprocess.run([exe, "-c", "pass"], capture_output=True,
+                              timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def test_the_shipped_hook_runs_and_fails_open_on_a_no_op_payload():
+    """The hook file itself is valid and exits 0 on a payload it should not block.
+
+    Runs under ``sys.executable``, so this is deterministic on every platform --
+    unlike the python3-on-PATH question, which belongs to the machine.
+    """
+    import scripts.install_hook as ih
+
+    r = subprocess.run(
+        [sys.executable, ih.SOURCE],
+        input=json.dumps({"tool_name": "Read", "tool_input": {}}),
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, r.stderr or r.stdout
+
+
+@pytest.mark.skipif(not _python3_is_usable(), reason="no runnable `python3` on PATH")
+def test_probe_accepts_the_shipped_hook():
+    """The hook must run under bare `python3` -- that is the command settings.json gets.
+
+    install.sh is the only caller (install.ps1 never registers the hook), so this is a
+    POSIX-shaped guarantee; see _python3_is_usable for why Windows skips instead.
+    """
+    import scripts.install_hook as ih
+
+    assert ih.probe(ih.SOURCE) is None
+
+
+def test_probe_rejects_a_hook_the_interpreter_cannot_run(tmp_path):
+    bad = tmp_path / "bad.py"
+    bad.write_text("this is not python(\n", encoding="utf-8")
+    import scripts.install_hook as ih
+
+    assert ih.probe(str(bad)) is not None
+
+
+def test_a_hook_that_cannot_run_is_never_registered(tmp_path, monkeypatch):
+    """settings.json must stay untouched: a registered-but-crashing hook prints a
+    traceback on every Read in every project on the machine."""
+    import scripts.install_hook as ih
+
+    settings = tmp_path / "settings.json"
+    settings.write_text('{"model": "opus"}', encoding="utf-8")
+    monkeypatch.setattr(ih, "SOURCE", str(tmp_path / "missing.py"))
+
+    rc = ih.main(["--settings", str(settings), "--hook", str(tmp_path / "h.py")])
+
+    assert rc == 1
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"model": "opus"}
+    assert not (tmp_path / "h.py").exists()
