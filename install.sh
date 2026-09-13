@@ -182,11 +182,19 @@ if [ "$HOOK" -eq 1 ]; then
     echo "  WARNING: python3 not on PATH — the hook runs as \`python3 <path>\`."
     echo "           Skipping; install python3 and re-run ./install.sh --hook"
   else
-    python3 "$DIR/scripts/install_hook.py"
-    echo "  Read on a file >200KB is blocked and redirected to rlm_load_file."
-    echo "  Fails open — a normal Read still happens when 'rlm' is not registered, for"
-    echo "  images/PDFs/archives, and for a bounded read (one passing an explicit limit)."
-    echo "  Restart Claude Code to load it."
+    # install_hook.py exits 1 when its interpreter probe fails. This script runs under
+    # `set -e`, so a bare call would abort the WHOLE installer there -- before
+    # --register, before the closing `claude mcp add` line -- because an opt-in extra
+    # declined to install itself. Warn and carry on, like the branch above.
+    if python3 "$DIR/scripts/install_hook.py"; then
+      echo "  Read on a file >200KB is blocked and redirected to rlm_load_file."
+      echo "  Fails open — a normal Read still happens when 'rlm' is not registered, for"
+      echo "  images/PDFs/archives, and for a bounded read (one passing an explicit limit)."
+      echo "  Restart Claude Code to load it."
+    else
+      echo "  Hook NOT registered. Everything else installed fine; re-run with --hook"
+      echo "  once python3 can run it."
+    fi
   fi
 fi
 

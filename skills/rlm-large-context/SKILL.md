@@ -1,6 +1,19 @@
 ---
 name: rlm-large-context
-description: Reason over an input too large to read directly — multi-MB/GB logs, big JSON/CSV/data exports, PDFs, repo or directory dumps, k8s manifest sets, document corpora — by routing it through the `rlm` MCP tools (load into the external store, then grep/exec/query) instead of reading it inline and blowing the context window. Use when a file is larger than ~200 KB or ~5,000 lines, when a Read/cat would be truncated, and ESPECIALLY for questions whose work grows with the input: "count/label/classify EVERY entry", "aggregate across the whole log", "which pairs contradict each other", "cross-reference all N records", "what's the overall picture across these 1000 documents", "summarize this whole directory or repo". Also for "find X across this huge <log|dump|dataset|dir>", and for LIVE system output — an hour of pod/container logs, a metrics or trace export, a journal, an audit feed — via `rlm_list_sources` / `rlm_load_source` wherever the deployment declares one. NOT for small files (read those directly) or for locating one symbol or definition in a code repo (grep/git grep is faster and free).
+description: >-
+  Reason over an input too large to read directly — multi-MB/GB logs, big JSON/CSV/data
+  exports, PDFs, repo or directory dumps, k8s manifest sets, document corpora — by routing it
+  through the `rlm` MCP tools (load into the external store, then grep/exec/query) instead of
+  reading it inline and blowing the context window. Use when a file is larger than ~200 KB or
+  ~5,000 lines, when a Read/cat would be truncated, and ESPECIALLY for questions whose work
+  grows with the input: "count/label/classify EVERY entry", "aggregate across the whole log",
+  "which pairs contradict each other", "cross-reference all N records", "what's the overall
+  picture across these 1000 documents", "summarize this whole directory or repo". Also for
+  "find X across this huge <log|dump|dataset|dir>", and for LIVE system output — an hour of
+  pod/container logs, a metrics or trace export, a journal, an audit feed — via
+  `rlm_list_sources` / `rlm_load_source` wherever the deployment declares one. NOT for small
+  files (read those directly) or for locating one symbol or definition in a code repo
+  (grep/git grep is faster and free).
 ---
 
 # RLM — reason over oversized contexts

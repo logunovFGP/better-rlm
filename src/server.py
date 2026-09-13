@@ -39,6 +39,7 @@ from .logsetup import log_event, logged_tool, note_startup
 from .output import meta_block as _meta_block
 from .sandbox_reap import container_image_status
 from .shutdown import install_shutdown_hooks
+from .version import __version__
 
 #: THE COMPOSITION ROOT. The one place in this package that resolves real config, opens
 #: real log handlers and points at the real store — built once, at import, and passed
@@ -52,6 +53,10 @@ CFG = DEPS.cfg      # read-only aliases, kept because ~20 call sites below are p
 LOG = DEPS.log      # presentation over these and reading DEPS.cfg everywhere adds noise
 STORE = DEPS.store  # without adding a seam — the seam is DEPS itself.
 mcp = FastMCP("rlm")
+# FastMCP takes no version=, and the lowlevel server it wraps advertises
+# pkg_version("mcp") when its own version is None -- so an unset version makes the
+# handshake report the MCP SDK's version as ours. Set it on the wrapped server.
+mcp._mcp_server.version = __version__
 
 _repl: ReplSession | None = None
 
