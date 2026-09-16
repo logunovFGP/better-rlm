@@ -117,6 +117,13 @@ a preference. The TUI configures the transport mode and the three models.
 
 ### Install from PyPI
 
+> **Not published yet.** `pip install better-rlm` returns *No matching distribution
+> found* until the first release lands. The pipeline is in place — pushing a `v*` tag
+> builds and uploads — but it needs a
+> [pending publisher](https://docs.pypi.org/trusted-publishers/) configured once on
+> PyPI first. Until then use [a checkout](#install-from-a-checkout) or
+> [the plugin](#install-as-a-claude-code-plugin). Delete this note when v0.3.0 ships.
+
 ```bash
 pip install better-rlm          # or: uv tool install better-rlm
 claude mcp add -s user rlm -- better-rlm server
