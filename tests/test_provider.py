@@ -420,3 +420,82 @@ def test_the_key_written_by_the_wizard_reaches_the_client(tmp_path, monkeypatch)
     client = ApiTransport(cfg)._sync_client()
     assert "minimax" in str(client.base_url)
     assert client.api_key == "sk-fake-roundtrip"
+
+
+# --- the main menu ------------------------------------------------------------
+
+
+def _st(**over):
+    from better_rlm.tui import Status
+    base = dict(
+        mode="auto", provider="anthropic", root_model="claude-sonnet-5",
+        root_model_override="o", sub_model="claude-haiku-4-5", cli_path="claude",
+        cli_available=True, cli_logged_in=True, env_mode=None, env_provider=None,
+        has_api_key=False, base_url="", key_env="",
+    )
+    base.update(over)
+    return Status(**base)
+
+
+def test_a_healthy_config_offers_no_problem_rows():
+    """The menu is state-aware like cline's getMainMenuOptions. A working setup should
+    not be nagged about problems it does not have."""
+    from better_rlm.tui import build_menu
+
+    labels = [i.label for i in build_menu(_st(mode="claude-cli", cli_logged_in=True))]
+    assert not any("Supply" in l or "Fix the mode" in l or "Sign the" in l for l in labels)
+    assert "Run guided setup" in labels
+
+
+def test_a_missing_key_leads_the_menu():
+    """An operator landing on a config that cannot make a model call is offered the
+    fix first, rather than having to know which slash command repairs it."""
+    from better_rlm.tui import build_menu
+
+    items = build_menu(_st(mode=MODE_API, key_env="MINIMAX_API_KEY", has_api_key=False,
+                           base_url="https://api.minimax.io/anthropic"))
+    assert items[0].label.startswith("Supply your MiniMax key")
+    assert "MINIMAX_API_KEY" in items[0].detail
+    assert items[0].key == "1"
+
+
+def test_an_endpoint_the_mode_ignores_leads_the_menu():
+    from better_rlm.tui import build_menu
+
+    items = build_menu(_st(mode="auto", cli_available=True, key_env="MINIMAX_API_KEY",
+                           has_api_key=True, base_url="https://api.minimax.io/anthropic"))
+    assert "Fix the mode" in items[0].label
+
+
+def test_a_signed_out_cli_leads_the_menu():
+    from better_rlm.tui import build_menu
+
+    items = build_menu(_st(mode=MODE_CLI, cli_logged_in=False))
+    assert "Sign the" in items[0].label
+
+
+def test_a_cli_config_is_never_asked_for_an_api_key():
+    """mode=claude-cli reads no key variable, so 'MINIMAX_API_KEY is not set' would be
+    nagging about something that is never consulted."""
+    from better_rlm.tui import build_menu
+
+    labels = [i.label for i in build_menu(_st(mode=MODE_CLI, key_env="", has_api_key=False))]
+    assert not any("Supply your" in l for l in labels)
+
+
+def test_every_menu_row_maps_to_something_dispatchable():
+    """A row whose command does not exist is a dead end the operator cannot escape."""
+    from better_rlm.tui import build_menu, SLASH_COMMANDS
+
+    known = set(dict(SLASH_COMMANDS)) | {"/provider-key"}   # the key-only internal action
+    for mode in ("auto", MODE_CLI, MODE_API):
+        for item in build_menu(_st(mode=mode, key_env="ANTHROPIC_API_KEY")):
+            assert item.command in known, item
+
+
+def test_menu_keys_are_unique_and_sequential():
+    from better_rlm.tui import build_menu
+
+    for st in (_st(), _st(mode=MODE_API, key_env="MINIMAX_API_KEY")):
+        keys = [i.key for i in build_menu(st)]
+        assert keys == [str(n) for n in range(1, len(keys) + 1)], keys

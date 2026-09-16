@@ -985,19 +985,37 @@ offers that same surface via slash commands — no extra dependency (it's
 `rich.prompt`, already a dep) and no extra process (it's just
 `python -m better_rlm.cli`).
 
-`better-rlm` with no arguments opens in **configuration mode**: it prints the current
-settings, then walks the same four steps in the same order, because each one narrows
-the next.
+`better-rlm` with no arguments opens the TUI. It shows the configuration and offers
+what to do about it - no flags, no commands to memorise.
 
 ```
 better-rlm
 
-  Current configuration        mode / provider / models / credential state
-  1. Mode                      Binary (proxy) vs API (host), side by side
-  2. Provider                  narrowed to the providers that mode can reach
-  3. Credential                the claude CLI login, or an API key written to .env
-  4. Models                    root and sub
+  ┌ better-rlm ──────────────────────────┐
+  │ mode:      api                       │
+  │ provider:  MiniMax                   │
+  │ api key:   MINIMAX_API_KEY=MISSING   │
+  └──────────────────────────────────────┘
+
+  1  Supply your MiniMax key   MINIMAX_API_KEY is not set - every model-backed tool fails
+  2  Run guided setup          mode, then provider, then credential, then models
+  3  Change mode               currently api
+  4  Change provider           currently MiniMax
+  5  Change models             root claude-sonnet-5, sub claude-haiku-4-5
+  6  Test the connection       one tiny model call that proves auth works
+  7  Run the verify gate       the test suite
+  s  Slash commands            type any /command directly
+  q  Quit
 ```
+
+**Anything currently broken leads.** The menu is built from the live state, the way
+cline-2's `getMainMenuOptions()` filters its rows: a missing key, an endpoint the mode
+is ignoring, or a signed-out CLI appears as row 1 with the reason spelled out. A
+healthy config shows none of them. Every action returns to the menu, so one session
+fixes several things.
+
+Option 2 runs the guided flow end to end - mode, then provider, then credential, then
+models - each step narrowing the next.
 
 Ported from cline-2's onboarding machine (`apps/cli/src/tui/views/onboarding/`): the
 mode step feeds `modeFilter` into the provider picker, so you are never offered a
