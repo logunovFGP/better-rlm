@@ -94,9 +94,24 @@ Everything else — grep, chunking, loading, inspection — works without it. If
 [the documented risk](#security) of running model-written Python on your host, set
 `RLM_SANDBOX=local` in the plugin's MCP server env instead of building the image.
 
-To configure it, edit `config.yaml` **inside the plugin directory**; it is read relative to the
-server's own root, not your project. Updating the plugin replaces that directory, so keep durable
-settings in your own notes.
+**Configuring it.** The [operator TUI](#operator-tui--configure-mode-and-models-from-the-cli) ships
+with the plugin and works there — run it from the plugin directory (`/plugin` shows the path):
+
+```bash
+./run_tui.sh                      # interactive
+./run_tui.sh --one-shot /status   # print the resolved config and exit
+```
+
+The plugin never runs `install.sh`, so there is no `.venv_sh`; the script falls back to `uv run`,
+the same way the plugin launches the server. Editing `config.yaml` in that directory by hand works
+too — it is read relative to the server's own root, not your project.
+
+**Updating the plugin replaces that directory**, so config changes made either way are lost on
+update. Keep durable settings in your own notes, or use a checkout if you change them often.
+
+What you cannot change anywhere: the **provider**. Anthropic is the only one supported — see
+[Providers](#providers--anthropic-only-on-purpose) for why that is a correctness guard rather than
+a preference. The TUI configures the transport mode and the three models.
 
 ---
 
