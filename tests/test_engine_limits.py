@@ -1,7 +1,7 @@
 """The engine's own guardrails, wired instead of re-implemented.
 
 RLM.__init__ ships max_timeout / max_errors and raises typed exceptions that carry
-the best answer found so far. Nothing in src/ passed or caught them, so a runaway
+the best answer found so far. Nothing in better_rlm/ passed or caught them, so a runaway
 rlm_query was bounded only by max_iterations x cli_timeout_s (over three hours) and
 a limit surfaced as a raw traceback with the partial work thrown away.
 """
@@ -16,8 +16,8 @@ from rlm.utils.exceptions import (
 )
 from rlm.utils.token_utils import DEFAULT_CONTEXT_LIMIT, get_context_limit
 
-import src.engine as eng
-from src.config import _sub_ctx, load_config
+import better_rlm.engine as eng
+from better_rlm.config import _sub_ctx, load_config
 
 
 # --- the engine's model table has to know the models we actually run -----------
@@ -50,7 +50,7 @@ def test_derivation_never_raises_the_ceiling_above_the_cap():
     """A model's window is a ceiling, not a target: this server scans oversized input
     rather than stuffing it into the prompt, and a near-window sub-query is worse than
     chunking the same bytes. So derivation only ever corrects DOWNWARD."""
-    from src.config import SUB_CONTEXT_CAP
+    from better_rlm.config import SUB_CONTEXT_CAP
 
     for big in ("claude-sonnet-5", "gemini-2.5-pro"):
         assert get_context_limit(big) > SUB_CONTEXT_CAP, "test model is not actually big"
@@ -99,7 +99,7 @@ def test_run_query_returns_the_limit_and_keeps_the_partial_answer(monkeypatch, e
 
 def test_rlm_query_reports_a_limit_as_a_failed_tool_call(monkeypatch):
     """Burying it under the '## RLM answer' header would log outcome=ok."""
-    import src.server as srv
+    import better_rlm.server as srv
 
     monkeypatch.setattr(srv, "run_query", lambda *a, **k: {
         "answer": "partial finding", "limit": "TimeoutExceededError",
@@ -262,7 +262,7 @@ def test_the_loop_converts_a_backend_budget_stop_into_a_resumable_limit(monkeypa
     the transport's stop escaped completion() as a raw traceback, and the partial answer
     and the whole transcript went with it."""
     from rlm.utils.exceptions import SessionBudgetError
-    from src.budget import BudgetStopError
+    from better_rlm.budget import BudgetStopError
 
     seen_prompts = []
 
@@ -305,7 +305,7 @@ def test_a_timeout_also_carries_a_checkpoint(monkeypatch, tmp_path):
 
 def test_resume_replays_the_transcript_restarts_at_the_iteration_and_restores_repl_state(monkeypatch, tmp_path):
     from rlm.utils.exceptions import SessionBudgetError
-    from src.budget import BudgetStopError
+    from better_rlm.budget import BudgetStopError
 
     prior = [{"role": "system", "content": "s"}, {"role": "user", "content": "u0"},
              {"role": "assistant", "content": "a0"}]
@@ -343,7 +343,7 @@ def test_a_stop_in_the_closing_synthesis_is_resumable_like_any_other(monkeypatch
     checkpoint, no partial answer. The cursor points one past the last turn, so a resume
     replays only the synthesis."""
     from rlm.utils.exceptions import SessionBudgetError
-    from src.budget import BudgetStopError
+    from better_rlm.budget import BudgetStopError
 
     import rlm.core.rlm as core
 

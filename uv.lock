@@ -53,6 +53,45 @@ wheels = [
 ]
 
 [[package]]
+name = "better-rlm"
+source = { editable = "." }
+dependencies = [
+    { name = "anthropic" },
+    { name = "google-genai" },
+    { name = "mcp" },
+    { name = "openai" },
+    { name = "portkey-ai" },
+    { name = "python-dotenv" },
+    { name = "pyyaml" },
+    { name = "requests" },
+    { name = "rich" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+pdf = [
+    { name = "pypdf" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anthropic", specifier = ">=0.75.0" },
+    { name = "google-genai", specifier = ">=1.56.0" },
+    { name = "mcp", specifier = "==1.28.1" },
+    { name = "openai", specifier = ">=2.14.0" },
+    { name = "portkey-ai", specifier = ">=2.1.0" },
+    { name = "pypdf", marker = "extra == 'pdf'", specifier = ">=4.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "requests", specifier = ">=2.32.5" },
+    { name = "rich", specifier = ">=13.0.0" },
+]
+provides-extras = ["pdf", "dev"]
+
+[[package]]
 name = "cached-property"
 version = "2.0.1"
 source = { registry = "https://pypi.org/simple" }
@@ -840,45 +879,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/c0/8f/0722ca900cc807c13
 wheels = [
     { url = "https://files.pythonhosted.org/packages/82/3b/64d4899d73f91ba49a8c18a8ff3f0ea8f1c1d75481760df8c68ef5235bf5/rich-15.0.0-py3-none-any.whl", hash = "sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb", size = 310654, upload-time = "2026-04-12T08:24:02.83Z" },
 ]
-
-[[package]]
-name = "rlm-mcp"
-source = { editable = "." }
-dependencies = [
-    { name = "anthropic" },
-    { name = "google-genai" },
-    { name = "mcp" },
-    { name = "openai" },
-    { name = "portkey-ai" },
-    { name = "python-dotenv" },
-    { name = "pyyaml" },
-    { name = "requests" },
-    { name = "rich" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-]
-pdf = [
-    { name = "pypdf" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "anthropic", specifier = ">=0.75.0" },
-    { name = "google-genai", specifier = ">=1.56.0" },
-    { name = "mcp", specifier = "==1.28.1" },
-    { name = "openai", specifier = ">=2.14.0" },
-    { name = "portkey-ai", specifier = ">=2.1.0" },
-    { name = "pypdf", marker = "extra == 'pdf'", specifier = ">=4.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "python-dotenv", specifier = ">=1.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "requests", specifier = ">=2.32.5" },
-    { name = "rich", specifier = ">=13.0.0" },
-]
-provides-extras = ["pdf", "dev"]
 
 [[package]]
 name = "rpds-py"

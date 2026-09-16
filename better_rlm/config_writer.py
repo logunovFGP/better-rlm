@@ -226,6 +226,10 @@ def _atomic_write(path: Path, body: str) -> None:
     ending as CRLF on Windows, churning the whole file against its own
     normalization rule.
     """
+    # mkstemp needs the directory to exist. In a checkout it always does; on a pip
+    # install the target is ~/.rlm/config.yaml and the first TUI write is what creates
+    # ~/.rlm, so without this the very first save raises FileNotFoundError.
+    path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:

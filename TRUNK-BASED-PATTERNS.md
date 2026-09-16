@@ -85,7 +85,7 @@ Never hold the branch open. Three moves, in preference order:
 
 1. **Split it.** Land the refactor first, the behaviour second.
 2. **Land it dark.** There is no flag library here. The nearest mechanism is a key
-   in `src/config.py` `_DEFAULTS` plus its `Config` field, overridable from
+   in `better_rlm/config.py` `_DEFAULTS` plus its `Config` field, overridable from
    `config.yaml`: default the new path off and gate on `cfg.<key>`. Add a real
    flag module only when something actually needs it — and delete the key once the
    path is permanent, or it becomes another dead knob.
@@ -100,7 +100,7 @@ and nothing is ever cherry-picked. "Deploy" for this server means the MCP
 registration in `~/.claude.json` pointing at `run_server.sh`, so a release is
 whatever `main` says plus a server reconnect.
 
-**A running server holds its own copy.** Python imported `src/` at startup, so
+**A running server holds its own copy.** Python imported `better_rlm/` at startup, so
 editing files on disk changes nothing until the process restarts. That cuts both
 ways: landing on `main` is safe while a session is live, and a fix does not take
 effect until the MCP server is reconnected.
@@ -119,7 +119,7 @@ effect until the MCP server is reconnected.
 | Stashing work instead of landing it | Land a smaller increment |
 | Merging on red verify to unblock | Fix it, or drop the leaf |
 | Code freezes, integration phases | Not needed when leaves are hours old |
-| Monkey-patching the engine from `src/` | The engine is vendored source at `./rlm` — fix the defect there (see `rlm/UPSTREAM.md`) |
+| Monkey-patching the engine from `better_rlm/` | The engine is vendored source at `./rlm` — fix the defect there (see `rlm/UPSTREAM.md`) |
 
 The deployment-branch bans (no back-merge, no direct commits on a release line)
 do not apply: strategy `trunk` has no such branch. Changing strategy means

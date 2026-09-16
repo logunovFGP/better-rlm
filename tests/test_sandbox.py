@@ -1,6 +1,6 @@
 """The hardened sandbox harness, now that the engine is vendored source.
 
-These checks used to prove that ``src/sandbox_patch.py`` rewrote the vendored
+These checks used to prove that ``better_rlm/sandbox_patch.py`` rewrote the vendored
 template correctly. The hardening now IS the template
 (``rlm/environments/docker_repl.py``), so they prove the template itself: bounded
 locals, a detectable result marker, and state that survives — or loudly reports —
@@ -30,7 +30,7 @@ from rlm.environments.docker_repl import (
 )
 from rlm.utils.exceptions import aborts_batch
 
-import src.sandbox_reap as reap
+import better_rlm.sandbox_reap as reap
 
 
 def _run(code: str, state_path, tmp_path) -> dict:
@@ -238,17 +238,17 @@ def test_stale_rlms_install_is_refused_loudly(monkeypatch):
     # Imported BEFORE the sentinel is removed, and imported here rather than relying on
     # an earlier test file having done it: without this, delitem raises KeyError and
     # `pytest tests/test_sandbox.py` alone fails on a test unrelated to the work at hand.
-    importlib.import_module("src.engine")
+    importlib.import_module("better_rlm.engine")
     monkeypatch.delattr(docker_repl, "RLM_RESULT_SENTINEL")
-    monkeypatch.delitem(sys.modules, "src.engine")
+    monkeypatch.delitem(sys.modules, "better_rlm.engine")
     try:
         with pytest.raises(ImportError, match="stale `rlms`"):
-            importlib.import_module("src.engine")
+            importlib.import_module("better_rlm.engine")
     finally:
         # leave a working src.engine behind for whatever runs next
         monkeypatch.undo()
-        sys.modules.pop("src.engine", None)
-        importlib.import_module("src.engine")
+        sys.modules.pop("better_rlm.engine", None)
+        importlib.import_module("better_rlm.engine")
 
 
 def test_unserialisable_vars_are_named_not_silently_dropped(tmp_path):

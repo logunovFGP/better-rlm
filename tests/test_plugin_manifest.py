@@ -26,8 +26,8 @@ def test_launch_args_name_a_real_module_and_extra(manifest):
     assert server["command"] == "uv"
     # -m <module> must be importable, and --directory must be what makes that true:
     # config.py resolves config.yaml/.env from the package root, not the caller's cwd.
-    assert args[args.index("-m") + 1] == "src.server"
-    assert (ROOT / "src" / "server.py").is_file()
+    assert args[args.index("-m") + 1] == "better_rlm.server"
+    assert (ROOT / "better_rlm" / "server.py").is_file()
     assert args[args.index("--directory") + 1] == "${CLAUDE_PLUGIN_ROOT}"
 
     extra = args[args.index("--extra") + 1]
@@ -78,7 +78,7 @@ def test_runtime_version_tracks_the_file_without_a_reinstall(tmp_path, monkeypat
     This repo installs editable, so the version is frozen into rlm_mcp-<v>.dist-info at
     install time -- pyproject could say 0.9.9 while the handshake still said 0.2.0.
     """
-    import src.version as v
+    import better_rlm.version as v
 
     bumped = tmp_path / "VERSION"
     bumped.write_text("9.9.9\n", encoding="utf-8")
@@ -160,8 +160,8 @@ def test_server_advertises_its_own_version_not_the_sdks():
     """
     from importlib.metadata import version as pkg_version
 
-    from src import server
-    from src.version import __version__
+    from better_rlm import server
+    from better_rlm.version import __version__
 
     advertised = server.mcp._mcp_server.create_initialization_options().server_version
     assert advertised == __version__

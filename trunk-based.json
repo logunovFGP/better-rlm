@@ -11,6 +11,6 @@
   "review": "self-on-green",
   "feature_flags": {
     "mechanism": null,
-    "how": "No flag library in this repo. The nearest mechanism is a key in src/config.py _DEFAULTS plus the matching Config field, overridable from config.yaml - default the new path off and gate on cfg.<key>. Introduce a real flag module only when a change actually needs to land dark."
+    "how": "No flag library in this repo. The nearest mechanism is a key in better_rlm/config.py _DEFAULTS plus the matching Config field, overridable from config.yaml - default the new path off and gate on cfg.<key>. Introduce a real flag module only when a change actually needs to land dark."
   }
 }

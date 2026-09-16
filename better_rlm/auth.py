@@ -1,6 +1,6 @@
 """Authentication & transport-mode selection — reuse Claude Code's login, no API key.
 
-A transport **Strategy** (src/transport.py) decides how each model call is made;
+A transport **Strategy** (better_rlm/transport.py) decides how each model call is made;
 this module decides *which* transport, from ``cfg.mode`` (``auto`` | ``claude-cli``
 | ``api``, overridable via the ``RLM_MODE`` env var):
 

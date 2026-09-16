@@ -2,8 +2,8 @@ import dataclasses
 
 import pytest
 
-import src.auth as auth
-from src.config import load_config
+import better_rlm.auth as auth
+from better_rlm.config import load_config
 
 
 @pytest.fixture(autouse=True)
@@ -92,7 +92,7 @@ def test_patch_engine_refuses_a_non_anthropic_provider_and_touches_nothing(monke
     import rlm.core.rlm as core
 
     monkeypatch.setenv("GEMINI_API_KEY", "dummy-not-a-real-key")
-    monkeypatch.setattr("src.config.load_config", lambda: _cfg(provider="gemini"))
+    monkeypatch.setattr("better_rlm.config.load_config", lambda: _cfg(provider="gemini"))
     monkeypatch.setattr(ant_mod, "_rlmmcp_patched", False, raising=False)
 
     before_client, before_get = ant_mod.AnthropicClient, core.get_client

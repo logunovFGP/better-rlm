@@ -11,10 +11,10 @@ import json
 
 import pytest
 
-import src.batch as bt
-import src.subquery as sq
-from src.ratelimit import is_fatal_auth
-from src.transport import (
+import better_rlm.batch as bt
+import better_rlm.subquery as sq
+from better_rlm.ratelimit import is_fatal_auth
+from better_rlm.transport import (
     CliAuthError,
     CliCompletionError,
     CliRateLimitError,
@@ -37,7 +37,7 @@ def _pin_auth_discovery(monkeypatch):
     contributor without Claude Code installed. These tests are about probe and batch
     REPORTING, so both are pinned to the oauth path they describe.
     """
-    import src.server as srv
+    import better_rlm.server as srv
 
     monkeypatch.setattr(srv, "resolve_auth_mode_safe", lambda: "oauth")
     monkeypatch.setattr(srv.models, "select", lambda cfg, role: "claude-haiku-4-5")
@@ -53,7 +53,7 @@ def test_the_shared_context_stub_still_matches_the_real_ContextMeta(batch_ctx):
     dataclass, so the next field added to that path fails HERE with a clear message
     rather than inside a tool call.
     """
-    from src.context_store import ContextMeta
+    from better_rlm.context_store import ContextMeta
 
     d, _events = batch_ctx(2)
     stub = d.store.get("ctx_x")
@@ -158,7 +158,7 @@ def _login_ok(monkeypatch):
     every probe assertion below would quietly depend on how much the person running the
     suite had spent in the last five hours.
     """
-    import src.server as srv
+    import better_rlm.server as srv
 
     monkeypatch.setattr(srv.transport, "cli_auth_status",
                         lambda cfg: {"loggedIn": True, "authMethod": "oauth"})
@@ -199,7 +199,7 @@ def test_probe_reports_ok_on_a_live_transport(monkeypatch, batch_ctx):
 def test_probe_is_skipped_when_the_free_check_already_knows_it_is_dead(monkeypatch, batch_ctx):
     """Paying for a call whose answer is already known is the same waste the batch
     fail-fast exists to stop."""
-    import src.server as srv
+    import better_rlm.server as srv
 
     monkeypatch.setattr(srv.transport, "cli_auth_status", lambda cfg: {"loggedIn": False})
     called = []
@@ -214,8 +214,8 @@ def test_probe_blames_the_budget_not_the_login_when_the_floor_refuses_it(monkeyp
     was printed as "auth probe: FAILED — session budget stop", sending an operator to
     re-authenticate a login that was fine. rlm_status is what people reach for when
     something looks broken, so it must not misname what is broken."""
-    import src.budget as budget
-    import src.server as srv
+    import better_rlm.budget as budget
+    import better_rlm.server as srv
 
     monkeypatch.setattr(srv.transport, "cli_auth_status",
                         lambda cfg: {"loggedIn": True, "authMethod": "oauth"})
@@ -235,7 +235,7 @@ def test_probe_blames_the_budget_not_the_login_when_the_floor_refuses_it(monkeyp
 
 
 def test_status_names_the_fix_when_the_cli_is_not_logged_in(monkeypatch, batch_ctx):
-    import src.server as srv
+    import better_rlm.server as srv
 
     monkeypatch.setattr(srv, "resolve_auth_mode_safe", lambda: "oauth")
     monkeypatch.setattr(srv.transport, "cli_auth_status", lambda cfg: {"loggedIn": False})
@@ -245,7 +245,7 @@ def test_status_names_the_fix_when_the_cli_is_not_logged_in(monkeypatch, batch_c
 
 
 def test_status_says_nothing_about_cli_login_on_the_sdk_path(monkeypatch, batch_ctx):
-    import src.server as srv
+    import better_rlm.server as srv
 
     monkeypatch.setattr(srv, "resolve_auth_mode_safe", lambda: "apikey")
     assert srv._cli_login_line() == "", "no CLI is involved on the API-key path"
@@ -610,7 +610,7 @@ def test_a_batch_still_runs_when_only_its_biggest_chunk_will_not_fit(monkeypatch
     not even one chunk fitted. Under `files` chunking a 200-token file sits beside a huge
     one, so any headroom between them threw away every chunk that would have fitted. The
     Gate admits what fits and defers the rest; that is the honest stop."""
-    import src.budget as budget
+    import better_rlm.budget as budget
 
     d, _events = batch_ctx(2)
 
@@ -766,7 +766,7 @@ def test_the_transport_floor_defers_the_batch_instead_of_failing_it(monkeypatch,
     the fan-out stops. Reporting them as errors would tell the operator to investigate
     a healthy stop, and reissuing the doomed call per chunk is the waste fail-fast exists
     to prevent."""
-    from src.budget import BudgetStopError
+    from better_rlm.budget import BudgetStopError
 
     calls, results = _run_batch(monkeypatch, cfg, BudgetStopError(spent=1, usable=1, next_call=1))
     assert len(calls) == 1, "the floor was re-hit once per remaining chunk"
@@ -780,7 +780,7 @@ def test_the_gate_reserves_what_a_call_emits_not_the_cap_the_cli_discards(monkey
     never receives, so a call can emit several times it — let the Gate admit work the
     window could not pay for, running past the line it exists to stop short of."""
     import dataclasses
-    import src.budget as budget
+    import better_rlm.budget as budget
 
     cfg = dataclasses.replace(cfg, session_budget_tokens=90_000, budget_stop_fraction=0.95)
     for _ in range(8):                       # measured mean output: 10,000 per call

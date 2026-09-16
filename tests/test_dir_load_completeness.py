@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-import src.server as srv
-from src.context_store import ContextStore, _looks_binary
+import better_rlm.server as srv
+from better_rlm.context_store import ContextStore, _looks_binary
 
 
 # --- root cause: a fixed-size byte read can end mid-character ------------------
@@ -46,7 +46,7 @@ def test_bytes_that_are_not_utf8_at_all_are_still_binary(tmp_path):
 def _store():
     import dataclasses
 
-    from src.config import load_config
+    from better_rlm.config import load_config
     return ContextStore(dataclasses.replace(
         load_config(), store_dir=Path(tempfile.mkdtemp()) / "contexts"))
 
@@ -109,12 +109,12 @@ def test_intentional_exclusions_do_not_raise_the_alarm():
 def test_a_surprising_skip_is_still_loud_among_intentional_ones():
     m = _Meta()
     m.skipped_counts = {"skip-dir": 3000, "binary": 1}
-    m.skipped = ["binary: src/tenancy.ts", "skip-dir: node_modules/x.js"]
+    m.skipped = ["binary: better_rlm/tenancy.ts", "skip-dir: node_modules/x.js"]
 
     out = srv._meta_block(m)
     assert "excluded by policy: 3,000" in out
     assert "INCOMPLETE" in out and "binary x1" in out
-    assert "src/tenancy.ts" in out, "the surprising path must be named"
+    assert "better_rlm/tenancy.ts" in out, "the surprising path must be named"
 
 
 def test_the_skip_sample_is_bounded_so_meta_json_cannot_balloon(tmp_path):

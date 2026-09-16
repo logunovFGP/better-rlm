@@ -113,7 +113,7 @@ else
   elif [ "$AUTH" -eq 1 ]; then
     echo "  Not logged in. Running \`claude setup-token\` — complete it in the browser."
     echo "  It prints the token once; paste it at the hidden prompt afterwards and this"
-    echo "  script stores it in $DIR/.env (gitignored, 0600, loaded by src/config.py)."
+    echo "  script stores it in $DIR/.env (gitignored, 0600, loaded by better_rlm/config.py)."
     echo
     if claude setup-token; then
       if [ -t 0 ]; then

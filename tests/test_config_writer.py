@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from src.config_writer import _atomic_write, _format_scalar, read_scalar, write_scalars
+from better_rlm.config_writer import _atomic_write, _format_scalar, read_scalar, write_scalars
 
 
 def test_round_trip_simple(tmp_path: Path) -> None:

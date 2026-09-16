@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-import src.config as config_mod
-from src.deps import Deps
+import better_rlm.config as config_mod
+from better_rlm.deps import Deps
 
 
 @pytest.fixture
@@ -131,7 +131,7 @@ def _no_test_spends_a_real_model_call(monkeypatch, request):
     """
     if "live" in request.keywords:
         return
-    import src.subquery as sq
+    import better_rlm.subquery as sq
 
     def refuse(*_a, **_k):
         raise AssertionError(
@@ -147,7 +147,7 @@ def _no_test_spends_a_real_model_call(monkeypatch, request):
 def _no_test_writes_to_the_real_log_dir(monkeypatch):
     """Keep pytest out of the operator's ~/.rlm/logs.
 
-    Still needed after the Deps refactor, because importing src.server runs the
+    Still needed after the Deps refactor, because importing better_rlm.server runs the
     composition root (``Deps.create()``), which installs a RotatingFileHandler on the
     process-global "rlm-mcp" logger against the REAL config. Any test that drives a
     @logged_tool-wrapped tool then logs into the live dir: measured 18 of 20 files there
@@ -155,14 +155,14 @@ def _no_test_writes_to_the_real_log_dir(monkeypatch):
     evicted the real session logs under a 20-file retention cap.
 
     Stripping is not sufficient on its own, and that gap cost three stray log files: most
-    test modules ``import src.server`` INSIDE the test body, so the composition root runs
+    test modules ``import better_rlm.server`` INSIDE the test body, so the composition root runs
     AFTER this fixture and installs a fresh handler mid-test. (Same import-order shape as
     the config-global bug that motivated Deps — the lesson is that a fixture which only
     cleans up before the test loses to anything the test imports.) So neutralize the
     cause as well: ``deps.configure_logging`` is the name ``Deps.create`` resolves, and
     patching it there leaves ``logsetup``'s own tests free to exercise the real thing.
     """
-    import src.deps as deps_mod
+    import better_rlm.deps as deps_mod
 
     logger = logging.getLogger("rlm-mcp")
     for h in [h for h in logger.handlers if isinstance(h, logging.FileHandler)]:
@@ -203,8 +203,8 @@ def batch_ctx(deps, monkeypatch):
         makes every digest come from a real ``read_chunk``. A test that counts reads has
         to be able to choose, and the counts only mean anything if the stub mirrors the
         real method's read pattern rather than inventing its own."""
-        import src.batch as batch_mod
-        from src.context_store import _text_digest
+        import better_rlm.batch as batch_mod
+        from better_rlm.context_store import _text_digest
 
         def _chunk_text(i):
             return text_for(i) if text_for is not None else f"chunk{i}"

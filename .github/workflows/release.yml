@@ -77,6 +77,13 @@ jobs:
 
       - run: uv build
 
+      - name: Keep the built artifacts for the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
       - name: Tag and publish
         if: ${{ !inputs.dry_run }}
         run: gh release create "v$VERSION" dist/* --title "v$VERSION" --generate-notes
@@ -87,3 +94,28 @@ jobs:
           echo "Dry run: suite green on both platforms, version agrees with VERSION," >> "$GITHUB_STEP_SUMMARY"
           echo "package builds. Nothing tagged, nothing published." >> "$GITHUB_STEP_SUMMARY"
           ls -l dist >> "$GITHUB_STEP_SUMMARY"
+
+  # PyPI. Deliberately a separate job from `release`: the GitHub release is
+  # reversible (delete the release, delete the tag) and PyPI is not -- a version
+  # number burned on PyPI can never be reused, even after a yank. Running it last
+  # means a failure here leaves a valid GitHub release rather than a half-release.
+  publish:
+    needs: release
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      # Job-level permissions REPLACE the workflow-level block, so `contents: write`
+      # is deliberately not restated -- this job only needs an OIDC token.
+      id-token: write
+    steps:
+      - name: Fetch the exact artifacts the release job built
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # Trusted Publishing (OIDC). No API token is stored in this repository:
+      # PyPI verifies the workflow identity and mints a short-lived credential.
+      # Requires a pending publisher configured once on PyPI for project
+      # `better-rlm`, workflow `release.yml`, owner/repo of this repository.
+      - uses: pypa/gh-action-pypi-publish@release/v1

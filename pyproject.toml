@@ -1,14 +1,29 @@
 [project]
-name = "rlm-mcp"
+name = "better-rlm"
 # Single source of truth: the VERSION file at the repo root. Plain text so every
-# consumer reads it without importing anything -- setuptools here, src/version.py at
+# consumer reads it without importing anything -- setuptools here, better_rlm/version.py at
 # runtime, scripts/sync_version.py for the plugin manifest. It was three literals
 # (here 0.2.0, plugin.json 0.1.0, handshake 1.28.1 from the mcp SDK); now it is one.
 dynamic = ["version"]
 description = "MCP server exposing Recursive Language Models (RLM) for oversized contexts, on Anthropic models with a Docker REPL sandbox."
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11,<3.14"
+authors = [{ name = "Aleksandr Logunov", email = "logunov.alexander.cs@gmail.com" }]
+maintainers = [{ name = "Aleksandr Logunov", email = "logunov.alexander.cs@gmail.com" }]
+keywords = ["mcp", "rlm", "llm", "anthropic", "claude", "long-context", "recursive-language-model"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  # No "License :: OSI Approved :: ..." classifier: PEP 639 supersedes it with the
+  # SPDX `license = "MIT"` above, and setuptools now hard-errors if both are present.
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
 dependencies = [
   # The RLM engine is vendored at ./rlm (see rlm/UPSTREAM.md) — no longer a
   # dependency. These are the deps it used to pull in transitively, restated so
@@ -30,6 +45,18 @@ dependencies = [
   "python-dotenv>=1.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/logunovFGP/better-rlm"
+Repository = "https://github.com/logunovFGP/better-rlm"
+Issues = "https://github.com/logunovFGP/better-rlm/issues"
+Changelog = "https://github.com/logunovFGP/better-rlm/releases"
+
+[project.scripts]
+# The operator command. In a checkout it shells out to install.sh / run_server.sh;
+# installed from a wheel it runs the server in-process and reads ~/.rlm/config.yaml.
+# better_rlm/cli.py owns that split -- see CLAUDE.md "Design boundary".
+better-rlm = "better_rlm.cli:main"
+
 [project.optional-dependencies]
 pdf = ["pypdf>=4.0"]
 dev = ["pytest>=8.0"]
@@ -44,7 +71,13 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 # `rlm*` picks up the vendored engine and its subpackages (rlm.core, rlm.clients,
 # rlm.environments, rlm.logger, rlm.utils) without enumerating them by hand.
-include = ["src*", "rlm*"]
+#
+# The engine ships as top-level `rlm` because that is the name its own 66 absolute
+# imports use, and rlm/UPSTREAM.md's merge recipe depends on the tree matching
+# upstream. Upstream publishes the same import name (as the `rlms` distribution),
+# so installing both into one environment is a collision -- documented in
+# rlm/UPSTREAM.md rather than papered over by a rename that would break the merge.
+include = ["better_rlm*", "rlm*"]
 
 [tool.pytest.ini_options]
 markers = [

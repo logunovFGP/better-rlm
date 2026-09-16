@@ -7,4 +7,4 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 # POSIX venv, same name the installer uses (.venv_sh) so the TUI and the
 # MCP server share one resolved dependency graph.
-exec "$DIR/.venv_sh/bin/python" -m src.cli "$@"
+exec "$DIR/.venv_sh/bin/python" -m better_rlm.cli "$@"

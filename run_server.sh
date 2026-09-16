@@ -8,4 +8,4 @@ cd "$DIR"
 export PYTHONUTF8=1
 # POSIX-only venv (.venv_sh) — kept separate from the Windows .venv_windows so a
 # WSL-shared checkout doesn't cross-clobber interpreters.
-exec "$DIR/.venv_sh/bin/python" -m src.server
+exec "$DIR/.venv_sh/bin/python" -m better_rlm.server

@@ -1,4 +1,4 @@
-"""Tests for ``src.tui`` -- the operator-facing TUI.
+"""Tests for ``better_rlm.tui`` -- the operator-facing TUI.
 
 Most TUI functions either prompt for input (interactive, can't be tested
 without a fake stdin) or invoke subprocesses (``/test``, ``/auth-probe``).
@@ -15,9 +15,9 @@ from unittest.mock import patch
 
 import pytest
 
-from src import tui
-from src.describe import MODE_API, MODE_AUTO, MODE_CLI
-from src.tui import (
+from better_rlm import tui
+from better_rlm.describe import MODE_API, MODE_AUTO, MODE_CLI
+from better_rlm.tui import (
     ACTION_CANCEL,
     HELP_TEXT,
     PICKER_KEEP,
@@ -146,14 +146,14 @@ def test_pick_mode_uses_describe_prose(quiet_console, monkeypatch) -> None:
     """The picker shows the same prose as ``describe_mode`` -- so the
     comparison never lies. Patch Prompt.ask to return PICKER_KEEP and
     verify the function returns it cleanly."""
-    monkeypatch.setattr("src.tui.Prompt.ask", lambda *a, **kw: "0")
+    monkeypatch.setattr("better_rlm.tui.Prompt.ask", lambda *a, **kw: "0")
     out = pick_mode(quiet_console, MODE_AUTO)
     assert out == PICKER_KEEP
 
 
 def test_pick_mode_returns_chosen_mode(quiet_console, monkeypatch) -> None:
     """Choosing option '2' (claude-cli) returns the value, not the index."""
-    monkeypatch.setattr("src.tui.Prompt.ask", lambda *a, **kw: "2")
+    monkeypatch.setattr("better_rlm.tui.Prompt.ask", lambda *a, **kw: "2")
     out = pick_mode(quiet_console, MODE_AUTO)
     assert out == MODE_CLI
 
@@ -161,7 +161,7 @@ def test_pick_mode_returns_chosen_mode(quiet_console, monkeypatch) -> None:
 def test_pick_mode_cancel_via_q(quiet_console, monkeypatch) -> None:
     """Typing ``q`` returns ACTION_CANCEL -- the dispatcher treats it as
     'no change' just like PICKER_KEEP."""
-    monkeypatch.setattr("src.tui.Prompt.ask", lambda *a, **kw: "q")
+    monkeypatch.setattr("better_rlm.tui.Prompt.ask", lambda *a, **kw: "q")
     out = pick_mode(quiet_console, MODE_AUTO)
     assert out == ACTION_CANCEL
 
@@ -175,7 +175,7 @@ def test_provider_is_shown_but_never_offered_as_a_picker(quiet_console, tmp_path
     writes provider=openai into config.yaml is a trap: the write succeeds and the next
     rlm_query is what fails. /status still SHOWS the value (see the flag test below).
     """
-    from src import tui as tui_mod
+    from better_rlm import tui as tui_mod
 
     assert not hasattr(tui_mod, "pick_provider")
     assert "/provider" not in dict(SLASH_COMMANDS)
@@ -183,7 +183,7 @@ def test_provider_is_shown_but_never_offered_as_a_picker(quiet_console, tmp_path
     p = tmp_path / "config.yaml"
     p.write_text("provider: anthropic\n", encoding="utf-8")
     _dispatch("/provider", quiet_console, p)      # now just an unknown command
-    from src.config_writer import read_scalar
+    from better_rlm.config_writer import read_scalar
     assert read_scalar(p, "provider") == "anthropic"
 
 
@@ -245,9 +245,9 @@ def test_dispatch_mode_pick_keeps_current(quiet_console, tmp_path, monkeypatch) 
     Enter on the picker does not silently change the config."""
     p = tmp_path / "config.yaml"
     p.write_text("mode: auto\n")
-    monkeypatch.setattr("src.tui.Prompt.ask", lambda *a, **kw: "0")
+    monkeypatch.setattr("better_rlm.tui.Prompt.ask", lambda *a, **kw: "0")
     _dispatch("/mode", quiet_console, p)
-    from src.config_writer import read_scalar
+    from better_rlm.config_writer import read_scalar
     assert read_scalar(p, "mode") == "auto"
 
 
@@ -256,9 +256,9 @@ def test_dispatch_mode_pick_writes_choice(quiet_console, tmp_path, monkeypatch) 
     writeback is what makes /mode different from /mode-help."""
     p = tmp_path / "config.yaml"
     p.write_text("mode: auto\n")
-    monkeypatch.setattr("src.tui.Prompt.ask", lambda *a, **kw: "3")
+    monkeypatch.setattr("better_rlm.tui.Prompt.ask", lambda *a, **kw: "3")
     _dispatch("/mode", quiet_console, p)
-    from src.config_writer import read_scalar
+    from better_rlm.config_writer import read_scalar
     assert read_scalar(p, "mode") == "api"
 
 
@@ -287,9 +287,9 @@ def test_dispatch_model_pick_writes_choice(quiet_console, tmp_path, monkeypatch)
     /provider in shape."""
     p = tmp_path / "config.yaml"
     p.write_text("root_model: claude-sonnet-5\n")
-    monkeypatch.setattr("src.tui.Prompt.ask", lambda *a, **kw: "3")  # opus
+    monkeypatch.setattr("better_rlm.tui.Prompt.ask", lambda *a, **kw: "3")  # opus
     _dispatch("/model", quiet_console, p)
-    from src.config_writer import read_scalar
+    from better_rlm.config_writer import read_scalar
     assert read_scalar(p, "root_model") == "claude-opus-4-8"
 
 
@@ -298,9 +298,9 @@ def test_dispatch_model_custom_entry(quiet_console, tmp_path, monkeypatch) -> No
     p = tmp_path / "config.yaml"
     p.write_text("root_model: claude-sonnet-5\n")
     answers = iter(["c", "claude-opus-4-9"])
-    monkeypatch.setattr("src.tui.Prompt.ask", lambda *a, **kw: next(answers))
+    monkeypatch.setattr("better_rlm.tui.Prompt.ask", lambda *a, **kw: next(answers))
     _dispatch("/model", quiet_console, p)
-    from src.config_writer import read_scalar
+    from better_rlm.config_writer import read_scalar
     assert read_scalar(p, "root_model") == "claude-opus-4-9"
 
 
@@ -343,10 +343,10 @@ def test_dispatch_unknown_provider_writes_nothing(quiet_console, tmp_path, monke
     # "would-be" return value that bypasses the catalogue. The picker
     # loops on invalid input; testing that loop here would be testing the
     # picker, not the dispatcher's defence-in-depth.
-    from src import tui as tui_mod
+    from better_rlm import tui as tui_mod
     monkeypatch.setattr(tui_mod, "pick_mode", lambda *a, **kw: "this_is_not_a_mode")
     _dispatch("/mode", quiet_console, p)
-    from src.config_writer import read_scalar
+    from better_rlm.config_writer import read_scalar
     assert read_scalar(p, "mode") == "auto"
 
 
@@ -359,7 +359,7 @@ def test_login_state_comes_from_cli_auth_status(tmp_path: Path, monkeypatch) -> 
     whose job is diagnosing auth. transport.cli_auth_status already does this properly
     (parses the JSON, passes CliTransport._subprocess_env()), so the TUI calls it.
     """
-    import src.transport as transport
+    import better_rlm.transport as transport
 
     cfg = tmp_path / "config.yaml"
     cfg.write_text("mode: auto\ncli_path: claude\n", encoding="utf-8")

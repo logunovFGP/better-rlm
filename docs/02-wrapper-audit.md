@@ -1,7 +1,7 @@
 # Phase 2 — Wrapper audit (base + reference impls)
 
 ## Base wrapper we forked: `eesb99/rlm-mcp` (last commit 2026-01-26)
-One file, `src/server.py` (341 lines), `FastMCP` + 5 task tools.
+One file, `better_rlm/server.py` (341 lines), `FastMCP` + 5 task tools.
 
 | Aspect | Base wrapper (as-is) | What it needs / what we did |
 |---|---|---|

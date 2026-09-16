@@ -53,7 +53,7 @@ collide. A template that needs a *literal* brace expression (a PromQL selector, 
 body) should take it as a parameter instead: parameter values are substituted verbatim
 and never rescanned for placeholders.
 
-The registry is re-read on every call. A running server holds its own copy of ``src/``
+The registry is re-read on every call. A running server holds its own copy of ``better_rlm/``
 (see CLAUDE.md), and the registry is the one thing operators edit routinely — needing a
 server reconnect to add a source would make it useless.
 """

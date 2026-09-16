@@ -100,6 +100,43 @@ settings in your own notes.
 
 ---
 
+### Install from PyPI
+
+```bash
+pip install better-rlm          # or: uv tool install better-rlm
+claude mcp add -s user rlm -- better-rlm server
+```
+
+That is the whole setup for the model-backed tools. `better-rlm server` runs the
+MCP server in-process, so there is no script path to point at and no checkout to
+keep around.
+
+```bash
+better-rlm where     # which config/env files are in use, and which mode you're in
+better-rlm auth      # prints the `claude setup-token` flow
+better-rlm           # the config TUI
+```
+
+**What a pip install does not give you**, and why you might still want the checkout:
+
+| | pip install | checkout |
+|---|---|---|
+| `config.yaml`, `.env` | `~/.rlm/` | repo root, diffable in git |
+| Docker sandbox image | not built — use `sandbox: local` in config | `install.sh` builds `rlm-sandbox` |
+| `rlm-large-context` skill | not linked | symlinked into `~/.claude/skills` |
+| oversized-read hook | unavailable | `./install.sh --hook` |
+| `better-rlm install` | refuses, tells you to clone | re-runs the installer |
+
+`sandbox: local` runs generated code **on your host** rather than in a container — see
+[Security](#security) before choosing it. If you want the Docker sandbox, the skill, or the
+read hook, install from a checkout instead.
+
+The package ships the vendored engine as top-level `rlm`, the same import name upstream's
+`rlms` distribution uses. Installing both into one environment collides; use separate
+virtualenvs.
+
+---
+
 ### Install from a checkout
 
 Pick **your** platform and follow it top to bottom. Each section is complete and self-contained —
@@ -624,7 +661,7 @@ reports how many are declared and surfaces a malformed file there rather than on
 
 ## Auth — three modes, one interface
 
-A transport **Strategy** (`src/transport.py`) decides *how* each model call is made, selected by
+A transport **Strategy** (`better_rlm/transport.py`) decides *how* each model call is made, selected by
 **`mode`** (`config.yaml` or the `RLM_MODE` env var):
 
 - **`claude-cli`** — drives the official `claude` CLI (`claude -p`) for every completion; it does
@@ -669,7 +706,7 @@ rather than spending one to confirm what the free check already established.
 **`export CLAUDE_CODE_OAUTH_TOKEN=…` in your shell does not reach the server.** The MCP
 server is launched by Claude Code with its own environment, not from your login shell — so a
 token exported in a terminal is invisible to it. It goes in **`.env` at the repo root**, which
-`src/config.py` loads at startup and `.gitignore` already covers:
+`better_rlm/config.py` loads at startup and `.gitignore` already covers:
 
 ```bash
 ./install.sh --auth        # or: .\install.ps1 -Auth
@@ -719,7 +756,7 @@ green, or `- CLAUDE_CODE_OAUTH_TOKEN is set in .env`.
 
 ### Model selection
 
-Role→model mapping lives in one place — `src/models.py` — not hardcoded across the codebase.
+Role→model mapping lives in one place — `better_rlm/models.py` — not hardcoded across the codebase.
 
 - **API key:** each role uses its configured model verbatim (root `claude-sonnet-5`, override
   `claude-opus-4-8`, sub `claude-haiku-4-5`).
@@ -755,7 +792,7 @@ that.
 
 **Rate-limit handling.** This server **sacrifices speed for stability**. Every model call — engine
 root, engine sub, standalone sub-queries — passes through one process-wide gate
-(`src/ratelimit.py`), regardless of transport:
+(`better_rlm/ratelimit.py`), regardless of transport:
 
 - **Throttle:** at most `throttle_max_concurrency` (3) calls in flight, each dispatched
   `>= throttle_min_interval_s` (1s) after the previous. A single call is instant; large batches
@@ -842,7 +879,7 @@ model, comparing `claude-cli` vs `api`) used to mean hand-editing
 `config.yaml`. The bundled TUI is a thin Python REPL that
 offers that same surface via slash commands — no extra dependency (it's
 `rich.prompt`, already a dep) and no extra process (it's just
-`python -m src.cli`).
+`python -m better_rlm.cli`).
 
 Launch it from the checkout root:
 
@@ -895,7 +932,7 @@ gate on it.
 
 The picker writes changes back to `config.yaml` (not `.env` — `.env`
 is still the installer's territory, see `install.sh --auth`). A running
-MCP server holds `src/` from startup, so a picker write is not live
+MCP server holds `better_rlm/` from startup, so a picker write is not live
 until the server reconnects — `/status` reminds you when this matters.
 
 [cline-mode-picker]: https://github.com/cline/cline/blob/main/cli/src/tui/components/dialogs/mode-picker.tsx

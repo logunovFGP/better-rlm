@@ -1,6 +1,6 @@
 import pytest
 
-import src.ratelimit as rl
+import better_rlm.ratelimit as rl
 
 
 class _RateLimit(Exception):
@@ -51,7 +51,7 @@ def test_non_429_is_not_retried():
 
 
 def test_waits_are_transport_aware(monkeypatch):
-    import src.auth as auth_mod
+    import better_rlm.auth as auth_mod
     # Backoff keys off the RESOLVED transport, not raw env tokens.
     monkeypatch.setattr(auth_mod, "resolve_auth_mode", lambda cfg: "oauth")
     assert rl._waits()[0] == 5  # claude CLI → patient backoff
@@ -78,7 +78,7 @@ def test_waits_falls_back_when_the_transport_cannot_be_resolved(monkeypatch):
     retry machinery, on any machine without the claude CLI and without a key - nine
     tests on the first CI run, before the wrapped call could report anything itself.
     """
-    import src.auth as auth
+    import better_rlm.auth as auth
 
     def no_transport(cfg):
         raise RuntimeError("No transport available.")
@@ -96,7 +96,7 @@ def test_waits_falls_back_when_the_transport_cannot_be_resolved(monkeypatch):
 def test_the_schedule_still_follows_the_resolved_transport(monkeypatch):
     # The fallback above must not flatten the distinction it falls back from: OAuth
     # carries the longer waits because subscription limits are tighter.
-    import src.auth as auth
+    import better_rlm.auth as auth
 
     monkeypatch.setattr(auth, "resolve_auth_mode", lambda cfg: "oauth")
     assert rl._waits() == list(rl._CFG.oauth_retry_waits)

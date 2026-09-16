@@ -11,17 +11,17 @@ import types
 
 import pytest
 
-import src.server as srv
-import src.subquery as sq
-import src.transport as tp
-from src.sandbox_reap import container_image_status
+import better_rlm.server as srv
+import better_rlm.subquery as sq
+import better_rlm.transport as tp
+from better_rlm.sandbox_reap import container_image_status
 
 
 def _docker(monkeypatch, images_out, inspect_out):
     def run(argv, **kw):
         out = images_out if argv[1] == "images" else inspect_out
         return types.SimpleNamespace(stdout=out, stderr="", returncode=0)
-    monkeypatch.setattr("src.sandbox_reap.subprocess.run", run)
+    monkeypatch.setattr("better_rlm.sandbox_reap.subprocess.run", run)
 
 
 def test_container_on_the_current_image_reads_current(monkeypatch):
@@ -45,14 +45,14 @@ def test_no_container_is_not_an_error(monkeypatch):
 def test_docker_failure_degrades_to_unknown(monkeypatch):
     def boom(*a, **k):
         raise OSError("no docker")
-    monkeypatch.setattr("src.sandbox_reap.subprocess.run", boom)
+    monkeypatch.setattr("better_rlm.sandbox_reap.subprocess.run", boom)
     assert container_image_status("img", "cid").startswith("unknown")
 
 
 # --- auth label ---------------------------------------------------------------
 def test_auth_label_names_the_method_and_is_cached(monkeypatch):
     monkeypatch.setattr(tp, "_AUTH_LABEL", None)
-    monkeypatch.setattr("src.auth.resolve_auth_mode", lambda cfg: "oauth")
+    monkeypatch.setattr("better_rlm.auth.resolve_auth_mode", lambda cfg: "oauth")
     calls = []
 
     def status(cfg):
@@ -69,14 +69,14 @@ def test_auth_label_names_the_method_and_is_cached(monkeypatch):
 
 def test_auth_label_says_so_when_the_login_is_dead(monkeypatch):
     monkeypatch.setattr(tp, "_AUTH_LABEL", None)
-    monkeypatch.setattr("src.auth.resolve_auth_mode", lambda cfg: "oauth")
+    monkeypatch.setattr("better_rlm.auth.resolve_auth_mode", lambda cfg: "oauth")
     monkeypatch.setattr(tp, "cli_auth_status", lambda cfg: {"loggedIn": False})
     assert "NOT LOGGED IN" in tp.auth_label(srv.CFG)
 
 
 def test_auth_label_on_the_sdk_path_never_shells_out(monkeypatch):
     monkeypatch.setattr(tp, "_AUTH_LABEL", None)
-    monkeypatch.setattr("src.auth.resolve_auth_mode", lambda cfg: "apikey")
+    monkeypatch.setattr("better_rlm.auth.resolve_auth_mode", lambda cfg: "apikey")
     monkeypatch.setattr(tp, "cli_auth_status",
                         lambda cfg: pytest.fail("no CLI is involved on the API-key path"))
     assert tp.auth_label(srv.CFG) == "apikey (anthropic SDK)"

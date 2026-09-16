@@ -4,7 +4,7 @@ Mirrors cline-2's mode/model picker (``apps/cli/src/tui/
 components/model-selector/`` + ``hooks/use-model-selector.tsx``) on top of
 rich.prompt -- so the same "compare two modes, pick a model" flow is
 available here without pulling in a JS bundle. The CLI is
-optional: the MCP server itself runs unchanged on ``python -m src.server``.
+optional: the MCP server itself runs unchanged on ``python -m better_rlm.server``.
 
 What this TUI does:
 
@@ -52,6 +52,7 @@ from .config import (
     MODEL_SONNET_5,
     MODEL_HAIKU,
     PKG_ROOT,
+    config_file,
 )
 from .describe import (
     MODE_AUTO,
@@ -103,10 +104,10 @@ def load_status(config_path: Path | None = None) -> Status:
     The values shown are what ``config.load_config`` would resolve to on
     the NEXT server start, NOT the in-process state of any already-running
     MCP server. CLAUDE.md spells out why that distinction matters: a
-    running server holds ``src/`` from startup, so a TUI write is not
+    running server holds ``better_rlm/`` from startup, so a TUI write is not
     live until the server reconnects.
     """
-    cfg_path = config_path or (PKG_ROOT / "config.yaml")
+    cfg_path = config_path or config_file()
 
     def _read(key: str, default: str) -> str:
         on_disk = config_writer.read_scalar(cfg_path, key)
@@ -326,7 +327,7 @@ def render_mode_compare() -> str:
 def pick_model(console: Console, current: str, kind: str = "root") -> str:
     """Model picker -- curated list of Anthropic models + custom entry.
 
-    Curated list tracks the constants in ``src/config.py`` so the
+    Curated list tracks the constants in ``better_rlm/config.py`` so the
     picker's defaults stay in sync with what the engine accepts. Custom
     entry covers a model id newer than this checkout's constants.
     """
@@ -563,7 +564,7 @@ def run_repl(config_path: Path | None = None, console: Console | None = None) ->
     (CI, scripts) feed the lines and the loop exits on EOF or /quit.
     Interactive: a prompt is drawn for each line via rich.prompt.Prompt.
     """
-    cfg_path = config_path or (PKG_ROOT / "config.yaml")
+    cfg_path = config_path or config_file()
     console = console or Console()
     console.print(
         Panel(
@@ -585,7 +586,7 @@ def run_repl(config_path: Path | None = None, console: Console | None = None) ->
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry: ``python -m src.cli [--config PATH] [--one-shot CMD]``.
+    """CLI entry: ``python -m better_rlm.cli [--config PATH] [--one-shot CMD]``.
 
     ``--one-shot`` runs ONE slash command and exits with that command's status
     (pytest's rc for /test and /test-config, 2 for an unknown command, else 0) so CI
@@ -609,7 +610,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     console = Console()
-    cfg_path = config_path or (PKG_ROOT / "config.yaml")
+    cfg_path = config_path or config_file()
     if one_shot is not None:
         _dispatch_guarded(one_shot, console, cfg_path)
         return LAST_EXIT_CODE

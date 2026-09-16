@@ -18,7 +18,39 @@ import yaml
 from dotenv import load_dotenv
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(PKG_ROOT / ".env")  # no-op if the file is absent
+
+# In a checkout, PKG_ROOT is the repo root and the launchers / pyproject sit in it.
+# In a `pip install better-rlm`, PKG_ROOT is site-packages and none of them exist --
+# so anything that reads a repo-root file has to ask this first, or it silently reads
+# nothing and falls back to the baked-in defaults with no explanation. An EDITABLE
+# install still points here, which is why the probe is a file test and not a check for
+# the string "site-packages".
+IS_CHECKOUT = (PKG_ROOT / "pyproject.toml").is_file()
+
+# The tool already owns ~/.rlm: contexts, logs, cache, the budget ledger and the source
+# registry all live there (see _DEFAULTS below). config.yaml and .env join them when
+# there is no checkout, rather than inventing a second user-level directory.
+USER_DIR = Path(os.path.expanduser("~/.rlm"))
+
+
+def config_file() -> Path:
+    """Where ``config.yaml`` is read from, and written to by the TUI.
+
+    Checkout wins when it has one, so a developer's edits and the diff history
+    keep working exactly as before. A pip install has no checkout and lands on
+    ``~/.rlm/config.yaml``.
+    """
+    if IS_CHECKOUT and (PKG_ROOT / "config.yaml").is_file():
+        return PKG_ROOT / "config.yaml"
+    return USER_DIR / "config.yaml"
+
+
+def env_file() -> Path:
+    """Where credentials are read from. Same rule as config_file()."""
+    return PKG_ROOT / ".env" if IS_CHECKOUT else USER_DIR / ".env"
+
+
+load_dotenv(env_file())  # no-op if the file is absent
 
 # --- Verified Anthropic model IDs (claude-api reference) ---
 MODEL_SONNET_5 = "claude-sonnet-5"  # 1M ctx — current default root/orchestrator
@@ -201,7 +233,7 @@ def _sandbox(value: str) -> str:
 
 
 def _load_yaml() -> dict[str, Any]:
-    path = PKG_ROOT / "config.yaml"
+    path = config_file()
     if not path.exists():
         return {}
     with open(path) as fh:

@@ -1,4 +1,4 @@
-# RLM MCP server configuration. Values here override the baked-in defaults in src/config.py.
+# RLM MCP server configuration. Values here override the baked-in defaults in better_rlm/config.py.
 mode: auto                             # auto | claude-cli | api. auto: prefer the `claude` CLI
                                        # (reuses your Claude Code login — no token/API key needed),
                                        # else fall back to ANTHROPIC_API_KEY. Override per-launch
@@ -32,7 +32,7 @@ sandbox_timeout_s: 300
 max_concurrent_subcalls: 2             # engine rlm_query_batched parallelism
 subquery_concurrency: 3                # our map-reduce parallelism
 
-# ---- Session-window token budget (see src/budget.py) --------------------------------
+# ---- Session-window token budget (see better_rlm/budget.py) --------------------------------
 session_window_h: 5                    # the rolling window the subscription enforces
 session_budget_tokens: 5800000         # tokens per window. SEED VALUE, calibrated from one
                                        # observed incident: a 103-chunk batch spending ~3.5M
@@ -54,7 +54,7 @@ budget_stop_fraction: 0.95             # stop a run at this share of the window 
 report_cost: false                     # OFF by default. The rate table covers Anthropic models only,
                                        # and the claude-CLI path under-counts input tokens — so a "$"
                                        # figure would be confidently wrong. Enable only when your
-                                       # models are priced in src/config.py COST_PER_MTOK.
+                                       # models are priced in better_rlm/config.py COST_PER_MTOK.
 sub_context_tokens: 0                  # context ceiling of sub_model. 0 = DERIVE it from the
                                        # engine's own model table (rlm/utils/token_utils.py), so
                                        # this stops being a second copy of that knowledge that has
@@ -72,7 +72,7 @@ chunk_chars: 120000                    # ~< Haiku 200K-token ceiling
 chunk_overlap: 0
 log_dir: ~/.rlm/logs
 store_dir: ~/.rlm/contexts
-sources_file: ~/.rlm/sources.yaml      # registry of named external sources (see src/sources.py):
+sources_file: ~/.rlm/sources.yaml      # registry of named external sources (see better_rlm/sources.py):
                                        # commands an operator declares that rlm_load_source may run
                                        # — pod logs, a metrics/trace backend, a journal, an audit API.
                                        # OUTSIDE the repo on purpose, so a site's clusters, endpoints

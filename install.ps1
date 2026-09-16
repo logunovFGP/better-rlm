@@ -255,10 +255,10 @@ try {
     # Importing the real entry point is the cheapest honest check.
     $venvUsable = $false
     if ((Test-Path $python) -and $haveHash -eq $wantHash) {
-        & $python -c 'import src.server' *> $null
+        & $python -c 'import better_rlm.server' *> $null
         $venvUsable = ($LASTEXITCODE -eq 0)
         if (-not $venvUsable) {
-            Write-Warning 'Deps hash matches but the venv cannot import src.server - rebuilding.'
+            Write-Warning 'Deps hash matches but the venv cannot import better_rlm.server - rebuilding.'
         }
     }
 
@@ -403,7 +403,7 @@ try {
         } elseif ($Auth) {
             Write-Note 'Not logged in. Running `claude setup-token` - complete it in the browser.'
             Write-Note 'It prints the token once; paste it at the hidden prompt afterwards'
-            Write-Note 'and this script stores it in .env (loaded by src/config.py).'
+            Write-Note 'and this script stores it in .env (loaded by better_rlm/config.py).'
             claude setup-token
             if (-not $script:CanPrompt) {
                 Write-Note 'Non-interactive - add CLAUDE_CODE_OAUTH_TOKEN=<token> to .env yourself.'

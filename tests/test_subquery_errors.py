@@ -5,7 +5,7 @@ single-query sibling, which rlm_sub_query and the reduce pass both go through. A
 exception here would abort a whole tool call instead of reporting one failed answer.
 """
 
-import src.subquery as sq
+import better_rlm.subquery as sq
 
 
 def test_sub_query_reports_a_transport_failure_as_an_error_result(monkeypatch, cfg):

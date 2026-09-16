@@ -244,7 +244,7 @@ def run_query(cfg: Config, context_text: str, question: str,
     except _ENGINE_LIMITS as exc:
         # A limit firing is not a crash: the engine stops deliberately and several of
         # these carry the best answer found so far. Losing that work and surfacing a
-        # traceback instead was the old behaviour -- nothing in src/ caught them.
+        # traceback instead was the old behaviour -- nothing in better_rlm/ caught them.
         partial = str(getattr(exc, "partial_answer", "") or "")
         saved = checkpoint is not None and _save_checkpoint(
             checkpoint, exc, question=question, root_model=root_model, sub_model=sub_model)
