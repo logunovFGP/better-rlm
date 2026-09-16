@@ -114,6 +114,24 @@ Rules for anything added here:
   * **`base_url` without `mode: api` does nothing** -- the `claude` CLI ignores it.
     `/status` renders that combination as `IGNORED` rather than letting it look live.
 
+### Credentials are per provider
+
+Each provider reads its own variable -- `ANTHROPIC_API_KEY`, `MINIMAX_API_KEY`,
+`RLM_API_KEY` for a custom endpoint -- mirroring cline-2's per-provider settings
+entries. One shared variable meant configuring a second provider overwrote the
+first one's key.
+
+`auth.api_key_for(cfg)` resolves it and deliberately does **not** fall back to
+another provider's variable. Falling back would hand the key you issued to
+Anthropic to whatever third-party endpoint is configured. A missing key fails as
+missing; `test_a_providers_key_is_never_read_for_another` pins it.
+
+When adding a provider, give it a variable nobody else uses
+(`test_no_two_providers_share_a_key_variable`). The key name says nothing about the
+protocol -- an earlier test asserted every provider used `ANTHROPIC_API_KEY` and
+read like a safety check, when it was really just the shared-variable bug wearing a
+test's clothes.
+
 ### Two shapes: checkout and wheel
 
 `better_rlm.config.IS_CHECKOUT` is the single probe (is there a `pyproject.toml`

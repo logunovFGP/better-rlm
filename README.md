@@ -864,8 +864,17 @@ sub_context_tokens: 204800
 
 ```bash
 # .env
-ANTHROPIC_API_KEY=<your MiniMax key>
+MINIMAX_API_KEY=<your MiniMax key>
 ```
+
+**Keys are stored per provider**, the way cline-2 keeps a settings entry per provider
+id. `anthropic` reads `ANTHROPIC_API_KEY`, `minimax` reads `MINIMAX_API_KEY`, a custom
+endpoint reads `RLM_API_KEY`. Two consequences worth knowing:
+
+- Configuring a second provider does not destroy the first one's key. You can switch
+  back and forth without re-entering either.
+- A provider's key is **never** read for another. A missing `MINIMAX_API_KEY` fails as
+  missing rather than quietly sending your Anthropic key to MiniMax.
 
 **`mode` must be `api`.** `auto` and `claude-cli` spawn the `claude` CLI, which talks
 to Anthropic whatever `base_url` says. `/status` flags that combination as `IGNORED`

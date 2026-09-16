@@ -40,12 +40,40 @@ from better_rlm.describe import (
 
 
 def test_every_api_provider_speaks_the_anthropic_protocol():
-    """The whole safety argument. A provider needing a different client would lose the
-    ledger, which is exactly what require_anthropic exists to prevent."""
+    """The safety argument is about the CLIENT, not the variable name.
+
+    This used to assert every provider's key_env == ANTHROPIC_API_KEY, which read like
+    a protocol check and was really just "they all share one variable" -- the bug that
+    let configuring MiniMax overwrite the Anthropic key. What must hold is that every
+    provider is reached through the Anthropic client, so the ledger stays in the stack.
+    """
     for pid in all_providers():
         d = PROVIDERS[pid]
+        assert d.auth in (AUTH_CLI, AUTH_API_KEY), pid
         if d.auth == AUTH_API_KEY:
-            assert d.key_env == "ANTHROPIC_API_KEY", pid
+            assert d.key_env, f"{pid} has no key variable of its own"
+
+
+def test_no_two_providers_share_a_key_variable():
+    """The defect this replaced. One shared variable meant configuring a second
+    provider destroyed the first one's key, and switching back sent whatever remained
+    to whichever endpoint was configured."""
+    seen = [PROVIDERS[p].key_env for p in all_providers() if PROVIDERS[p].key_env]
+    assert len(seen) == len(set(seen)), f"shared key variable among {seen}"
+
+
+def test_a_providers_key_is_never_read_for_another(monkeypatch):
+    """Falling back would hand the key you issued to Anthropic to a third-party
+    endpoint. A missing key must fail as missing."""
+    import dataclasses
+    from better_rlm.auth import api_key_for, key_env_for
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    cfg = dataclasses.replace(load_config(), mode=MODE_API,
+                              base_url=PROVIDERS[PROVIDER_MINIMAX].base_url)
+    assert key_env_for(cfg) == "MINIMAX_API_KEY"
+    assert api_key_for(cfg) == "", "the Anthropic key leaked to a MiniMax endpoint"
 
 
 def test_mode_filter_matches_clines_provider_picker():
@@ -142,9 +170,10 @@ def test_api_transport_reads_cfg_not_a_private_alias(monkeypatch):
     """Regression. The first wiring used `self._cfg.base_url`; ApiTransport stores
     `self.cfg`, and the client is built LAZILY -- so this raised AttributeError only on
     the first real model call, which no test makes. Build the client to catch it."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("MINIMAX_API_KEY", "sk-test")   # per-provider, not Anthropic's
     from better_rlm.transport import ApiTransport
-    cfg = dataclasses.replace(load_config(), base_url="https://api.minimax.io/anthropic")
+    cfg = dataclasses.replace(load_config(), mode=MODE_API,
+                              base_url="https://api.minimax.io/anthropic")
     t = ApiTransport(cfg)
     assert "minimax" in str(t._sync_client().base_url)
     assert "minimax" in str(t._async_client().base_url)
@@ -381,12 +410,13 @@ def test_the_key_written_by_the_wizard_reaches_the_client(tmp_path, monkeypatch)
     with patch.object(tui.Prompt, "ask", return_value="sk-fake-roundtrip"):
         assert tui.auth_step(Console(file=io.StringIO(), quiet=True),
                              PROVIDER_MINIMAX, st, env_path) is True
-    assert envfile.has_var(env_path, "ANTHROPIC_API_KEY")
+    assert envfile.has_var(env_path, "MINIMAX_API_KEY")
     assert oct(env_path.stat().st_mode & 0o777) == "0o600"
     assert "sk-fake-roundtrip" not in envfile.fingerprint("sk-fake-roundtrip")
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake-roundtrip")
-    cfg = dataclasses.replace(load_config(), base_url=PROVIDERS[PROVIDER_MINIMAX].base_url)
+    monkeypatch.setenv("MINIMAX_API_KEY", "sk-fake-roundtrip")
+    cfg = dataclasses.replace(load_config(), mode=MODE_API,
+                              base_url=PROVIDERS[PROVIDER_MINIMAX].base_url)
     client = ApiTransport(cfg)._sync_client()
     assert "minimax" in str(client.base_url)
     assert client.api_key == "sk-fake-roundtrip"

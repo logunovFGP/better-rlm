@@ -187,8 +187,9 @@ def test_picker_never_offers_a_provider_the_server_would_refuse(quiet_console, t
         offered = providers_for_mode(mode)
         assert offered, f"{mode} offers nothing"
         for pid in offered:
-            # A row whose auth needed a different client is the trap coming back.
-            assert PROVIDERS[pid].key_env in ("", "ANTHROPIC_API_KEY"), (mode, pid)
+            # A row reached through a different CLIENT is the trap coming back; the
+            # key variable is per provider and says nothing about the protocol.
+            assert PROVIDERS[pid].auth in ("cli", "api_key"), (mode, pid)
 
 def test_render_mode_compare_includes_every_mode() -> None:
     """The compare view must mention every mode the picker offers -- so

@@ -147,6 +147,13 @@ def all_modes() -> tuple[str, ...]:
 # mode cannot reach -- the same reason cline passes ``modeFilter`` after its mode
 # step: you are not re-offered a choice you just made.
 #
+# Each provider stores its key under its OWN env var, the way cline-2 keeps a separate
+# settings entry per provider (``saveLocalProviderSettings(manager, {providerId,
+# apiKey})``). One shared variable meant configuring MiniMax destroyed the Anthropic
+# key that was already there, and switching back silently sent whatever remained to
+# whichever endpoint was configured -- so a key given to one vendor could be handed to
+# another. Keys are NEVER read across providers, for that reason.
+#
 # Every provider here is ``provider: anthropic`` in config.yaml, because that names
 # the WIRE PROTOCOL. ``auth.require_anthropic`` refuses anything else: the
 # session-window ledger, the 95% floor and ceiling-learning live in
@@ -197,7 +204,7 @@ PROVIDERS: dict[str, ProviderDescription] = {
         mode=MODE_API,
         auth=AUTH_API_KEY,
         base_url="https://api.minimax.io/anthropic",
-        key_env="ANTHROPIC_API_KEY",
+        key_env="MINIMAX_API_KEY",
         summary="Anthropic-compatible. Use MiniMax model ids (MiniMax-M2.7, MiniMax-M3).",
     ),
     PROVIDER_CUSTOM: ProviderDescription(
@@ -205,7 +212,7 @@ PROVIDERS: dict[str, ProviderDescription] = {
         mode=MODE_API,
         auth=AUTH_API_KEY,
         base_url="",
-        key_env="ANTHROPIC_API_KEY",
+        key_env="RLM_API_KEY",
         summary="Any other endpoint speaking the Anthropic messages format.",
         prompts_base_url=True,
     ),
@@ -221,7 +228,7 @@ def describe_provider(provider: str) -> ProviderDescription:
             mode=MODE_API,
             auth=AUTH_API_KEY,
             base_url="",
-            key_env="ANTHROPIC_API_KEY",
+            key_env="RLM_API_KEY",
             summary="Not a known provider id; pick one from the list.",
         )
     return info
