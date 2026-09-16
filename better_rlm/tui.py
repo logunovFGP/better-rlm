@@ -174,17 +174,35 @@ def load_status(config_path: Path | None = None) -> Status:
     )
 
 
+def cli_will_win(st: Status) -> bool:
+    """True when the resolved transport will be the `claude` CLI, so base_url is dead.
+
+    ``auto`` is the subtle one and the case this originally missed: it prefers the CLI
+    on PATH PRESENCE ALONE -- ``auth.claude_cli_available`` only calls shutil.which,
+    and login is left to surface as an auth error at call time. So a machine with the
+    CLI installed silently ignores a configured endpoint under auto, which looks
+    configured and is not.
+    """
+    if st.mode == MODE_CLI:
+        return True
+    if st.mode == MODE_AUTO:
+        return st.cli_available
+    return False
+
+
 def _provider_line(st: Status) -> str:
     """Which provider the next server start will use, named rather than shown as a URL.
 
-    Flags the one combination that silently does nothing: a base_url set while mode
-    still spawns the `claude` CLI, which reaches Anthropic whatever this says.
+    Flags the combinations that silently do nothing: a base_url set while the resolved
+    transport is the `claude` CLI, which reaches Anthropic whatever this says.
     """
     pid = provider_for_config(st.base_url, st.mode)
     d = describe_provider(pid)
     where = st.base_url or ("the `claude` CLI" if d.auth == AUTH_CLI else "api.anthropic.com")
-    if st.base_url and st.mode == MODE_CLI:
-        return f"{d.label} — {where}   IGNORED: mode={st.mode} uses the claude CLI"
+    if st.base_url and cli_will_win(st):
+        why = ("mode=claude-cli" if st.mode == MODE_CLI
+               else f"mode=auto prefers the `{st.cli_path}` CLI, which is on PATH")
+        return f"{d.label} — {where}   IGNORED: {why}"
     return f"{d.label} — {where}"
 
 
@@ -362,7 +380,24 @@ def pick_provider(console: Console, mode: str, current: str) -> str:
     )
 
 
-def auth_step(console: Console, provider_id: str, st: Status) -> bool:
+def env_for_config(config_path: Path) -> Path:
+    """Where a credential belongs, for the config file being edited.
+
+    The default config gets the default .env, which knows about the checkout vs
+    wheel split. A `--config /tmp/other.yaml` run gets /tmp/.env instead: a config
+    file and its credential are a pair, and writing the key to the repo's .env while
+    editing someone else's config would silently overwrite a live credential.
+    """
+    try:
+        if config_path.resolve() == config_file().resolve():
+            return env_file()
+    except OSError:
+        pass
+    return config_path.parent / ".env"
+
+
+def auth_step(console: Console, provider_id: str, st: Status,
+              env_path: Path | None = None) -> bool:
     """The credential step, branching on how the provider authenticates.
 
     cline-2 splits this three ways in ``runProviderChange``: an OAuth login screen, a
@@ -400,7 +435,7 @@ def auth_step(console: Console, provider_id: str, st: Status) -> bool:
 
     # API key. Read hidden, written straight to .env, never echoed and never returned
     # to the caller -- only its fingerprint is reported. Same rule install.sh follows.
-    path = env_file()
+    path = env_path or env_file()
     if envfile.has_var(path, d.key_env):
         console.print(f"[green]{d.key_env} is already set[/green] in {path}.")
         keep = Prompt.ask(
@@ -429,6 +464,21 @@ def auth_step(console: Console, provider_id: str, st: Status) -> bool:
     del key
     console.print(f"[green]wrote {d.key_env}[/green] to {path} ({fp}, mode 0600)")
     return True
+
+
+def _warn_if_endpoint_is_dead(console: Console, st: Status) -> None:
+    """Say it at the moment of writing, not only on the next /status.
+
+    An operator who picks MiniMax and is told nothing has every reason to think it
+    took effect.
+    """
+    if st.base_url and cli_will_win(st):
+        why = ("mode is claude-cli" if st.mode == MODE_CLI
+               else f"mode is auto and the `{st.cli_path}` CLI is on PATH, which auto prefers")
+        console.print(
+            f"[yellow]This endpoint will be ignored: {why}, and the CLI talks to "
+            f"Anthropic. Run [bold]/mode[/bold] and pick `api` to use it.[/yellow]"
+        )
 
 
 def run_setup(console: Console, config_path: Path) -> bool:
@@ -475,10 +525,11 @@ def run_setup(console: Console, config_path: Path) -> bool:
     elif choice != PICKER_KEEP:
         provider_id = choice
         wrote |= _save(config_path, {"base_url": describe_provider(choice).base_url}, console)
+    _warn_if_endpoint_is_dead(console, load_status(config_path))
 
     # 3. credential for that provider
     st = load_status(config_path)
-    ok = auth_step(console, provider_id, st)
+    ok = auth_step(console, provider_id, st, env_for_config(config_path))
 
     # 4. models
     st = load_status(config_path)
@@ -723,7 +774,9 @@ def _dispatch(
             provider_id = choice
             url = describe_provider(choice).base_url
         _save(config_path, {"base_url": url}, console)
-        auth_step(console, provider_id, load_status(config_path))
+        st = load_status(config_path)
+        _warn_if_endpoint_is_dead(console, st)
+        auth_step(console, provider_id, st, env_for_config(config_path))
         return True
 
     if cmd in ("/model", "/override", "/sub"):
