@@ -24,7 +24,7 @@ guard, `scripts/githooks/pre-push` (version-controlled; both installers point
 uv run --extra dev pytest -q
 ```
 
-The 72-test unit suite. It must run where **git** runs it — the pre-push hook has
+The unit suite. It must run where **git** runs it — the pre-push hook has
 no venv activated, and `python` is not on PATH on every machine that clones this
 repo, so the obvious-looking `python -m pytest -q` fails with *command not found*
 and rejects every push. `uv` is a single cross-platform binary and this repo already

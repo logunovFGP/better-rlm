@@ -1,5 +1,11 @@
 # Phase 5 — Validation transcript
 
+> **Dated snapshot, not a current description.** This records one run of
+> `scripts/validate.py` as the tool surface stood then: 12 tools, package at `src/`.
+> The server now registers 17 and the package is `better_rlm/`. The numbers below are
+> left as they were recorded - a transcript rewritten to match today is no longer
+> evidence of anything. Re-run the harness for current figures.
+
 Harness: `scripts/validate.py` (reproducible). The **no-key** portions run the
 load/inspect/chunk/exec path end-to-end in the Docker sandbox; the **LLM-routed**
 tools (`rlm_query`, `rlm_sub_query[_batch]`) are wired and listed but require

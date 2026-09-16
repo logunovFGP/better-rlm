@@ -29,7 +29,7 @@ throttle and retry. That is dependency injection — folding it into `rlm/` woul
 the engine import from `better_rlm/`, inverting the dependency and breaking the engine's
 standalone use. It stays. It is idempotent, guarded by an `_rlmmcp_patched` flag.
 
-The Docker REPL exec-protocol fixes that used to live in `better_rlm/sandbox_patch.py` are
+The Docker REPL exec-protocol fixes that used to live in `src/sandbox_patch.py` are
 now the engine's own code (`rlm/environments/docker_repl.py`): the hardened result
 marker, the capped `locals` echo, the atomic `state.dill` write, the state-load
 warning, UTF-8 host writes, and a real `timeout_s`. `tests/test_sandbox.py::

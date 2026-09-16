@@ -117,13 +117,6 @@ a preference. The TUI configures the transport mode and the three models.
 
 ### Install from PyPI
 
-> **Not published yet.** `pip install better-rlm` returns *No matching distribution
-> found* until the first release lands. The pipeline is in place — pushing a `v*` tag
-> builds and uploads — but it needs a
-> [pending publisher](https://docs.pypi.org/trusted-publishers/) configured once on
-> PyPI first. Until then use [a checkout](#install-from-a-checkout) or
-> [the plugin](#install-as-a-claude-code-plugin). Delete this note when v0.3.0 ships.
-
 ```bash
 pip install better-rlm          # or: uv tool install better-rlm
 claude mcp add -s user rlm -- better-rlm server
@@ -157,29 +150,7 @@ The package ships the vendored engine as top-level `rlm`, the same import name u
 `rlms` distribution uses. Installing both into one environment collides; use separate
 virtualenvs.
 
-<details>
-<summary><b>Releasing (maintainers)</b></summary>
-
-```bash
-echo 0.4.0 > VERSION && uv run python scripts/sync_version.py
-git commit -am "chore: 0.4.0" && git push origin main
-git tag v0.4.0 && git push origin v0.4.0      # this publishes
-```
-
-The tag push runs the suite on Linux and Windows, builds, creates the GitHub release and
-uploads to PyPI via Trusted Publishing — no API token is stored in the repository. Run
-**Actions → Release → Run workflow** with `dry_run` first whenever the pipeline itself
-changed: it verifies and builds while tagging and publishing nothing.
-
-There is deliberately no branch or schedule trigger. A PyPI version number is burned once
-and cannot be reclaimed even after a yank, so publishing requires someone to name the
-version by pushing a tag.
-
-First release only: add a [pending publisher](https://docs.pypi.org/trusted-publishers/)
-on PyPI — project `better-rlm`, owner `logunovFGP`, repository `better-rlm`, workflow
-`release.yml`.
-
-</details>
+Maintainers: see [Releasing](#releasing) for how a version is cut.
 
 ---
 
@@ -275,7 +246,7 @@ effect on the next `claude mcp restart rlm` — never mid-session.
 
 **6. No Docker? (optional)**
 
-Only `rlm_exec` and `rlm_query` need the sandbox; the other thirteen tools — including the free
+Only `rlm_exec` and `rlm_query` need the sandbox; the other fifteen tools — including the free
 `rlm_grep` and `rlm_read_chunk` — never touch it. To run those two without Docker:
 
 ```bash
@@ -357,7 +328,7 @@ and whether Docker was found. Then point it at something enormous.
 
 **5. No Docker? (optional)**
 
-Only `rlm_exec` and `rlm_query` need the sandbox; the other thirteen tools — including the free
+Only `rlm_exec` and `rlm_query` need the sandbox; the other fifteen tools — including the free
 `rlm_grep` and `rlm_read_chunk` — never touch it. To run those two without Docker:
 
 ```bash
@@ -473,7 +444,7 @@ and whether Docker was found. Then point it at something enormous.
 
 **5. No Docker? (optional)**
 
-Only `rlm_exec` and `rlm_query` need the sandbox; the other thirteen tools — including the free
+Only `rlm_exec` and `rlm_query` need the sandbox; the other fifteen tools — including the free
 `rlm_grep` and `rlm_read_chunk` — never touch it. To run those two without Docker:
 
 ```powershell
@@ -615,16 +586,17 @@ only findings come back.
 
 ---
 
-## The 15 tools
+## The 17 tools
 
 **Load & inspect** — `rlm_load_context` · `rlm_load_file` · `rlm_load_source` · `rlm_inspect_context` · `rlm_chunk_context`
 **Deterministic retrieval — free, no model call** — `rlm_grep` · `rlm_read_chunk` · `rlm_list_sources`
 **Lifecycle** — `rlm_list_contexts` · `rlm_drop_context`
 **Model-backed** — `rlm_query` (full recursive: Sonnet root + Haiku sub, model-written Python in the sandbox) · `rlm_sub_query` · `rlm_sub_query_batch` (Haiku map-reduce)
 **Sandbox & status** — `rlm_exec` (Python in the sandbox) · `rlm_status`
+**Cost & forecast** — `rlm_estimate` (forecast a `rlm_sub_query_batch` before running it) · `rlm_budget` (what this server has spent inside the session window)
 
 Only `rlm_exec` and `rlm_query` execute *model-written* code, so only those two depend on the
-sandbox — the other thirteen behave identically whether it is Docker or `local`. Both tools state
+sandbox — the other fifteen behave identically whether it is Docker or `local`. Both tools state
 which mode they are in, and `rlm_status` is authoritative: **`sandbox: local` means that code runs
 on your host, unisolated.** `rlm_load_source` also runs a process on the host, but never
 model-written and never through a shell: only a command an operator declared, with parameters
@@ -1048,29 +1020,40 @@ until the server reconnects — `/status` reminds you when this matters.
 
 ## Releasing
 
-Releases are cut **manually, on request** — `.github/workflows/release.yml` has no push,
-tag or schedule trigger, so a merge to `main` never publishes anything. `tests/test_release.py`
-fails if a trigger is ever added, which is the only way that property stays true.
+Pushing a version tag publishes. `git push origin v0.4.0` runs the suite on ubuntu and
+windows, builds, creates the GitHub Release, and uploads to PyPI.
 
-Two steps, in this order:
+```bash
+echo 0.4.0 > VERSION && uv run python scripts/sync_version.py
+git commit -am "chore: 0.4.0" && git push origin main
+git tag v0.4.0 && git push origin v0.4.0      # this publishes
+```
 
-1. **Bump the version on `main`.** `pyproject.toml` is the single source of truth; the
-   workflow refuses a release whose input disagrees with it, so the tag and the package
-   can never claim different versions.
-2. **Run the workflow.** In the Actions tab pick *Release* → *Run workflow* and enter the
-   version, or:
+`VERSION` is the single source of truth. `pyproject.toml` reads it through setuptools
+dynamic metadata and `scripts/sync_version.py` propagates it to `plugin.json`, so the tag,
+the wheel and the plugin manifest cannot claim different versions. The workflow refuses a
+malformed version, a version `VERSION` does not declare, and a version already released.
 
-   ```bash
-   gh workflow run release.yml -f version=0.2.0
-   gh workflow run release.yml -f version=0.2.0 -f dry_run=true   # verify + build only
-   ```
+The manual path still exists and adds a dry run: *Actions* → *Release* → *Run workflow*, or
 
-It runs `uv run --extra dev pytest -q` on **ubuntu and windows** before anything is
-published — the platform split is not ceremony, every defect found while merging #2, #4
-and #5 was Windows-only and green on Linux — then builds the sdist and wheel and creates
-the tag plus a GitHub Release with generated notes and both artifacts attached. It refuses
-a malformed version, a version `pyproject.toml` does not declare, and a version already
-tagged or released. `dry_run: true` does everything except tag and publish.
+```bash
+gh workflow run release.yml -f version=0.4.0 -f dry_run=true   # verify + build, publish nothing
+```
+
+**A merge to `main` never publishes.** There is no branch trigger and no schedule; `push`
+filters on `tags` alone, and `tests/test_release.py::test_a_merge_can_never_publish`
+rejects a `branches` key or a tag pattern looser than `vMAJOR.MINOR.PATCH`. That guard
+matters because a PyPI version number is burned once and cannot be reclaimed, even after a
+yank - so publishing requires a human to name the version by pushing a tag.
+
+Uploads use [Trusted Publishing](https://docs.pypi.org/trusted-publishers/): PyPI verifies
+the workflow's OIDC identity and mints a short-lived credential, so no API token is stored
+in this repository. The publish job holds `id-token: write` and nothing else, runs last
+because a GitHub Release is reversible and PyPI is not, and ships the artifacts the build
+job produced rather than rebuilding, so both indexes serve identical files.
+
+The two-platform gate is not ceremony: every defect found while merging #2, #4 and #5 was
+Windows-only and green on Linux.
 
 ---
 
