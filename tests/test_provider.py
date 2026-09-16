@@ -316,3 +316,77 @@ def test_cli_provider_reports_a_missing_login_instead_of_claiming_success(tmp_pa
     )
     assert tui.auth_step(Console(file=buf, width=200), PROVIDER_CLAUDE_CLI, st) is False
     assert "not logged in" in buf.getvalue()
+
+
+# --- two defects found by driving the real binary -----------------------------
+
+
+def test_the_credential_follows_the_config_being_edited(tmp_path, monkeypatch):
+    """`better-rlm --config /tmp/other.yaml`, then entering a key, used to write it to
+    the REPO's .env -- overwriting a live credential while editing an unrelated config.
+    A config file and its credential are a pair."""
+    from better_rlm.tui import env_for_config
+    from better_rlm.config import config_file, env_file
+
+    assert env_for_config(config_file()) == env_file()          # default is unchanged
+    scratch = tmp_path / "other.yaml"
+    assert env_for_config(scratch) == tmp_path / ".env"         # follows the config
+
+
+def test_auto_mode_shadowing_an_endpoint_is_flagged():
+    """The trap /status originally missed. auth.claude_cli_available only calls
+    shutil.which, so `auto` prefers the CLI on PATH PRESENCE ALONE -- a machine with
+    the CLI installed silently ignores a configured endpoint, which looks configured
+    and is not. Login is deliberately not consulted, because auto does not consult it.
+    """
+    import dataclasses
+    from better_rlm.tui import Status, cli_will_win, _provider_line
+
+    base = Status(
+        mode="auto", provider="anthropic", root_model="m", root_model_override="m",
+        sub_model="m", cli_path="claude", cli_available=True, cli_logged_in=True,
+        env_mode=None, env_provider=None, has_api_key=False,
+        base_url="https://api.minimax.io/anthropic",
+    )
+    assert cli_will_win(base) is True
+    assert "IGNORED" in _provider_line(base)
+
+    # A logged-OUT CLI still wins under auto: presence is the only test.
+    assert cli_will_win(dataclasses.replace(base, cli_logged_in=False)) is True
+    # No CLI on PATH: auto falls through to the API key, so the endpoint is live.
+    assert cli_will_win(dataclasses.replace(base, cli_available=False)) is False
+    assert "IGNORED" not in _provider_line(dataclasses.replace(base, cli_available=False))
+    # api pins the SDK path regardless of any CLI.
+    assert cli_will_win(dataclasses.replace(base, mode="api")) is False
+    # claude-cli is the obvious case.
+    assert cli_will_win(dataclasses.replace(base, mode="claude-cli")) is True
+    # No endpoint configured: nothing to shadow, nothing to warn about.
+    assert "IGNORED" not in _provider_line(dataclasses.replace(base, base_url=""))
+
+
+def test_the_key_written_by_the_wizard_reaches_the_client(tmp_path, monkeypatch):
+    """End to end minus the network: wizard -> .env -> load -> ApiTransport client."""
+    from better_rlm import envfile, tui
+    from better_rlm.transport import ApiTransport
+    import dataclasses, io
+    from rich.console import Console
+    from better_rlm.describe import PROVIDER_MINIMAX
+
+    env_path = tmp_path / ".env"
+    st = tui.Status(
+        mode="api", provider="anthropic", root_model="m", root_model_override="m",
+        sub_model="m", cli_path="claude", cli_available=False, cli_logged_in=None,
+        env_mode=None, env_provider=None, has_api_key=False, base_url="",
+    )
+    with patch.object(tui.Prompt, "ask", return_value="sk-fake-roundtrip"):
+        assert tui.auth_step(Console(file=io.StringIO(), quiet=True),
+                             PROVIDER_MINIMAX, st, env_path) is True
+    assert envfile.has_var(env_path, "ANTHROPIC_API_KEY")
+    assert oct(env_path.stat().st_mode & 0o777) == "0o600"
+    assert "sk-fake-roundtrip" not in envfile.fingerprint("sk-fake-roundtrip")
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake-roundtrip")
+    cfg = dataclasses.replace(load_config(), base_url=PROVIDERS[PROVIDER_MINIMAX].base_url)
+    client = ApiTransport(cfg)._sync_client()
+    assert "minimax" in str(client.base_url)
+    assert client.api_key == "sk-fake-roundtrip"
