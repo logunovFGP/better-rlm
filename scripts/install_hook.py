@@ -102,8 +102,11 @@ def probe(source: str) -> str | None:
     if r.returncode != 0:
         tail = (r.stderr or r.stdout or "").strip().splitlines()
         detail = f" -- {tail[-1].strip()}" if tail else ""
-        ver = subprocess.run([exe, "-V"], capture_output=True, text=True,
-                             timeout=10).stdout.strip()
+        try:
+            ver = subprocess.run([exe, "-V"], capture_output=True, text=True,
+                                 timeout=10).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            ver = "version unknown"   # a shim that hangs here must not lose the report
         return (f"`python3 {source}` exited {r.returncode} on a no-op payload"
                 f" ({exe}, {ver}){detail}")
     return None

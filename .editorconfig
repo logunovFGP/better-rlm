@@ -1,0 +1,16 @@
+# Paired with .gitattributes, which governs storage and checkout but not what
+# the editor types. These two must agree extension for extension or they fight
+# silently. Note the braces: valid in EditorConfig, and matching NOTHING in
+# .gitattributes, which is why that file lists one extension per line.
+root = true
+
+[*]
+end_of_line = lf
+insert_final_newline = true
+# config.yaml carries em dashes and the TUI writer was fixed twice for reading
+# it through the locale codepage; keep editors out of that class of bug.
+charset = utf-8
+
+# The CRLF set, identical to .gitattributes.
+[*.{bat,cmd,ps1,psm1,psd1,ps1xml}]
+end_of_line = crlf

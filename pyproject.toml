@@ -13,8 +13,12 @@ dependencies = [
   # The RLM engine is vendored at ./rlm (see rlm/UPSTREAM.md) — no longer a
   # dependency. These are the deps it used to pull in transitively, restated so
   # the vendored copy still resolves. Backends other than anthropic are imported
-  # lazily in rlm/clients/__init__.py; they stay declared because config.yaml
-  # still offers gemini / openai / azure_openai / portkey as providers.
+  # lazily in rlm/clients/__init__.py. They stay declared because the vendored engine
+  # still SHIPS those client modules (rlm/clients/azure_openai.py imports openai at
+  # module scope), and rlm/UPSTREAM.md keeps it usable standalone -- NOT because this
+  # server accepts those providers: auth.require_anthropic refuses every one of them,
+  # and config.yaml says so on its provider line. Do not prune these on the strength
+  # of that guard; the engine, not the config surface, is what needs them.
   "anthropic>=0.75.0",
   "google-genai>=1.56.0",
   "openai>=2.14.0",

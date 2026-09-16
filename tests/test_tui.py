@@ -406,3 +406,28 @@ def test_one_shot_typo_is_not_reported_as_success(tmp_path: Path) -> None:
     """A misspelled --one-shot command exits 2, so a scripted caller notices."""
     assert tui.main(["--config", str(tmp_path / "c.yaml"), "--one-shot", "/stauts"]) == 2
 
+
+
+def test_readme_documents_exactly_the_shipped_slash_commands() -> None:
+    """The README command table is hand-maintained; nothing tied it to SLASH_COMMANDS.
+
+    The /provider row was removed by hand when the picker went, and the next command
+    added or removed can desync the published docs from the shipped surface with a
+    green suite. test_dispatch_help_mentions_every_command pins /help, not the README.
+    """
+    import re
+
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(
+        encoding="utf-8")
+    table = readme.split("Slash commands exposed by the TUI:")[1].split("\n\n")[1]
+
+    for cmd, _desc in SLASH_COMMANDS:
+        assert cmd in table, f"{cmd} is shipped but missing from the README table"
+
+    # /exit is a documented alias of /quit, handled in _dispatch but not listed in
+    # SLASH_COMMANDS. Anything else in the table must be a real command.
+    shipped = {cmd for cmd, _desc in SLASH_COMMANDS} | {"/exit"}
+    # Backtick-delimited only: the prose in these rows says things like
+    # "host/proxy terminology", which is not a command.
+    for documented in set(re.findall(r"`(/[a-z][a-z-]*)`", table)):
+        assert documented in shipped, f"README documents {documented}, which does not exist"

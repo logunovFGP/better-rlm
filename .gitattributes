@@ -16,7 +16,7 @@
 *.psm1   text eol=crlf
 *.psd1   text eol=crlf
 *.ps1xml text eol=crlf
-*.ps     text eol=crlf
+# NOT *.ps -- that is PostScript. The four PowerShell extensions are above.
 
 # Binary files: never touch.
 *.png  binary
