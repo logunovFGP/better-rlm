@@ -167,14 +167,38 @@ git clone https://github.com/logunovFGP/better-rlm && cd better-rlm
 ```
 
 This creates `.venv_sh`, installs pinned deps, builds the `rlm-sandbox` Docker image, creates
-`.env` (empty — only needed for `mode: api`), and symlinks the `rlm-large-context` skill into
-`~/.claude/skills/`. If Docker isn't running it prints a warning and continues; jump to step 5.
+`.env` (empty — only needed for `mode: api`), symlinks the `rlm-large-context` skill into
+`~/.claude/skills/`, and links the `better-rlm` command into `~/.local/bin`. If Docker isn't
+running it prints a warning and continues; jump to step 5.
+
+> **macOS puts `~/.local/bin` on nobody's PATH.** Stock `/etc/paths` is `/usr/local/bin`,
+> `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin` — no `~/.local/bin`, unlike most Linux distros.
+> `install.sh` warns when it links into a directory your PATH doesn't contain. To fix it for
+> zsh (the macOS default shell since Catalina):
+>
+> ```bash
+> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && exec zsh
+> better-rlm where        # confirms which checkout and which config file it resolves to
+> ```
+>
+> Prefer not to touch PATH? `./run_tui.sh` and `./run_server.sh` in the checkout do the same
+> jobs and always have.
+
+**Don't need the Docker sandbox, the skill or the read hook?** `pip install better-rlm` gives
+you the server and the command with no clone — see [Install from PyPI](#install-from-pypi).
 
 **3. Register the server**
 
 ```bash
 claude mcp add -s user rlm -- bash "$(pwd)/run_server.sh"
 claude mcp list                    # 'rlm' should appear
+```
+
+If you installed from PyPI instead of cloning, the launcher is the command itself — there is no
+script path to point at:
+
+```bash
+claude mcp add -s user rlm -- better-rlm server
 ```
 
 Or run `./install.sh --register` in step 2 to do both at once. Registration is opt-in either way:
@@ -188,7 +212,22 @@ Restart your Claude session (so both the server and the skill load), then ask Cl
 `rlm_status`. It reports the resolved transport, the models actually selected, the sandbox mode,
 and whether Docker was found. Then point it at something enormous.
 
-**5. No Docker? (optional)**
+**5. Configure (optional)**
+
+Defaults work. To change the transport mode, provider or models without hand-editing
+`config.yaml`:
+
+```bash
+better-rlm                         # interactive picker
+better-rlm --one-shot /status      # print the resolved config and exit
+better-rlm --one-shot /mode-help   # compare the proxy and host transports
+better-rlm auth                    # long-lived token, for a server you leave running
+```
+
+`better-rlm` edits `config.yaml` only. The MCP server reads it at startup, so a change takes
+effect on the next `claude mcp restart rlm` — never mid-session.
+
+**6. No Docker? (optional)**
 
 Only `rlm_exec` and `rlm_query` need the sandbox; the other thirteen tools — including the free
 `rlm_grep` and `rlm_read_chunk` — never touch it. To run those two without Docker:
@@ -218,6 +257,11 @@ for trusted inputs only — see [Security](#security).
   checkout can't cross-clobber interpreters. `install.sh` rebuilds it from scratch each run.
 - OAuth reuses your Claude Code login from the **macOS keychain**. Nothing to configure.
 - Re-running `./install.sh` is safe and idempotent.
+- `better-rlm` is one global name: the last checkout whose installer ran owns it. `install.sh`
+  says so when it re-points the link, `uninstall.sh` refuses to remove a link another checkout
+  owns, and `better-rlm where` tells you which one is live.
+- Apple Silicon needs no special handling — the sandbox image builds `linux/arm64` natively and
+  the wheels are pure Python.
 
 ---
 

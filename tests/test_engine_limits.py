@@ -101,6 +101,15 @@ def test_rlm_query_reports_a_limit_as_a_failed_tool_call(monkeypatch):
     """Burying it under the '## RLM answer' header would log outcome=ok."""
     import better_rlm.server as srv
 
+    # rlm_query resolves the models BEFORE it calls run_query, and model selection
+    # maps the id through the active auth mode -- so models.select -> _mode ->
+    # resolve_auth_mode raises "No transport available" on any machine without a
+    # logged-in `claude` CLI or an ANTHROPIC_API_KEY. Stubbing run_query alone left
+    # this test passing only on a developer laptop that happened to be signed in,
+    # and failing on every CI runner, which is where it sat red and unnoticed.
+    # Patched on the auth module because models._mode imports the name lazily at
+    # call time, so the boundary covers every caller.
+    monkeypatch.setattr("better_rlm.auth.resolve_auth_mode", lambda cfg: "oauth")
     monkeypatch.setattr(srv, "run_query", lambda *a, **k: {
         "answer": "partial finding", "limit": "TimeoutExceededError",
         "limit_detail": "Timeout exceeded: 1801.0s of 1800.0s limit",
