@@ -110,7 +110,7 @@ too — it is read relative to the server's own root, not your project.
 update. Keep durable settings in your own notes, or use a checkout if you change them often.
 
 What you cannot change anywhere: the **provider**. Anthropic is the only one supported — see
-[Providers](#providers--anthropic-only-on-purpose) for why that is a correctness guard rather than
+[Providers](#providers--one-protocol-several-endpoints) for why that is a correctness guard rather than
 a preference. The TUI configures the transport mode and the three models.
 
 ---
@@ -828,27 +828,60 @@ Role→model mapping lives in one place — `better_rlm/models.py` — not hardc
 
 `rlm_status` prints both configured and resolved models for the active auth mode.
 
-### Providers — Anthropic only, on purpose
+### Providers — one protocol, several endpoints
 
-`provider` (`config.yaml` or `RLM_PROVIDER`) accepts **`anthropic`** and nothing else. Any other
-value raises `NotImplementedError` at the first model call — not at startup, so the read-only tools
-(`rlm_grep`, `rlm_exec`, `rlm_chunk_context`, `rlm_inspect_context`) keep working regardless.
+`provider` names the **wire protocol**, not the vendor, and `anthropic` is the only
+value that makes model calls. That is a correctness guard, not a preference: the
+session-window ledger, the 95% floor and ceiling-learning live in
+`transport._LedgeredTransport`, which is only in the stack when the Anthropic client
+is. A Gemini or OpenAI client would spend past a budget that refused nothing, and
+half-gated spending is worse than none because the estimate then reports headroom
+already consumed. `auth.require_anthropic` refuses them at every door.
 
-**Why the restriction exists.** The session-window budget — the spend ledger, the 95% floor under
-every completion, the resumable stop — lives in the Anthropic transport wrapper
-(`transport._LedgeredTransport`). Other vendors were served by the vendored engine's own clients,
-which never resolve a transport of ours, so those runs recorded no spend, passed no gate and
-learned no ceiling. The budget existed on paper and refused nothing, and the next `rlm_estimate`
-then reported headroom that had already been consumed. A budget that silently does not apply is
-worse than no budget, so the unsupported path is refused rather than half-served.
+**That does not mean Anthropic is the only endpoint.** Plenty of services speak the
+Anthropic messages format. Pointing the client at one keeps every safety property,
+because the client - and so the ledger - is unchanged; only the URL moves.
 
-**`anthropic` also needs no API key** — it authenticates through the local `claude` CLI login, which
-is why local runs stay zero-setup. `mode: api` with `ANTHROPIC_API_KEY` covers the case where no CLI
-keychain exists, such as a container. Re-enabling another vendor means giving it a transport that
-passes through the same ledger and floor; the engine's own clients are still vendored and ready for
-that.
+```bash
+better-rlm --one-shot /endpoint     # Anthropic | MiniMax | custom base URL
+```
 
----
+The picker writes `base_url` to `config.yaml`. `RLM_BASE_URL` overrides it at
+registration, the same way `RLM_MODE` does.
+
+#### Worked example: MiniMax
+
+```yaml
+# config.yaml
+provider: anthropic                       # protocol, not vendor - leave it
+mode: api                                 # required; see the warning below
+base_url: https://api.minimax.io/anthropic
+root_model: MiniMax-M2.7
+root_model_override: MiniMax-M3
+sub_model: MiniMax-M2.7-highspeed
+sub_context_tokens: 204800
+```
+
+```bash
+# .env
+ANTHROPIC_API_KEY=<your MiniMax key>
+```
+
+**`mode` must be `api`.** `auto` and `claude-cli` spawn the `claude` CLI, which talks
+to Anthropic whatever `base_url` says. `/status` flags that combination as `IGNORED`
+rather than letting it look configured.
+
+Two things are wrong on a non-Anthropic endpoint, both by omission rather than
+breakage:
+
+- **Cost reporting.** `COST_PER_MTOK` carries Anthropic rates only. `report_cost`
+  defaults to `false`; leave it off.
+- **Context derivation.** The engine's model table does not know these ids and returns
+  its 128000 default, which under-uses a larger window rather than overflowing it. Set
+  `sub_context_tokens` explicitly, as above.
+
+Nothing in the test suite exercises a live non-Anthropic endpoint. The wiring is
+tested; the vendor's behaviour is not.
 
 ## Built to be left running
 
@@ -968,6 +1001,7 @@ Slash commands exposed by the TUI:
 | `/status` | show current mode / provider / model / cli login state |
 | `/mode-help` | side-by-side comparison of `auto` vs `claude-cli` vs `api` (host/proxy terminology from cline-2's mode picker) |
 | `/mode` | open the mode picker; writes `mode:` back to `config.yaml` |
+| `/endpoint` | pick the Anthropic-protocol endpoint: Anthropic, MiniMax, or a custom base URL |
 | `/model`, `/override`, `/sub` | open the corresponding model picker (curated list + custom id) |
 | `/test` | run `uv run --extra dev pytest -q` — the same gate the pre-push hook runs |
 | `/test-config` | focused pytest on `tests/test_config.py`, `tests/test_auth.py`, `tests/test_transport.py` |

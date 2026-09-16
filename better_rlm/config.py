@@ -167,6 +167,18 @@ _DEFAULTS: dict[str, Any] = {
     # via the local `claude` CLI login — so it stays the default and the local path is
     # untouched. Remote deploys (no keychain in a pod) set this + the provider's key.
     "provider": "anthropic",
+    # Endpoint for the `api` transport. Empty means Anthropic's own
+    # (api.anthropic.com), which is what the SDK defaults to.
+    #
+    # `provider` names the WIRE PROTOCOL, not the vendor. Any endpoint speaking the
+    # Anthropic messages format -- MiniMax, a gateway, a proxy -- stays
+    # provider=anthropic and is reached by setting this. That matters: the
+    # session-window ledger, the 95% floor and ceiling-learning live in
+    # transport._LedgeredTransport, which is in the stack precisely because the
+    # Anthropic client is. Pointing that client elsewhere keeps every one of them;
+    # switching to a different client protocol is what loses them, which is what
+    # auth.require_anthropic refuses.
+    "base_url": "",
     # Claude Code CLI transport (see transport.py). Under claude-cli mode the server
     # drives the official `claude` CLI instead of the HTTP API, so it "just works" via
     # the existing Claude Code login — no token plumbing, no premium-model gating.
@@ -285,6 +297,7 @@ class Config:
     sub_context_tokens: int
     mode: str
     provider: str
+    base_url: str
     cli_path: str
     cli_system_prompt_mode: str
     cli_timeout_s: int
@@ -356,6 +369,10 @@ def load_config() -> Config:
         mode=str(os.getenv("RLM_MODE") or m["mode"]).strip().lower(),
         # RLM_PROVIDER env wins, same as mode, so a pod sets it at registration.
         provider=str(os.getenv("RLM_PROVIDER") or m["provider"]).strip().lower(),
+        # RLM_BASE_URL then config.yaml. ANTHROPIC_BASE_URL is deliberately NOT read
+        # here: the SDK already honours it, so reading it too would give one setting
+        # two owners that disagree, and `better-rlm where` could not say which won.
+        base_url=str(os.getenv("RLM_BASE_URL") or m["base_url"] or "").strip(),
         cli_path=str(m["cli_path"]),
         cli_system_prompt_mode=str(m["cli_system_prompt_mode"]),
         cli_timeout_s=int(m["cli_timeout_s"]),

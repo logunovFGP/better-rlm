@@ -121,10 +121,17 @@ def resolve_auth_mode(cfg: Config) -> str:
     )
 
 
-def make_client(async_: bool = False):
+def make_client(async_: bool = False, base_url: str = ""):
     """Build an Anthropic SDK client for the **api** transport, from ANTHROPIC_API_KEY
     (used by transport.ApiTransport). The claude-cli transport does NOT use this — the
-    CLI authenticates itself. SDK retries are disabled (ratelimit.py owns retry)."""
+    CLI authenticates itself. SDK retries are disabled (ratelimit.py owns retry).
+
+    ``base_url`` points the client at an Anthropic-protocol endpoint other than
+    Anthropic's own — MiniMax, a gateway, a proxy. Empty means api.anthropic.com.
+    Passed explicitly rather than left to the SDK's own ANTHROPIC_BASE_URL lookup so
+    that config.yaml is the single visible owner of the setting; an env var read
+    behind our back would make ``better-rlm where`` unable to say where calls go.
+    """
     key = _clean_secret(os.getenv("ANTHROPIC_API_KEY"))
     if not key:
         raise RuntimeError(
@@ -132,7 +139,10 @@ def make_client(async_: bool = False):
             "(or the default 'auto') to reuse your Claude Code login instead."
         )
     cls = anthropic.AsyncAnthropic if async_ else anthropic.Anthropic
-    return cls(api_key=key, timeout=_CLIENT_TIMEOUT, max_retries=_SDK_MAX_RETRIES)
+    kwargs = {"api_key": key, "timeout": _CLIENT_TIMEOUT, "max_retries": _SDK_MAX_RETRIES}
+    if (base_url or "").strip():
+        kwargs["base_url"] = base_url.strip()
+    return cls(**kwargs)
 
 
 def patch_engine() -> None:

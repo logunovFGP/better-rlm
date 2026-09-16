@@ -91,6 +91,29 @@ ban:
     its own copy of installer or server logic is the actual regression here --
     two implementations of auth, drifting apart.
 
+### Endpoints vs providers
+
+`provider` is the **wire protocol**. `auth.require_anthropic` refuses everything but
+`anthropic` because `transport._LedgeredTransport` -- the session-window ledger, the
+95% floor, ceiling-learning -- is only in the stack when the Anthropic client is.
+That guard stays.
+
+It was once read as "Anthropic the company is the only option", and `b7282f9` removed
+the TUI's provider picker on that reading. The picker's real defect was different: it
+offered four vendors whose selection wrote a config the server then rejected at the
+first model call. `cfg.base_url` + `/endpoint` replace it. Every entry is
+`provider=anthropic` and differs only in URL, so nothing about the budget changes.
+
+Rules for anything added here:
+
+  * **an endpoint must speak the Anthropic messages format.** A row needing a
+    different client belongs behind `require_anthropic`, not in the picker;
+  * **`base_url` is passed to `make_client` explicitly**, never left to the SDK's own
+    `ANTHROPIC_BASE_URL` lookup. One setting, one visible owner, so `/status` and
+    `better-rlm where` can state where calls go;
+  * **`base_url` without `mode: api` does nothing** -- the `claude` CLI ignores it.
+    `/status` renders that combination as `IGNORED` rather than letting it look live.
+
 ### Two shapes: checkout and wheel
 
 `better_rlm.config.IS_CHECKOUT` is the single probe (is there a `pyproject.toml`

@@ -139,10 +139,94 @@ def all_modes() -> tuple[str, ...]:
     return VALID_MODES
 
 
-# There is no provider catalogue here on purpose. ``config.PROVIDER_KEY_ENV`` was
-# deleted in f855b9c ("drop the provider key map nothing reads any more") and
-# ``auth.require_anthropic`` raises on every provider but anthropic at every door that
-# leads to a model call -- only its transport passes through the session-window ledger,
-# so a Gemini/OpenAI run would record no spend and pass no gate. A picker offering those
-# four would write a config.yaml the server refuses. The TUI shows the configured
-# provider and flags a non-anthropic value; it does not offer to set one.
+# -- Endpoint catalogue --------------------------------------------------------
+#
+# What the picker offers is ENDPOINTS, not vendors, and the distinction is the whole
+# reason this came back after b7282f9 removed the old provider picker.
+#
+# ``provider`` names the wire protocol. ``auth.require_anthropic`` refuses anything but
+# ``anthropic`` because the session-window ledger, the 95% floor and ceiling-learning
+# live in ``transport._LedgeredTransport``, which is only in the stack when the
+# Anthropic client is -- a Gemini or OpenAI client would spend past a budget that
+# refused nothing. That guard is correct and stays.
+#
+# But it was over-read as "Anthropic the company is the only option", and the old
+# picker made the opposite error: it offered four vendors whose selection produced a
+# config.yaml the server then rejected at the first model call. Both miss that plenty
+# of endpoints speak the Anthropic messages format. Pointing the Anthropic client at
+# one keeps every safety property, because the client -- and therefore the ledger -- is
+# unchanged. Only the URL moves.
+#
+# So: every entry here is provider=anthropic. The picker writes base_url.
+
+ENDPOINT_ANTHROPIC = "anthropic"
+ENDPOINT_MINIMAX = "minimax"
+ENDPOINT_CUSTOM = "custom"
+
+
+@dataclass(frozen=True)
+class EndpointDescription:
+    """One row of the endpoint picker."""
+
+    label: str
+    base_url: str          # "" means the SDK default, api.anthropic.com
+    key_env: str
+    note: str
+
+
+ENDPOINTS: dict[str, EndpointDescription] = {
+    ENDPOINT_ANTHROPIC: EndpointDescription(
+        label="Anthropic",
+        base_url="",
+        key_env="ANTHROPIC_API_KEY",
+        note="The default. Works keyless in claude-cli/auto mode via your Claude Code login.",
+    ),
+    ENDPOINT_MINIMAX: EndpointDescription(
+        label="MiniMax",
+        base_url="https://api.minimax.io/anthropic",
+        key_env="ANTHROPIC_API_KEY",
+        note="Anthropic-compatible. Needs mode=api and a MiniMax key; set models to "
+             "MiniMax ids (MiniMax-M2.7, MiniMax-M3, ...).",
+    ),
+    ENDPOINT_CUSTOM: EndpointDescription(
+        label="Custom endpoint",
+        base_url="",
+        key_env="ANTHROPIC_API_KEY",
+        note="Any other endpoint speaking the Anthropic messages format: a gateway, a "
+             "proxy, a self-hosted model server.",
+    ),
+}
+
+
+def describe_endpoint(endpoint: str) -> EndpointDescription:
+    """Row for one endpoint id; a safe placeholder for an unknown one."""
+    e = (endpoint or "").strip().lower()
+    info = ENDPOINTS.get(e)
+    if info is None:
+        return EndpointDescription(
+            label=endpoint or "(unknown)",
+            base_url="",
+            key_env="ANTHROPIC_API_KEY",
+            note="Not a known endpoint id; pick one from the list.",
+        )
+    return info
+
+
+def all_endpoints() -> tuple[str, ...]:
+    """Endpoint ids the picker offers, in declaration order."""
+    return tuple(ENDPOINTS.keys())
+
+
+def endpoint_for_base_url(base_url: str) -> str:
+    """Which catalogue entry a configured base_url corresponds to.
+
+    Lets /status and the picker show the current choice by name instead of making
+    the operator recognise a URL. A trailing slash is not a different endpoint.
+    """
+    u = (base_url or "").strip().rstrip("/")
+    if not u:
+        return ENDPOINT_ANTHROPIC
+    for eid, info in ENDPOINTS.items():
+        if info.base_url and info.base_url.rstrip("/") == u:
+            return eid
+    return ENDPOINT_CUSTOM
