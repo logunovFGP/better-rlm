@@ -30,6 +30,13 @@ dependencies = [
   "python-dotenv>=1.0",
 ]
 
+[project.scripts]
+# The global operator command. Bound to the checkout it was installed from --
+# the shebang setuptools writes points at that checkout's venv interpreter, so
+# the name resolves to one checkout: the last installer to link it. See
+# CLAUDE.md "Design boundary" for why that trade is accepted.
+better-rlm = "src.cli:main"
+
 [project.optional-dependencies]
 pdf = ["pypdf>=4.0"]
 dev = ["pytest>=8.0"]

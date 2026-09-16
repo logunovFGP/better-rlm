@@ -70,17 +70,35 @@ TUI's `/mode-help` for the full comparison.
 
 The MCP wiring (`claude mcp add rlm -- bash /abs/path/run_server.sh`) is a
 **fixed pointer** to this checkout. It starts `python -m src.server`, which
-reads `./config.yaml` relative to its own location. There is no global
-`better-rlm` binary, no `~/.config/better-rlm/` store, no console-script
-entry point in `pyproject.toml`. The TUI edits `config.yaml`; the next
-server start reads it. That separation is deliberate:
+reads `./config.yaml` relative to its own location. The TUI edits
+`config.yaml`; the next server start reads it. Two properties hold
+unconditionally and are not up for trade:
 
-  * multiple checkouts can coexist on one machine (each MCP registration
-    carries its own absolute path);
-  * diffs of `config.yaml` show every config change that ever shipped;
+  * diffs of `config.yaml` show every config change that ever shipped --
+    there is no `~/.config/better-rlm/` store and must not be one;
   * the explicit `claude mcp restart rlm` is the only restart surface --
     no implicit "alias does the right thing" surprise.
 
-Do not introduce a global config store. Do not install a `better-rlm`
-shim onto PATH. If a future install change wants either, it has to justify
-the breakage to those three properties first.
+**`better-rlm` on PATH: what it costs.** This section previously banned a
+console-script entry point outright, to protect a third property -- that
+multiple checkouts coexist on one machine. `[project.scripts]` plus the
+`~/.local/bin` link in `install.sh` breaks that property *for the global name
+only*, and deliberately: an operator signing in for the first time should not
+have to know where the checkout lives.
+
+The rule that replaces the ban:
+
+  * **the global name resolves to one checkout** -- whichever installer ran
+    last. `install.sh` reports the re-point instead of doing it silently, and
+    `uninstall.sh` refuses to remove a link owned by a different checkout;
+  * **the per-checkout scripts stay the addressable path.** `./install.sh`,
+    `./run_tui.sh` and `./run_server.sh` are how you reach a *specific*
+    checkout, and the MCP registration still carries its own absolute path --
+    so coexistence survives everywhere except the bare word `better-rlm`;
+  * **`better-rlm` dispatches, it never reimplements.** `src/cli.py` maps a
+    subcommand onto the script that already does that job. A subcommand that
+    grows its own copy of installer or server logic is the actual regression
+    here -- two implementations of auth, drifting apart.
+
+A global config store is still banned. So is a `better-rlm` that does work of
+its own rather than handing off to a launcher.

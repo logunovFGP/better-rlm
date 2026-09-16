@@ -852,6 +852,31 @@ Launch it from the checkout root:
 ./run_tui.sh --one-shot /mode-help          # show the host/proxy comparison
 ```
 
+#### `better-rlm` — the same thing from anywhere
+
+`install.sh` links a `better-rlm` command into `~/.local/bin` (override with
+`XDG_BIN_HOME`), so auth and config do not require knowing where the checkout is:
+
+```bash
+better-rlm              # config TUI
+better-rlm auth         # sign the claude CLI in, store the token in .env
+better-rlm config       # same as bare
+better-rlm install      # re-run the installer (flags pass through: --register, --hook)
+better-rlm server       # run the MCP server in this terminal
+```
+
+Every subcommand shells out to the script it names — `auth` *is* `install.sh --auth`.
+Nothing new happens under the global name.
+
+**One name, one checkout.** The command's shebang points at the venv of the checkout
+whose installer ran last, so `better-rlm` acts on that one. The installer says so when
+it re-points the link, and `uninstall.sh` will not remove a link another checkout owns.
+To drive a specific checkout, use its `./run_tui.sh` / `./run_server.sh` — those are
+unambiguous, and the MCP registration still carries its own absolute path.
+
+On Windows nothing is added to `PATH`: the installer creates
+`.venv_windows\Scripts\better-rlm.exe` and you call it, or `run_tui.cmd`, by path.
+
 On Windows use `run_tui.cmd`, the analog of `run_server.cmd` above — it resolves
 `.venv_windows\Scripts\python.exe` and sets `PYTHONUTF8=1` so the picker's
 box-drawing characters render:
