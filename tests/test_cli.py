@@ -115,11 +115,37 @@ def test_installed_install_refuses_and_says_why(installed, capsys):
     assert "git clone" in err
 
 
-def test_where_reports_the_mode_and_the_paths(capsys):
+def test_where_reports_the_checkout_shape(checkout, capsys):
     assert cli.main(["where"]) == 0
     out = capsys.readouterr().out
     assert "checkout" in out
     assert "config:" in out and "env:" in out
+
+
+def test_where_reports_the_installed_shape(installed, capsys):
+    """Pinned explicitly rather than left to ambient state: run the suite against a
+    non-editable install and an unfixtured test would flip to the other branch and
+    fail for environmental reasons."""
+    assert cli.main(["where"]) == 0
+    out = capsys.readouterr().out
+    assert "installed (pip)" in out
+
+
+def test_installed_server_rejects_arguments_instead_of_dropping_them(installed, capsys):
+    """A checkout forwards these to run_server.sh. Silently voiding them here would
+    make one command mean two different things."""
+    with patch("better_rlm.server.main") as server_main:
+        assert cli.main(["server", "--port", "9"]) == 2
+    server_main.assert_not_called()
+    assert "takes no arguments" in capsys.readouterr().err
+
+
+def test_no_checkout_message_names_the_subcommand_that_was_typed(installed, capsys, monkeypatch):
+    """Hardcoding 'install' meant a future _SCRIPTS entry would report a command
+    nobody ran."""
+    monkeypatch.setitem(cli._SCRIPTS, "hook", ("install.sh", ["--hook"], "install.ps1", ["-Hook"]))
+    assert cli.main(["hook"]) == 1
+    assert "better-rlm hook needs a checkout" in capsys.readouterr().err
 
 
 # --- shared -------------------------------------------------------------------

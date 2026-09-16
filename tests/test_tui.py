@@ -97,11 +97,12 @@ def test_load_status_reads_config_yaml(tmp_path: Path) -> None:
     cfg = tmp_path / "config.yaml"
     cfg.write_text("mode: api\nprovider: openai\nroot_model: gpt-4o\n"
                    "root_model_override: gpt-4o-mini\nsub_model: gpt-4o-mini\n")
-    with patch.object(tui, "PKG_ROOT", tmp_path):
-        # sub_path: sub-MODEL-related constants come from config.py;
-        # we just need ANY value to come back. The fixture values are
-        # placeholders -- the test is about the keys the TUI reads.
-        st = load_status(cfg)
+    # sub_path: sub-MODEL-related constants come from config.py; we just need ANY
+    # value to come back. The fixture values are placeholders -- the test is about
+    # the keys the TUI reads. (No PKG_ROOT patch: load_status takes the path
+    # explicitly, and the TUI resolves config through config_file() now, so patching
+    # tui.PKG_ROOT changed nothing and implied coverage that was not there.)
+    st = load_status(cfg)
     assert st.mode == "api"
     assert st.provider == "openai"
     assert st.root_model == "gpt-4o"
@@ -236,8 +237,8 @@ def test_dispatch_status_runs_against_disk_config(quiet_console, tmp_path) -> No
     p = tmp_path / "config.yaml"
     p.write_text("mode: api\nprovider: openai\nroot_model: m1\n"
                  "root_model_override: m2\nsub_model: m3\n")
-    with patch.object(tui, "PKG_ROOT", tmp_path):
-        _dispatch("/status", quiet_console, p)
+    # No PKG_ROOT patch -- _dispatch takes the config path explicitly.
+    _dispatch("/status", quiet_console, p)
 
 
 def test_dispatch_mode_pick_keeps_current(quiet_console, tmp_path, monkeypatch) -> None:

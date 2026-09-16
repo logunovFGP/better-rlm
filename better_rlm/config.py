@@ -46,8 +46,21 @@ def config_file() -> Path:
 
 
 def env_file() -> Path:
-    """Where credentials are read from. Same rule as config_file()."""
-    return PKG_ROOT / ".env" if IS_CHECKOUT else USER_DIR / ".env"
+    """Where credentials are read from. Same rule as config_file().
+
+    The existence check is not cosmetic symmetry. Someone who pip-installs, runs
+    `better-rlm auth` into ~/.rlm/.env, and then clones the repo to contribute
+    would otherwise land on a checkout .env that does not exist -- credentials
+    silently ignored while config.yaml IS still read from ~/.rlm, so the config
+    looks right and the first model call fails with a transport error.
+
+    install.sh creates .env from .env.example on every run, so a real checkout
+    almost always has one; an empty file there is an explicit "use this
+    checkout's", and it wins.
+    """
+    if IS_CHECKOUT and (PKG_ROOT / ".env").is_file():
+        return PKG_ROOT / ".env"
+    return USER_DIR / ".env"
 
 
 load_dotenv(env_file())  # no-op if the file is absent
