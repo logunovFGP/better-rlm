@@ -58,9 +58,18 @@ def test_license_declares_no_classifier_alongside_the_spdx_expression():
 
 
 def test_this_checkout_is_detected_as_a_checkout():
+    """Ambient assertions only on what every clone has.
+
+    pyproject.toml and config.yaml are tracked, so they are present in any checkout
+    including a fresh CI one. `.env` is NOT: it is gitignored and created by
+    install.sh, so a clone that has never been installed has none and env_file()
+    correctly falls back to ~/.rlm/.env. Asserting the repo path here passed on a
+    developer machine and failed on every runner -- the same ambient-state trap that
+    kept test_rlm_query_reports_a_limit_as_a_failed_tool_call red for weeks. The
+    resolution rule is pinned hermetically in the two tests below instead.
+    """
     assert cfgmod.IS_CHECKOUT is True
     assert cfgmod.config_file() == cfgmod.PKG_ROOT / "config.yaml"
-    assert cfgmod.env_file() == cfgmod.PKG_ROOT / ".env"
 
 
 def test_installed_layout_falls_back_to_the_user_directory(monkeypatch, tmp_path):
