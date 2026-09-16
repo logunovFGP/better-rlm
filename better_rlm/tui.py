@@ -55,6 +55,12 @@ from .config import (
     config_file,
 )
 from .describe import (
+    ENDPOINT_CUSTOM,
+    ENDPOINTS,
+    all_endpoints,
+    describe_endpoint,
+    endpoint_for_base_url,
+    MODE_API,
     MODE_AUTO,
     VALID_MODES,
     all_modes,
@@ -88,6 +94,7 @@ class Status:
     env_mode: str | None        # set when RLM_MODE override is in effect
     env_provider: str | None    # set when RLM_PROVIDER override is in effect
     has_api_key: bool
+    base_url: str = ""          # "" = Anthropic's own endpoint (the SDK default)
 
     def mode_is_pinned(self) -> bool:
         """True when an RLM_MODE env var overrides config.yaml.
@@ -119,6 +126,9 @@ def load_status(config_path: Path | None = None) -> Status:
     root_model_override = _read("root_model_override", MODEL_OPUS)
     sub_model = _read("sub_model", MODEL_HAIKU)
     cli_path = _read("cli_path", "claude")
+    # RLM_BASE_URL wins on disk the same way RLM_MODE does, so what /status shows is
+    # what the next server start resolves -- not what config.yaml alone says.
+    base_url = (os.getenv("RLM_BASE_URL") or _read("base_url", "")).strip()
 
     env_mode = os.getenv("RLM_MODE")
     env_provider = os.getenv("RLM_PROVIDER")
@@ -155,7 +165,22 @@ def load_status(config_path: Path | None = None) -> Status:
         env_mode=env_mode,
         env_provider=env_provider,
         has_api_key=has_api_key,
+        base_url=base_url,
     )
+
+
+def _endpoint_line(st: Status) -> str:
+    """Where model calls actually go, named rather than shown as a bare URL.
+
+    Flags the one combination that silently does nothing: a base_url set while mode
+    still spawns the `claude` CLI, which talks to Anthropic whatever this says.
+    """
+    name = endpoint_for_base_url(st.base_url)
+    where = st.base_url or "api.anthropic.com (default)"
+    label = describe_endpoint(name).label
+    if st.base_url and st.mode != MODE_API:
+        return f"{label} — {where}   IGNORED: mode={st.mode} uses the claude CLI"
+    return f"{label} — {where}"
 
 
 def render_status(st: Status) -> str:
@@ -194,6 +219,7 @@ def render_status(st: Status) -> str:
     return (
         f"mode:           {st.mode}\n"
         f"provider:       {st.provider}{bad_provider}\n"
+        f"endpoint:       {_endpoint_line(st)}\n"
         f"root_model:     {st.root_model}\n"
         f"override_model: {st.root_model_override}\n"
         f"sub_model:      {st.sub_model}\n"
@@ -304,6 +330,48 @@ def pick_mode(console: Console, current: str) -> str:
     )
 
 
+def pick_endpoint(console: Console, current_base_url: str) -> str:
+    """Endpoint picker: which Anthropic-protocol endpoint the api transport calls.
+
+    This is the picker b7282f9 removed, rebuilt around what actually works. The old
+    one offered vendors (gemini, openai, azure, portkey) whose selection wrote a
+    config.yaml ``auth.require_anthropic`` then rejected at the first model call. Every
+    row here is provider=anthropic and differs only in URL, so the ledger, the 95%
+    floor and ceiling-learning survive the switch.
+
+    Returns an endpoint id, ``PICKER_CUSTOM`` for a hand-typed URL, or a sentinel.
+    """
+    current = endpoint_for_base_url(current_base_url)
+    options: list[tuple[str, str]] = []
+    for eid in all_endpoints():
+        if eid == ENDPOINT_CUSTOM:
+            continue          # reachable through the custom entry below, not as a row
+        d = ENDPOINTS[eid]
+        where = d.base_url or "api.anthropic.com (SDK default)"
+        options.append((eid, f"{where} - {d.note}"))
+    console.print()
+    console.print(
+        Panel(
+            "The [bold]provider[/bold] stays `anthropic`: it names the wire protocol, not the\n"
+            "vendor. These endpoints all speak the Anthropic messages format, so the\n"
+            "session-window ledger and budget floor keep working across the switch.\n\n"
+            "[yellow]Anything but Anthropic needs [bold]mode: api[/bold][/yellow] - `auto` and\n"
+            "`claude-cli` spawn the `claude` CLI, which talks to Anthropic regardless.",
+            title="[bold]Endpoint[/bold]",
+            border_style="cyan",
+            expand=False,
+        )
+    )
+    return _prompt_choice(
+        console,
+        title=f"Endpoint (current: {current})",
+        options=options,
+        current=current,
+        allow_custom=True,
+        custom_hint="an Anthropic-compatible base URL",
+    )
+
+
 def render_mode_compare() -> str:
     """Two-column compare block: ``render_mode_compare``-equivalent.
 
@@ -383,6 +451,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/status",          "show current mode / provider / model / cli login"),
     ("/mode-help",       "compare the three transport modes side-by-side"),
     ("/mode",            "open the mode picker (writes config.yaml)"),
+    ("/endpoint",        "pick the Anthropic-protocol endpoint: Anthropic, MiniMax, custom"),
     ("/model",           "open the root-model picker (writes config.yaml)"),
     ("/override",        "open the override-model picker (writes config.yaml)"),
     ("/sub",             "open the sub-model picker (writes config.yaml)"),
@@ -493,6 +562,29 @@ def _dispatch(
             console.print("[grey50]no change[/grey50]")
         elif choice in VALID_MODES:
             _save(config_path, {"mode": choice}, console)
+        return True
+
+    if cmd == "/endpoint":
+        st = load_status(config_path)
+        choice = pick_endpoint(console, st.base_url)
+        if choice in (PICKER_KEEP, ACTION_CANCEL):
+            console.print("[grey50]no change[/grey50]")
+            return True
+        if choice == PICKER_CUSTOM:
+            url = Prompt.ask("[bold]base URL[/bold]", console=console).strip()
+            if not url:
+                console.print("[grey50]empty value, no change[/grey50]")
+                return True
+        else:
+            url = describe_endpoint(choice).base_url
+        _save(config_path, {"base_url": url}, console)
+        if url and st.mode != MODE_API:
+            # Writing base_url while mode is auto/claude-cli is the one way to leave the
+            # TUI with a config that silently ignores what was just set.
+            console.print(
+                f"[yellow]mode is {st.mode!r}: the `claude` CLI talks to Anthropic and "
+                f"ignores this endpoint. Run [bold]/mode[/bold] and pick `api`.[/yellow]"
+            )
         return True
 
     if cmd in ("/model", "/override", "/sub"):
