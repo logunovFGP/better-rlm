@@ -1,8 +1,15 @@
 name: Release
 
-# Manual only, by request. There is deliberately no push, tag or schedule trigger here:
-# a release that can fire from a merge would tag and publish whatever just landed.
-# tests/test_release.py fails if another trigger is ever added.
+# Two ways in, and the difference is who types the version.
+#
+#   git tag v0.4.0 && git push origin v0.4.0    -> verify, build, release, PyPI
+#   Actions -> Release -> Run workflow          -> same, plus a dry_run option
+#
+# There is still deliberately NO `push: branches` and no `schedule` trigger: a
+# release that fires from a merge would tag and publish whatever just landed, and a
+# PyPI version number cannot be reclaimed afterwards. Pushing a version tag is an
+# explicit act by a human; landing a PR is not. tests/test_release.py fails if a
+# branch, a schedule, or any other trigger is ever added.
 on:
   workflow_dispatch:
     inputs:
@@ -14,6 +21,16 @@ on:
         description: 'Verify and build only: tag nothing, publish nothing'
         type: boolean
         default: false
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'   # v1.2.3 only — not v1.2, not v1.2.3-rc1
+
+# One release per version at a time. Without this, two dispatches seconds apart both
+# clear the "already released" gate before either has created the release, and both
+# reach the one step in this workflow that cannot be undone.
+concurrency:
+  group: release-${{ inputs.version || github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   contents: write   # create the tag and the release; nothing else
@@ -40,7 +57,11 @@ jobs:
     env:
       # Passed as environment, never interpolated into a shell line: ${{ }} inside a run
       # block is textual substitution, so a crafted input would run as code.
-      VERSION: ${{ inputs.version }}
+      #
+      # workflow_dispatch supplies a bare "1.2.3"; a tag push supplies "v1.2.3" in
+      # github.ref_name. The first step below strips the prefix so every later step
+      # sees one normalised form.
+      VERSION: ${{ inputs.version || github.ref_name }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v5
@@ -51,10 +72,14 @@ jobs:
 
       - name: Refuse a malformed version
         run: |
-          case "$VERSION" in
+          # Strip the tag's leading v, then validate. Written back to GITHUB_ENV so
+          # every step after this one compares the same bare "1.2.3" against VERSION.
+          v="${VERSION#v}"
+          case "$v" in
             [0-9]*.[0-9]*.[0-9]*) ;;
             *) echo "::error::version must look like 1.2.3, got '$VERSION'"; exit 1 ;;
           esac
+          echo "VERSION=$v" >> "$GITHUB_ENV"
 
       - name: Refuse a version the VERSION file does not declare
         run: |
@@ -71,7 +96,10 @@ jobs:
           if gh release view "v$VERSION" >/dev/null 2>&1; then
             echo "::error::release v$VERSION already exists"; exit 1
           fi
-          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+          # On a tag push the tag necessarily exists -- it is what triggered this run.
+          # Only a manual dispatch has to refuse a tag that is already there.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] \
+             && git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
             echo "::error::tag v$VERSION already exists"; exit 1
           fi
 
