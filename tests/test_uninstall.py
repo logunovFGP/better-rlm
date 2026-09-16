@@ -22,6 +22,9 @@ POSIX_ARTEFACTS = {
     "editable install": "rlm_mcp.egg-info",
     "env file": ".env.example",
     "skill link": ".claude/skills",
+    # The global `better-rlm` name. Orphaning it is worse than orphaning a venv:
+    # the link outlives the checkout and then dangles on PATH.
+    "better-rlm command link": "bin/better-rlm",
     "mcp registration": "mcp remove",
     "checkout ownership probe": "run_server.sh",
     "verify gate": "core.hooksPath",
