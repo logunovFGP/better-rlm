@@ -56,18 +56,28 @@ elif [ -e "$LINK" ] && [ ! -L "$LINK" ]; then
   echo "           Run this checkout with $DIR/run_tui.sh instead."
 else
   PREV="$(readlink "$LINK" 2>/dev/null || true)"
-  mkdir -p "$BIN_DIR"
-  ln -sfn "$SHIM" "$LINK"
-  if [ -n "$PREV" ] && [ "$PREV" != "$SHIM" ]; then
-    echo "  NOTE: 'better-rlm' pointed at another checkout and now points here."
-    echo "        was: $PREV"
+  # Non-fatal, for the same reason the Docker step below is: this script runs under
+  # `set -e`, and an unwritable $BIN_DIR (read-only volume, root-owned ~/.local,
+  # XDG_BIN_HOME pointing somewhere odd) would otherwise abort the installer here --
+  # skipping the sandbox image, .env, the skill links, the hook and the registration
+  # line, none of which need this link at all. A convenience shim must never be able
+  # to take the whole install down with it.
+  if ! mkdir -p "$BIN_DIR" 2>/dev/null || ! ln -sfn "$SHIM" "$LINK" 2>/dev/null; then
+    echo "  WARNING: could not link into $BIN_DIR (not writable?) — skipped."
+    echo "           Everything else installed fine. Use $DIR/run_tui.sh, or set"
+    echo "           XDG_BIN_HOME to a writable directory and re-run."
+  else
+    if [ -n "$PREV" ] && [ "$PREV" != "$SHIM" ]; then
+      echo "  NOTE: 'better-rlm' pointed at another checkout and now points here."
+      echo "        was: $PREV"
+    fi
+    echo "  linked $LINK -> $SHIM"
+    case ":$PATH:" in
+      *":$BIN_DIR:"*) ;;
+      *) echo "  WARNING: $BIN_DIR is not on PATH — add it to your shell profile:"
+         echo "             export PATH=\"$BIN_DIR:\$PATH\"" ;;
+    esac
   fi
-  echo "  linked $LINK -> $SHIM"
-  case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *) echo "  WARNING: $BIN_DIR is not on PATH — add it to your shell profile:"
-       echo "             export PATH=\"$BIN_DIR:\$PATH\"" ;;
-  esac
 fi
 
 echo "==> Docker sandbox image (rlm-sandbox)"

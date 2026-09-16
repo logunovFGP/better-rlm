@@ -102,6 +102,19 @@ def test_shared_state_is_opt_in_on_both_platforms(sh, ps1):
     assert "-PurgeData" in ps1 and "-Image" in ps1
 
 
+def test_better_rlm_link_removal_actually_removes_and_is_guarded(sh):
+    """The artefact table above only proves the string 'bin/better-rlm' appears
+    somewhere in the file -- which the SHIM variable assignment satisfies on its own.
+    Delete the `run rm -f` and the table check still passes while every uninstall
+    strands a dangling symlink on PATH. Scope the assertion to the section."""
+    section = sh.split("# 2) better-rlm command")[1].split("# 3)")[0]
+    assert "run rm -f" in section, "the better-rlm link is never removed"
+    # readlink before rm: another checkout may legitimately own the global name.
+    assert section.index("readlink") < section.index("run rm -f"), (
+        "the link is removed without first proving this checkout owns it"
+    )
+
+
 def test_registration_removal_is_guarded_by_the_checkout_path(sh, ps1):
     # Both installers refuse to hijack a registration owned by another checkout, which is what
     # lets checkouts coexist. An unguarded `claude mcp remove` here would uninstall whichever

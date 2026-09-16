@@ -86,6 +86,35 @@ def test_missing_config_yields_defaults_not_an_error(monkeypatch, tmp_path):
     assert cfgmod._load_yaml() == {}
 
 
+def test_checkout_without_an_env_file_falls_back_to_the_user_copy(monkeypatch, tmp_path):
+    """pip-install, `better-rlm auth` into ~/.rlm/.env, then clone to contribute.
+    Without the fallback the token is silently ignored while config.yaml IS still
+    read from ~/.rlm -- config looks right, first model call fails on transport."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(cfgmod, "IS_CHECKOUT", True)
+    monkeypatch.setattr(cfgmod, "PKG_ROOT", repo)
+    monkeypatch.setattr(cfgmod, "USER_DIR", tmp_path / "user")
+    assert cfgmod.env_file() == tmp_path / "user" / ".env"
+    # An .env in the checkout wins, even an empty one: that is an explicit choice.
+    (repo / ".env").write_text("")
+    assert cfgmod.env_file() == repo / ".env"
+
+
+def test_config_and_env_resolve_by_the_same_rule(monkeypatch, tmp_path):
+    # env_file()'s docstring says "same rule as config_file()". Assert it, so the
+    # two cannot drift into the asymmetry they started with.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(cfgmod, "IS_CHECKOUT", True)
+    monkeypatch.setattr(cfgmod, "PKG_ROOT", repo)
+    monkeypatch.setattr(cfgmod, "USER_DIR", tmp_path / "user")
+    for resolve, name in ((cfgmod.config_file, "config.yaml"), (cfgmod.env_file, ".env")):
+        assert resolve().parent == tmp_path / "user", name
+        (repo / name).write_text("")
+        assert resolve().parent == repo, name
+
+
 def test_user_dir_is_the_existing_rlm_directory():
     """Not a new ~/.config/better-rlm store — the same ~/.rlm that already holds
     contexts, logs, cache and the budget ledger. CLAUDE.md bans a second one."""

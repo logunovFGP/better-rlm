@@ -137,16 +137,31 @@ def main(argv: list[str] | None = None) -> int:
         return _where()
 
     if args and args[0] == "server":
-        return _run_script("server", args[1:]) if IS_CHECKOUT else _serve()
+        if IS_CHECKOUT:
+            return _run_script("server", args[1:])
+        if args[1:]:
+            # Silently dropping these would make the same command mean two things:
+            # forwarded to run_server.sh from a checkout, void from a wheel.
+            print(
+                f"better-rlm server takes no arguments when installed from a wheel "
+                f"(got {' '.join(args[1:])!r}). The server reads config.yaml and the "
+                f"environment; see `better-rlm where` for which files those are.",
+                file=sys.stderr,
+            )
+            return 2
+        return _serve()
 
     if args and args[0] in _SCRIPTS:
         if IS_CHECKOUT:
             return _run_script(args[0], args[1:])
         if args[0] == "auth":
             return _auth_without_a_checkout()
+        # Names the subcommand the user actually typed. Hardcoding "install" here
+        # meant a future _SCRIPTS entry would report a command nobody ran.
         print(
-            "better-rlm install needs a checkout -- it builds a venv, the Docker\n"
-            "sandbox image and the skill links, none of which exist in a pip install.\n"
+            f"better-rlm {args[0]} needs a checkout -- it drives install.sh, which\n"
+            "builds a venv, the Docker sandbox image and the skill links, none of\n"
+            "which exist in a pip install.\n"
             "  git clone https://github.com/logunovFGP/better-rlm && cd better-rlm\n"
             "  ./install.sh",
             file=sys.stderr,
@@ -156,8 +171,12 @@ def main(argv: list[str] | None = None) -> int:
     # Bare invocation, `config`, or any TUI flag (--config / --one-shot).
     if args and args[0] == "config":
         args = args[1:]
-    # Lazy import: tui pulls rich and the engine's import graph, which a bare
-    # `better-rlm --help`, `where` or `auth` must not pay for.
+    # Lazy import: tui pulls rich and the engine's import graph -- seconds of it --
+    # which `--help`, `where` and `auth` must not pay for. Note that .config above
+    # IS imported at module scope and does read .env: that cost is milliseconds, and
+    # hoisting it into each function would break the module-attribute seams
+    # (cli.IS_CHECKOUT, cli.PKG_ROOT) that the tests patch. The engine graph is the
+    # cost worth deferring; config is not.
     from .tui import main as tui_main
 
     return tui_main(args)
