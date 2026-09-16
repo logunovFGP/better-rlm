@@ -167,26 +167,28 @@ def test_pick_mode_cancel_via_q(quiet_console, monkeypatch) -> None:
     assert out == ACTION_CANCEL
 
 
-def test_provider_is_shown_but_never_offered_as_a_picker(quiet_console, tmp_path) -> None:
-    """There is no /provider picker, on purpose.
+def test_picker_never_offers_a_provider_the_server_would_refuse(quiet_console, tmp_path) -> None:
+    """The picker is back, and this is the property that lets it be.
 
-    auth.require_anthropic raises NotImplementedError on every provider but anthropic at
-    every door that leads to a model call -- only its transport passes through the
-    session-window ledger, so the others record no spend and pass no gate. A picker that
-    writes provider=openai into config.yaml is a trap: the write succeeds and the next
-    rlm_query is what fails. /status still SHOWS the value (see the flag test below).
+    It used to assert `/provider` must not exist. b7282f9 removed the original picker
+    because it offered four vendors whose selection wrote a config.yaml
+    auth.require_anthropic rejects at the first model call -- the write succeeds and
+    the next rlm_query is what fails. The ban was aimed at the picker rather than at
+    the trap. Every provider offered now is provider=anthropic, differing by endpoint
+    and credential, so any selection produces a config the server accepts.
     """
     from better_rlm import tui as tui_mod
+    from better_rlm.describe import MODE_API, MODE_AUTO, MODE_CLI, PROVIDERS, providers_for_mode
 
-    assert not hasattr(tui_mod, "pick_provider")
-    assert "/provider" not in dict(SLASH_COMMANDS)
+    assert hasattr(tui_mod, "pick_provider")
+    assert "/provider" in dict(SLASH_COMMANDS)
 
-    p = tmp_path / "config.yaml"
-    p.write_text("provider: anthropic\n", encoding="utf-8")
-    _dispatch("/provider", quiet_console, p)      # now just an unknown command
-    from better_rlm.config_writer import read_scalar
-    assert read_scalar(p, "provider") == "anthropic"
-
+    for mode in (MODE_AUTO, MODE_CLI, MODE_API):
+        offered = providers_for_mode(mode)
+        assert offered, f"{mode} offers nothing"
+        for pid in offered:
+            # A row whose auth needed a different client is the trap coming back.
+            assert PROVIDERS[pid].key_env in ("", "ANTHROPIC_API_KEY"), (mode, pid)
 
 def test_render_mode_compare_includes_every_mode() -> None:
     """The compare view must mention every mode the picker offers -- so

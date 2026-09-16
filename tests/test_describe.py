@@ -85,20 +85,28 @@ def test_describe_mode_empty_or_none_safe(mode: str | None) -> None:
     assert d.cons
 
 
-def test_no_provider_catalogue_is_exported() -> None:
-    """describe.py must not grow a provider picker back.
+def test_every_offered_provider_is_protocol_compatible():
+    """The invariant the old `no catalogue at all` test was really protecting.
 
-    config.PROVIDER_KEY_ENV was deleted in f855b9c and auth.require_anthropic raises on
-    every provider but anthropic at every door that leads to a model call -- only its
-    transport passes through the session-window ledger, so a Gemini/OpenAI run would
-    record no spend and pass no gate. A catalogue here is how a picker offering those
-    four gets re-added, so the absence is the thing worth pinning.
+    That test asserted describe.py must export no provider catalogue, because the
+    picker it came with offered gemini/openai/azure/portkey -- vendors whose selection
+    wrote a config.yaml auth.require_anthropic then rejected at the first model call.
+    The ban was aimed at the wrong thing. What must hold is that the picker never
+    offers a provider the server would refuse, and every entry here is
+    provider=anthropic: they differ by endpoint and by how you authenticate, never by
+    client, so the ledger and the budget floor survive any selection.
     """
-    import better_rlm.describe as d
+    from better_rlm.describe import AUTH_API_KEY, AUTH_CLI, PROVIDERS, all_providers
 
-    for gone in ("PROVIDERS", "describe_provider", "all_providers"):
-        assert not hasattr(d, gone), f"{gone} is back; see auth.require_anthropic"
-
+    assert all_providers(), "the catalogue is empty; the picker has nothing to offer"
+    for pid in all_providers():
+        d = PROVIDERS[pid]
+        assert d.auth in (AUTH_CLI, AUTH_API_KEY), pid
+        if d.auth == AUTH_API_KEY:
+            assert d.key_env == "ANTHROPIC_API_KEY", (
+                f"{pid} wants a non-Anthropic key, so it needs a non-Anthropic client, "
+                "which is exactly what require_anthropic refuses"
+            )
 
 def test_mode_prose_never_promises_another_provider() -> None:
     """The api-mode row used to read "Works with any provider (Anthropic, Gemini,

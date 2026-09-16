@@ -53,18 +53,23 @@ from .config import (
     MODEL_HAIKU,
     PKG_ROOT,
     config_file,
+    env_file,
 )
+from . import envfile
 from .describe import (
-    ENDPOINT_CUSTOM,
-    ENDPOINTS,
-    all_endpoints,
-    describe_endpoint,
-    endpoint_for_base_url,
+    AUTH_API_KEY,
+    AUTH_CLI,
     MODE_API,
     MODE_AUTO,
+    MODE_CLI,
+    PROVIDER_CUSTOM,
+    PROVIDERS,
     VALID_MODES,
     all_modes,
     describe_mode,
+    describe_provider,
+    provider_for_config,
+    providers_for_mode,
 )
 
 # Sentinels that mean "the user wants to back out / re-enter the picker".
@@ -169,18 +174,18 @@ def load_status(config_path: Path | None = None) -> Status:
     )
 
 
-def _endpoint_line(st: Status) -> str:
-    """Where model calls actually go, named rather than shown as a bare URL.
+def _provider_line(st: Status) -> str:
+    """Which provider the next server start will use, named rather than shown as a URL.
 
     Flags the one combination that silently does nothing: a base_url set while mode
-    still spawns the `claude` CLI, which talks to Anthropic whatever this says.
+    still spawns the `claude` CLI, which reaches Anthropic whatever this says.
     """
-    name = endpoint_for_base_url(st.base_url)
-    where = st.base_url or "api.anthropic.com (default)"
-    label = describe_endpoint(name).label
-    if st.base_url and st.mode != MODE_API:
-        return f"{label} — {where}   IGNORED: mode={st.mode} uses the claude CLI"
-    return f"{label} — {where}"
+    pid = provider_for_config(st.base_url, st.mode)
+    d = describe_provider(pid)
+    where = st.base_url or ("the `claude` CLI" if d.auth == AUTH_CLI else "api.anthropic.com")
+    if st.base_url and st.mode == MODE_CLI:
+        return f"{d.label} — {where}   IGNORED: mode={st.mode} uses the claude CLI"
+    return f"{d.label} — {where}"
 
 
 def render_status(st: Status) -> str:
@@ -218,8 +223,8 @@ def render_status(st: Status) -> str:
 
     return (
         f"mode:           {st.mode}\n"
-        f"provider:       {st.provider}{bad_provider}\n"
-        f"endpoint:       {_endpoint_line(st)}\n"
+        f"provider:       {_provider_line(st)}\n"
+        f"protocol:       {st.provider}{bad_provider}\n"
         f"root_model:     {st.root_model}\n"
         f"override_model: {st.root_model_override}\n"
         f"sub_model:      {st.sub_model}\n"
@@ -330,46 +335,178 @@ def pick_mode(console: Console, current: str) -> str:
     )
 
 
-def pick_endpoint(console: Console, current_base_url: str) -> str:
-    """Endpoint picker: which Anthropic-protocol endpoint the api transport calls.
+def pick_provider(console: Console, mode: str, current: str) -> str:
+    """Provider picker, narrowed to the providers the chosen mode can reach.
 
-    This is the picker b7282f9 removed, rebuilt around what actually works. The old
-    one offered vendors (gemini, openai, azure, portkey) whose selection wrote a
-    config.yaml ``auth.require_anthropic`` then rejected at the first model call. Every
-    row here is provider=anthropic and differs only in URL, so the ledger, the 95%
-    floor and ceiling-learning survive the switch.
+    Ported from cline-2's ``ProviderPickerContent``, which filters on
+    ``p.mode === modeFilter`` for the same reason: the caller has just run the mode
+    step, so offering a provider that mode cannot use would present a choice that
+    silently fails later. ``auto`` offers everything, because it resolves at launch.
 
-    Returns an endpoint id, ``PICKER_CUSTOM`` for a hand-typed URL, or a sentinel.
+    Returns a provider id, ``PICKER_CUSTOM``, or a sentinel.
     """
-    current = endpoint_for_base_url(current_base_url)
     options: list[tuple[str, str]] = []
-    for eid in all_endpoints():
-        if eid == ENDPOINT_CUSTOM:
-            continue          # reachable through the custom entry below, not as a row
-        d = ENDPOINTS[eid]
-        where = d.base_url or "api.anthropic.com (SDK default)"
-        options.append((eid, f"{where} - {d.note}"))
-    console.print()
-    console.print(
-        Panel(
-            "The [bold]provider[/bold] stays `anthropic`: it names the wire protocol, not the\n"
-            "vendor. These endpoints all speak the Anthropic messages format, so the\n"
-            "session-window ledger and budget floor keep working across the switch.\n\n"
-            "[yellow]Anything but Anthropic needs [bold]mode: api[/bold][/yellow] - `auto` and\n"
-            "`claude-cli` spawn the `claude` CLI, which talks to Anthropic regardless.",
-            title="[bold]Endpoint[/bold]",
-            border_style="cyan",
-            expand=False,
-        )
-    )
+    for pid in providers_for_mode(mode):
+        if pid == PROVIDER_CUSTOM:
+            continue          # reached through the custom entry, not as a row
+        d = PROVIDERS[pid]
+        auth = "claude CLI login" if d.auth == AUTH_CLI else f"{d.key_env} in .env"
+        options.append((pid, f"{d.summary}  [{auth}]"))
     return _prompt_choice(
         console,
-        title=f"Endpoint (current: {current})",
+        title=f"Provider (current: {current})",
         options=options,
         current=current,
-        allow_custom=True,
+        allow_custom=mode != MODE_CLI,
         custom_hint="an Anthropic-compatible base URL",
     )
+
+
+def auth_step(console: Console, provider_id: str, st: Status) -> bool:
+    """The credential step, branching on how the provider authenticates.
+
+    cline-2 splits this three ways in ``runProviderChange``: an OAuth login screen, a
+    local-CLI status screen, and a config-fields form. better-rlm has two of those --
+    the `claude` CLI holds its own credential (cline's LocalCliStatusContent), and
+    everything else takes an API key (cline's ProviderConfigInputContent).
+
+    Returns True when the provider is usable afterwards.
+    """
+    d = describe_provider(provider_id)
+
+    if d.auth == AUTH_CLI:
+        # The CLI owns the credential; this screen reports whether it has one, the
+        # way cline's local-CLI step reports on its binary. Nothing to type here.
+        if not st.cli_available:
+            console.print(
+                f"[red]`{st.cli_path}` is not on PATH.[/red] Install Claude Code "
+                "(https://claude.com/download), or choose an API provider instead."
+            )
+            return False
+        if st.cli_logged_in is True:
+            console.print("[green]`claude` CLI is logged in.[/green] Nothing to supply.")
+            console.print(
+                "[grey50]For a server you leave running, prefer a long-lived token: "
+                "`./install.sh --auth`. An interactive login expires and cannot "
+                "self-refresh.[/grey50]"
+            )
+            return True
+        state = "not logged in" if st.cli_logged_in is False else "login state unknown"
+        console.print(f"[yellow]`claude` CLI is {state}.[/yellow]")
+        console.print("Fix it with either:")
+        console.print("  [bold]./install.sh --auth[/bold]   long-lived token, best for a running server")
+        console.print("  [bold]claude auth login[/bold]     interactive; expires, cannot self-refresh")
+        return False
+
+    # API key. Read hidden, written straight to .env, never echoed and never returned
+    # to the caller -- only its fingerprint is reported. Same rule install.sh follows.
+    path = env_file()
+    if envfile.has_var(path, d.key_env):
+        console.print(f"[green]{d.key_env} is already set[/green] in {path}.")
+        keep = Prompt.ask(
+            "Keep it?", console=console, choices=["y", "n"], default="y"
+        ).strip().lower()
+        if keep != "n":
+            return True
+    # password=True routes through getpass, which warns "Password input may be echoed"
+    # and falls back to plain input when stdin is not a terminal -- a pipe, CI, a test.
+    # Claiming hidden input there would be a lie, so say which one this is.
+    hidden = sys.stdin.isatty()
+    console.print(
+        f"[grey50]Paste your key for {d.label}. "
+        + ("Input is hidden.[/grey50]" if hidden
+           else "[yellow]stdin is not a terminal: input will NOT be hidden.[/yellow][/grey50]")
+    )
+    try:
+        key = Prompt.ask(d.key_env, console=console, password=hidden).strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[grey50]cancelled[/grey50]")
+        return False
+    if not key:
+        console.print("[grey50]empty, nothing written[/grey50]")
+        return False
+    fp = envfile.set_var(path, d.key_env, key)
+    del key
+    console.print(f"[green]wrote {d.key_env}[/green] to {path} ({fp}, mode 0600)")
+    return True
+
+
+def run_setup(console: Console, config_path: Path) -> bool:
+    """Guided configuration: mode, then provider, then credential, then models.
+
+    The order is cline-2's onboarding machine (``views/onboarding/model.ts``:
+    ``mode_picker -> byo_provider -> {byo_apikey | local_cli_setup} -> model_picker``),
+    because each step narrows the next: the mode decides which providers can be
+    reached, and the provider decides what credential is even asked for.
+
+    Returns True if anything was written. Cancelling any step leaves config.yaml as
+    it was -- each step writes as it completes, so an abort keeps what came before
+    rather than rolling back a mode the operator did choose.
+    """
+    console.print(Panel(render_status(load_status(config_path)),
+                        title="[bold]Current configuration[/bold]", border_style="grey50"))
+
+    st = load_status(config_path)
+    wrote = False
+
+    # 1. mode -- host vs proxy, the two-column compare
+    mode = pick_mode(console, st.mode)
+    if mode in (ACTION_CANCEL,):
+        console.print("[grey50]setup cancelled[/grey50]")
+        return wrote
+    if mode not in (PICKER_KEEP,) and mode in VALID_MODES:
+        wrote |= _save(config_path, {"mode": mode}, console)
+    else:
+        mode = st.mode
+
+    # 2. provider, narrowed to that mode
+    st = load_status(config_path)
+    current_provider = provider_for_config(st.base_url, mode)
+    choice = pick_provider(console, mode, current_provider)
+    if choice == ACTION_CANCEL:
+        console.print("[grey50]setup cancelled; mode kept[/grey50]")
+        return wrote
+    provider_id = current_provider
+    if choice == PICKER_CUSTOM:
+        url = Prompt.ask("[bold]base URL[/bold]", console=console).strip()
+        if url:
+            wrote |= _save(config_path, {"base_url": url}, console)
+            provider_id = PROVIDER_CUSTOM
+    elif choice != PICKER_KEEP:
+        provider_id = choice
+        wrote |= _save(config_path, {"base_url": describe_provider(choice).base_url}, console)
+
+    # 3. credential for that provider
+    st = load_status(config_path)
+    ok = auth_step(console, provider_id, st)
+
+    # 4. models
+    st = load_status(config_path)
+    for label, key, current in (
+        ("root", "root_model", st.root_model),
+        ("sub", "sub_model", st.sub_model),
+    ):
+        pick = pick_model(console, current, kind=label)
+        if pick == ACTION_CANCEL:
+            break
+        if pick == PICKER_CUSTOM:
+            custom = Prompt.ask(f"[bold]{label} model id[/bold]", console=console).strip()
+            if custom:
+                wrote |= _save(config_path, {key: custom}, console)
+        elif pick != PICKER_KEEP and pick:
+            wrote |= _save(config_path, {key: pick}, console)
+
+    console.print()
+    console.print(Panel(render_status(load_status(config_path)),
+                        title="[bold]Configured[/bold]",
+                        border_style="green" if ok else "yellow"))
+    if not ok:
+        console.print("[yellow]The credential step did not complete — model calls will "
+                      "fail until it does.[/yellow]")
+    if wrote:
+        console.print("[grey50]A running server keeps its own copy: "
+                      "`claude mcp restart rlm` to pick this up.[/grey50]")
+    return wrote
 
 
 def render_mode_compare() -> str:
@@ -450,8 +587,9 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/help",            "show this list"),
     ("/status",          "show current mode / provider / model / cli login"),
     ("/mode-help",       "compare the three transport modes side-by-side"),
+    ("/setup",           "guided setup: mode -> provider -> credential -> models"),
     ("/mode",            "open the mode picker (writes config.yaml)"),
-    ("/endpoint",        "pick the Anthropic-protocol endpoint: Anthropic, MiniMax, custom"),
+    ("/provider",        "pick the provider for the current mode (writes config.yaml)"),
     ("/model",           "open the root-model picker (writes config.yaml)"),
     ("/override",        "open the override-model picker (writes config.yaml)"),
     ("/sub",             "open the sub-model picker (writes config.yaml)"),
@@ -564,9 +702,14 @@ def _dispatch(
             _save(config_path, {"mode": choice}, console)
         return True
 
-    if cmd == "/endpoint":
+    if cmd == "/setup":
+        run_setup(console, config_path)
+        return True
+
+    if cmd == "/provider":
         st = load_status(config_path)
-        choice = pick_endpoint(console, st.base_url)
+        current = provider_for_config(st.base_url, st.mode)
+        choice = pick_provider(console, st.mode, current)
         if choice in (PICKER_KEEP, ACTION_CANCEL):
             console.print("[grey50]no change[/grey50]")
             return True
@@ -575,16 +718,12 @@ def _dispatch(
             if not url:
                 console.print("[grey50]empty value, no change[/grey50]")
                 return True
+            provider_id = PROVIDER_CUSTOM
         else:
-            url = describe_endpoint(choice).base_url
+            provider_id = choice
+            url = describe_provider(choice).base_url
         _save(config_path, {"base_url": url}, console)
-        if url and st.mode != MODE_API:
-            # Writing base_url while mode is auto/claude-cli is the one way to leave the
-            # TUI with a config that silently ignores what was just set.
-            console.print(
-                f"[yellow]mode is {st.mode!r}: the `claude` CLI talks to Anthropic and "
-                f"ignores this endpoint. Run [bold]/mode[/bold] and pick `api`.[/yellow]"
-            )
+        auth_step(console, provider_id, load_status(config_path))
         return True
 
     if cmd in ("/model", "/override", "/sub"):
@@ -649,20 +788,35 @@ def _dispatch_guarded(line: str, console: Console, config_path: Path) -> bool:
         return True
 
 
-def run_repl(config_path: Path | None = None, console: Console | None = None) -> int:
+def run_repl(
+    config_path: Path | None = None,
+    console: Console | None = None,
+    setup: bool = False,
+) -> int:
     """Main REPL -- reads slash commands from stdin until /quit.
 
     Headless: every line is read with input(); non-interactive shells
     (CI, scripts) feed the lines and the loop exits on EOF or /quit.
     Interactive: a prompt is drawn for each line via rich.prompt.Prompt.
+
+    ``setup`` runs the guided flow first, which is what a bare ``better-rlm`` does:
+    an operator who types the command with no arguments wants to configure the
+    thing, not to be handed a prompt and a list of slash commands. Explicit rather
+    than inferred from isatty(), so the behaviour is identical in a script.
     """
     cfg_path = config_path or config_file()
     console = console or Console()
+    if setup:
+        try:
+            run_setup(console, cfg_path)
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[grey50]setup cancelled[/grey50]")
+        console.print()
     console.print(
         Panel(
             "[bold]better-rlm TUI[/bold]\n"
-            "Configure the transport mode and models, then run the verify gate.\n"
-            "Type [bold cyan]/help[/bold cyan] for commands, [bold cyan]/quit[/bold cyan] to exit.",
+            "Type [bold cyan]/setup[/bold cyan] to re-run guided configuration, "
+            "[bold cyan]/help[/bold cyan] for all commands, [bold cyan]/quit[/bold cyan] to exit.",
             border_style="green",
         )
     )
@@ -685,6 +839,7 @@ def main(argv: list[str] | None = None) -> int:
     can gate on it. Without it, run_repl takes over stdin.
     """
     args = list(sys.argv[1:] if argv is None else argv)
+    args_were_given = bool(args)
     config_path: Path | None = None
     one_shot: str | None = None
     while args:
@@ -706,7 +861,9 @@ def main(argv: list[str] | None = None) -> int:
     if one_shot is not None:
         _dispatch_guarded(one_shot, console, cfg_path)
         return LAST_EXIT_CODE
-    return run_repl(cfg_path, console=console)
+    # A bare invocation opens in configuration mode. Passing --config or any other
+    # flag means the caller is driving it deliberately, so they get the plain REPL.
+    return run_repl(cfg_path, console=console, setup=not args_were_given)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1,0 +1,318 @@
+"""The endpoint picker: pointing the Anthropic client somewhere other than Anthropic.
+
+`provider` names the wire protocol, not the vendor. b7282f9 removed the old provider
+picker because it offered four vendors whose selection wrote a config.yaml that
+auth.require_anthropic then rejected at the first model call. This replaces it with
+endpoints that all speak the Anthropic messages format, so the session-window ledger,
+the 95% floor and ceiling-learning survive the switch -- the client is unchanged, only
+its URL moves.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from better_rlm import config as cfgmod
+from better_rlm.config import load_config
+from better_rlm.describe import (
+    AUTH_API_KEY,
+    AUTH_CLI,
+    MODE_API,
+    MODE_AUTO,
+    MODE_CLI,
+    PROVIDER_ANTHROPIC,
+    PROVIDER_CLAUDE_CLI,
+    PROVIDER_CUSTOM,
+    PROVIDER_MINIMAX,
+    PROVIDERS,
+    all_providers,
+    describe_provider,
+    provider_for_config,
+    providers_for_mode,
+)
+
+
+# --- catalogue ----------------------------------------------------------------
+
+
+def test_every_api_provider_speaks_the_anthropic_protocol():
+    """The whole safety argument. A provider needing a different client would lose the
+    ledger, which is exactly what require_anthropic exists to prevent."""
+    for pid in all_providers():
+        d = PROVIDERS[pid]
+        if d.auth == AUTH_API_KEY:
+            assert d.key_env == "ANTHROPIC_API_KEY", pid
+
+
+def test_mode_filter_matches_clines_provider_picker():
+    """cline-2 filters on `p.mode === modeFilter` so the operator is never offered a
+    provider the mode they just chose cannot reach."""
+    assert providers_for_mode(MODE_CLI) == (PROVIDER_CLAUDE_CLI,)
+    assert PROVIDER_CLAUDE_CLI not in providers_for_mode(MODE_API)
+    assert PROVIDER_MINIMAX in providers_for_mode(MODE_API)
+    # auto resolves at launch, so it cannot honestly narrow the list.
+    assert set(providers_for_mode(MODE_AUTO)) == set(all_providers())
+
+
+def test_the_cli_provider_needs_no_key():
+    d = PROVIDERS[PROVIDER_CLAUDE_CLI]
+    assert d.auth == AUTH_CLI and d.key_env == ""
+
+
+def test_anthropic_resolves_to_the_sdk_default():
+    assert PROVIDERS[PROVIDER_ANTHROPIC].base_url == "", (
+        "Anthropic must use the SDK default, not a hardcoded URL that could drift"
+    )
+
+
+@pytest.mark.parametrize(
+    "url,mode,expected",
+    [
+        ("", MODE_API, PROVIDER_ANTHROPIC),
+        ("   ", MODE_API, PROVIDER_ANTHROPIC),
+        ("", MODE_CLI, PROVIDER_CLAUDE_CLI),
+        ("https://api.minimax.io/anthropic", MODE_API, PROVIDER_MINIMAX),
+        ("https://api.minimax.io/anthropic/", MODE_API, PROVIDER_MINIMAX),  # trailing slash
+        ("https://gateway.example/anthropic", MODE_API, PROVIDER_CUSTOM),
+    ],
+)
+def test_reverse_lookup_names_the_configured_provider(url, mode, expected):
+    """/status shows a name, not a bare URL, so an operator can tell at a glance
+    whether they are pointed where they think."""
+    assert provider_for_config(url, mode) == expected
+
+
+def test_unknown_provider_id_is_safe():
+    d = describe_provider("wat")
+    assert d.base_url == ""
+    assert "pick one" in d.summary
+
+
+# --- config -------------------------------------------------------------------
+
+
+def test_base_url_defaults_to_empty(monkeypatch, tmp_path):
+    """Hermetic on purpose. Reading the real config.yaml made this assert against
+    whatever the developer happens to have configured -- the ambient-state trap that
+    kept a transport test red on CI for weeks."""
+    monkeypatch.setattr(cfgmod, "config_file", lambda: tmp_path / "absent.yaml")
+    monkeypatch.delenv("RLM_BASE_URL", raising=False)
+    assert load_config().base_url == ""
+
+
+def test_rlm_base_url_env_wins_like_rlm_mode(monkeypatch):
+    # Same precedence as RLM_MODE/RLM_PROVIDER, so a pod can pin it at registration.
+    monkeypatch.setenv("RLM_BASE_URL", "https://api.minimax.io/anthropic")
+    assert load_config().base_url == "https://api.minimax.io/anthropic"
+
+
+def test_anthropic_base_url_is_not_read_by_config(monkeypatch, tmp_path):
+    """The SDK honours ANTHROPIC_BASE_URL itself. Reading it here too would give one
+    setting two owners that can disagree, and `better-rlm where` could not say which
+    won -- so make_client passes the configured value explicitly instead."""
+    monkeypatch.setattr(cfgmod, "config_file", lambda: tmp_path / "absent.yaml")
+    monkeypatch.delenv("RLM_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://sneaky.example")
+    assert load_config().base_url == ""
+
+
+# --- the client actually gets it ----------------------------------------------
+
+
+def test_make_client_omits_base_url_when_unset(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    from better_rlm import auth
+    c = auth.make_client(base_url="")
+    assert "api.anthropic.com" in str(c.base_url)
+
+
+@pytest.mark.parametrize("url", ["https://api.minimax.io/anthropic", "  https://x.test/v  "])
+def test_make_client_honours_the_configured_endpoint(monkeypatch, url):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    from better_rlm import auth
+    c = auth.make_client(base_url=url)
+    assert str(c.base_url).rstrip("/") == url.strip().rstrip("/")
+
+
+def test_api_transport_reads_cfg_not_a_private_alias(monkeypatch):
+    """Regression. The first wiring used `self._cfg.base_url`; ApiTransport stores
+    `self.cfg`, and the client is built LAZILY -- so this raised AttributeError only on
+    the first real model call, which no test makes. Build the client to catch it."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    from better_rlm.transport import ApiTransport
+    cfg = dataclasses.replace(load_config(), base_url="https://api.minimax.io/anthropic")
+    t = ApiTransport(cfg)
+    assert "minimax" in str(t._sync_client().base_url)
+    assert "minimax" in str(t._async_client().base_url)
+
+
+# --- the picker ---------------------------------------------------------------
+
+
+def _cfg_file(tmp_path: Path) -> Path:
+    p = tmp_path / "config.yaml"
+    p.write_text("mode: api\nprovider: anthropic\nbase_url: \"\"\n")
+    return p
+
+
+def test_picker_writes_the_selected_endpoint(tmp_path, quiet_console=None):
+    from rich.console import Console
+    import io
+    from better_rlm.tui import _dispatch
+    p = _cfg_file(tmp_path)
+    console = Console(file=io.StringIO(), quiet=True)
+    with patch("better_rlm.tui.pick_provider", return_value=PROVIDER_MINIMAX), \
+            patch("better_rlm.tui.auth_step", return_value=True):
+        _dispatch("/provider", console, p)
+    from better_rlm.config_writer import read_scalar
+    assert read_scalar(p, "base_url") == "https://api.minimax.io/anthropic"
+
+
+def test_picker_writes_through_the_provider_command(tmp_path):
+    """/provider writes base_url and then runs the credential step, mirroring
+    cline's runProviderChange."""
+    import io
+    from rich.console import Console
+    from better_rlm.tui import _dispatch
+    p = tmp_path / "config.yaml"
+    p.write_text("mode: auto\nprovider: anthropic\nbase_url: \"\"\n")
+    buf = io.StringIO()
+    console = Console(file=buf, width=200)
+    with patch("better_rlm.tui.pick_provider", return_value=PROVIDER_MINIMAX), \
+            patch("better_rlm.tui.auth_step", return_value=True):
+        _dispatch("/provider", console, p)
+    from better_rlm.config_writer import read_scalar
+    assert read_scalar(p, "base_url") == "https://api.minimax.io/anthropic"
+
+
+def test_status_flags_a_provider_that_mode_ignores():
+    from better_rlm.tui import Status, _provider_line
+    ignored = Status(
+        mode="auto", provider="anthropic", root_model="m", root_model_override="m",
+        sub_model="m", cli_path="claude", cli_available=True, cli_logged_in=True,
+        env_mode=None, env_provider=None, has_api_key=False,
+        base_url="https://api.minimax.io/anthropic",
+    )
+    ignored = dataclasses.replace(ignored, mode="claude-cli")
+    assert "IGNORED" in _provider_line(ignored)
+    assert "IGNORED" not in _provider_line(dataclasses.replace(ignored, mode="api"))
+    assert "IGNORED" not in _provider_line(dataclasses.replace(ignored, base_url=""))
+
+
+# --- the suite must never touch the developer's own config --------------------
+
+
+def test_no_test_writes_the_repo_config_or_env(request):
+    """A test that defaults to config_file() edits the machine it runs on.
+
+    This session wrote `mode: api` and a MiniMax base_url into the repo's own
+    config.yaml while exercising the picker, which would have pointed a live MCP
+    server at an endpoint it had no key for. Nothing detected it; it was noticed by
+    eye in `git status`. This fixture-free check makes the class visible: it records
+    both files' digests at session start and compares at teardown.
+    """
+    import hashlib
+    from better_rlm.config import PKG_ROOT
+
+    watched = [PKG_ROOT / "config.yaml", PKG_ROOT / ".env"]
+
+    def digest(p):
+        return hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else "absent"
+
+    before = {p: digest(p) for p in watched}
+
+    def check():
+        for p in watched:
+            assert digest(p) == before[p], (
+                f"a test modified {p.name} in the checkout. Tests must pass an explicit "
+                f"path (tmp_path) or monkeypatch config_file()/env_file()."
+            )
+
+    request.addfinalizer(check)
+
+
+# --- the guided flow ----------------------------------------------------------
+
+
+def test_setup_runs_clines_step_order(tmp_path, monkeypatch):
+    """mode -> provider -> credential -> models, the order cline-2's onboarding
+    machine uses (views/onboarding/model.ts). Each step narrows the next: the mode
+    decides which providers are reachable, the provider decides which credential is
+    even asked for, so running them out of order asks questions that cannot be
+    answered yet."""
+    import io
+    from rich.console import Console
+    from better_rlm import tui
+
+    calls: list[str] = []
+    p = tmp_path / "config.yaml"
+    p.write_text("mode: auto\nprovider: anthropic\n")
+
+    monkeypatch.setattr(tui, "pick_mode", lambda *a, **k: (calls.append("mode"), "api")[1])
+    monkeypatch.setattr(tui, "pick_provider",
+                        lambda *a, **k: (calls.append("provider"), PROVIDER_MINIMAX)[1])
+    monkeypatch.setattr(tui, "auth_step", lambda *a, **k: (calls.append("auth"), True)[1])
+    monkeypatch.setattr(tui, "pick_model", lambda *a, **k: (calls.append("model"), tui.PICKER_KEEP)[1])
+
+    tui.run_setup(Console(file=io.StringIO(), quiet=True), p)
+    assert calls[:3] == ["mode", "provider", "auth"], calls
+    assert "model" in calls
+
+    from better_rlm.config_writer import read_scalar
+    assert read_scalar(p, "mode") == "api"
+    assert read_scalar(p, "base_url") == "https://api.minimax.io/anthropic"
+
+
+def test_setup_passes_the_chosen_mode_to_the_provider_picker(tmp_path, monkeypatch):
+    """cline passes modeFilter so the user is not offered a provider the mode they
+    just picked cannot reach. Without this the wizard would offer claude-cli after
+    the operator chose api, and the selection would quietly do nothing."""
+    import io
+    from rich.console import Console
+    from better_rlm import tui
+
+    seen = {}
+    p = tmp_path / "config.yaml"
+    p.write_text("mode: auto\n")
+    monkeypatch.setattr(tui, "pick_mode", lambda *a, **k: MODE_CLI)
+    monkeypatch.setattr(tui, "pick_provider",
+                        lambda console, mode, current: seen.setdefault("mode", mode) and None or tui.ACTION_CANCEL)
+    tui.run_setup(Console(file=io.StringIO(), quiet=True), p)
+    assert seen["mode"] == MODE_CLI
+
+
+def test_cli_provider_asks_for_no_key(tmp_path, monkeypatch):
+    """The claude CLI holds its own credential. Prompting for a key there would be
+    asking for something that is never read."""
+    import io
+    from rich.console import Console
+    from better_rlm import tui
+    from better_rlm.describe import PROVIDER_CLAUDE_CLI
+
+    st = tui.Status(
+        mode=MODE_CLI, provider="anthropic", root_model="m", root_model_override="m",
+        sub_model="m", cli_path="claude", cli_available=True, cli_logged_in=True,
+        env_mode=None, env_provider=None, has_api_key=False, base_url="",
+    )
+    with patch.object(tui.Prompt, "ask", side_effect=AssertionError("prompted for a key")):
+        assert tui.auth_step(Console(file=io.StringIO(), quiet=True), PROVIDER_CLAUDE_CLI, st) is True
+
+
+def test_cli_provider_reports_a_missing_login_instead_of_claiming_success(tmp_path):
+    import io
+    from rich.console import Console
+    from better_rlm import tui
+    from better_rlm.describe import PROVIDER_CLAUDE_CLI
+
+    buf = io.StringIO()
+    st = tui.Status(
+        mode=MODE_CLI, provider="anthropic", root_model="m", root_model_override="m",
+        sub_model="m", cli_path="claude", cli_available=True, cli_logged_in=False,
+        env_mode=None, env_provider=None, has_api_key=False, base_url="",
+    )
+    assert tui.auth_step(Console(file=buf, width=200), PROVIDER_CLAUDE_CLI, st) is False
+    assert "not logged in" in buf.getvalue()

@@ -976,6 +976,32 @@ offers that same surface via slash commands — no extra dependency (it's
 `rich.prompt`, already a dep) and no extra process (it's just
 `python -m better_rlm.cli`).
 
+`better-rlm` with no arguments opens in **configuration mode**: it prints the current
+settings, then walks the same four steps in the same order, because each one narrows
+the next.
+
+```
+better-rlm
+
+  Current configuration        mode / provider / models / credential state
+  1. Mode                      Binary (proxy) vs API (host), side by side
+  2. Provider                  narrowed to the providers that mode can reach
+  3. Credential                the claude CLI login, or an API key written to .env
+  4. Models                    root and sub
+```
+
+Ported from cline-2's onboarding machine (`apps/cli/src/tui/views/onboarding/`): the
+mode step feeds `modeFilter` into the provider picker, so you are never offered a
+provider the mode you just chose cannot use. The credential step branches the way
+cline's `runProviderChange` does - a local-CLI status screen when the `claude` CLI
+holds the credential, a key form otherwise.
+
+`/setup` re-runs it. The individual steps stay available as `/mode`, `/provider`,
+`/model`, so changing one thing does not mean walking the whole flow.
+
+API keys are read hidden and written straight to `.env` at mode 0600; the value is
+never echoed and never logged, only its length and a short digest.
+
 Launch it from the checkout root:
 
 ```bash
@@ -997,11 +1023,12 @@ Slash commands exposed by the TUI:
 
 | Command | Effect |
 |---|---|
+| `/setup` | guided configuration: mode, then provider, then credential, then models |
 | `/help` | list every command |
 | `/status` | show current mode / provider / model / cli login state |
 | `/mode-help` | side-by-side comparison of `auto` vs `claude-cli` vs `api` (host/proxy terminology from cline-2's mode picker) |
 | `/mode` | open the mode picker; writes `mode:` back to `config.yaml` |
-| `/endpoint` | pick the Anthropic-protocol endpoint: Anthropic, MiniMax, or a custom base URL |
+| `/provider` | pick the provider for the current mode, then supply its credential |
 | `/model`, `/override`, `/sub` | open the corresponding model picker (curated list + custom id) |
 | `/test` | run `uv run --extra dev pytest -q` — the same gate the pre-push hook runs |
 | `/test-config` | focused pytest on `tests/test_config.py`, `tests/test_auth.py`, `tests/test_transport.py` |

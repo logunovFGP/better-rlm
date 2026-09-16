@@ -139,94 +139,124 @@ def all_modes() -> tuple[str, ...]:
     return VALID_MODES
 
 
-# -- Endpoint catalogue --------------------------------------------------------
+# -- Provider catalogue --------------------------------------------------------
 #
-# What the picker offers is ENDPOINTS, not vendors, and the distinction is the whole
-# reason this came back after b7282f9 removed the old provider picker.
+# Ported from cline-2's provider model (``apps/cli/src/tui/components/dialogs/
+# provider-picker.tsx``, filtered by ``p.mode === modeFilter``). Each provider
+# declares which SESSION MODE offers it, so the picker never shows a provider the
+# mode cannot reach -- the same reason cline passes ``modeFilter`` after its mode
+# step: you are not re-offered a choice you just made.
 #
-# ``provider`` names the wire protocol. ``auth.require_anthropic`` refuses anything but
-# ``anthropic`` because the session-window ledger, the 95% floor and ceiling-learning
-# live in ``transport._LedgeredTransport``, which is only in the stack when the
-# Anthropic client is -- a Gemini or OpenAI client would spend past a budget that
-# refused nothing. That guard is correct and stays.
-#
-# But it was over-read as "Anthropic the company is the only option", and the old
-# picker made the opposite error: it offered four vendors whose selection produced a
-# config.yaml the server then rejected at the first model call. Both miss that plenty
-# of endpoints speak the Anthropic messages format. Pointing the Anthropic client at
-# one keeps every safety property, because the client -- and therefore the ledger -- is
-# unchanged. Only the URL moves.
-#
-# So: every entry here is provider=anthropic. The picker writes base_url.
+# Every provider here is ``provider: anthropic`` in config.yaml, because that names
+# the WIRE PROTOCOL. ``auth.require_anthropic`` refuses anything else: the
+# session-window ledger, the 95% floor and ceiling-learning live in
+# ``transport._LedgeredTransport``, which is in the stack only because the Anthropic
+# client is. Providers differ by endpoint and by how you authenticate, not by client.
 
-ENDPOINT_ANTHROPIC = "anthropic"
-ENDPOINT_MINIMAX = "minimax"
-ENDPOINT_CUSTOM = "custom"
+AUTH_CLI = "cli"          # the `claude` CLI holds the credential (cline: LocalCliStatus)
+AUTH_API_KEY = "api_key"  # a key in .env                       (cline: ProviderConfigInput)
+
+PROVIDER_CLAUDE_CLI = "claude-cli"
+PROVIDER_ANTHROPIC = "anthropic"
+PROVIDER_MINIMAX = "minimax"
+PROVIDER_CUSTOM = "custom"
 
 
 @dataclass(frozen=True)
-class EndpointDescription:
-    """One row of the endpoint picker."""
+class ProviderDescription:
+    """One row of the provider picker."""
 
     label: str
-    base_url: str          # "" means the SDK default, api.anthropic.com
+    mode: str              # the session mode that offers it
+    auth: str              # AUTH_CLI | AUTH_API_KEY
+    base_url: str          # "" = the SDK default, api.anthropic.com
     key_env: str
-    note: str
+    summary: str
+    prompts_base_url: bool = False   # ask the operator for the URL
 
 
-ENDPOINTS: dict[str, EndpointDescription] = {
-    ENDPOINT_ANTHROPIC: EndpointDescription(
+PROVIDERS: dict[str, ProviderDescription] = {
+    PROVIDER_CLAUDE_CLI: ProviderDescription(
+        label="Claude Code subscription",
+        mode=MODE_CLI,
+        auth=AUTH_CLI,
+        base_url="",
+        key_env="",
+        summary="Reuse your `claude` CLI login. No API key, no per-token cost.",
+    ),
+    PROVIDER_ANTHROPIC: ProviderDescription(
         label="Anthropic",
+        mode=MODE_API,
+        auth=AUTH_API_KEY,
         base_url="",
         key_env="ANTHROPIC_API_KEY",
-        note="The default. Works keyless in claude-cli/auto mode via your Claude Code login.",
+        summary="api.anthropic.com directly, with an API key.",
     ),
-    ENDPOINT_MINIMAX: EndpointDescription(
+    PROVIDER_MINIMAX: ProviderDescription(
         label="MiniMax",
+        mode=MODE_API,
+        auth=AUTH_API_KEY,
         base_url="https://api.minimax.io/anthropic",
         key_env="ANTHROPIC_API_KEY",
-        note="Anthropic-compatible. Needs mode=api and a MiniMax key; set models to "
-             "MiniMax ids (MiniMax-M2.7, MiniMax-M3, ...).",
+        summary="Anthropic-compatible. Use MiniMax model ids (MiniMax-M2.7, MiniMax-M3).",
     ),
-    ENDPOINT_CUSTOM: EndpointDescription(
+    PROVIDER_CUSTOM: ProviderDescription(
         label="Custom endpoint",
+        mode=MODE_API,
+        auth=AUTH_API_KEY,
         base_url="",
         key_env="ANTHROPIC_API_KEY",
-        note="Any other endpoint speaking the Anthropic messages format: a gateway, a "
-             "proxy, a self-hosted model server.",
+        summary="Any other endpoint speaking the Anthropic messages format.",
+        prompts_base_url=True,
     ),
 }
 
 
-def describe_endpoint(endpoint: str) -> EndpointDescription:
-    """Row for one endpoint id; a safe placeholder for an unknown one."""
-    e = (endpoint or "").strip().lower()
-    info = ENDPOINTS.get(e)
+def describe_provider(provider: str) -> ProviderDescription:
+    """Row for one provider id; a safe placeholder for an unknown one."""
+    info = PROVIDERS.get((provider or "").strip().lower())
     if info is None:
-        return EndpointDescription(
-            label=endpoint or "(unknown)",
+        return ProviderDescription(
+            label=provider or "(unknown)",
+            mode=MODE_API,
+            auth=AUTH_API_KEY,
             base_url="",
             key_env="ANTHROPIC_API_KEY",
-            note="Not a known endpoint id; pick one from the list.",
+            summary="Not a known provider id; pick one from the list.",
         )
     return info
 
 
-def all_endpoints() -> tuple[str, ...]:
-    """Endpoint ids the picker offers, in declaration order."""
-    return tuple(ENDPOINTS.keys())
+def providers_for_mode(mode: str) -> tuple[str, ...]:
+    """Provider ids offered by one session mode, in declaration order.
+
+    ``auto`` resolves to whichever transport is available at launch, so it offers
+    everything rather than pretending to know which one will win.
+    """
+    m = (mode or "").strip().lower()
+    if m == MODE_AUTO:
+        return tuple(PROVIDERS)
+    return tuple(pid for pid, d in PROVIDERS.items() if d.mode == m)
 
 
-def endpoint_for_base_url(base_url: str) -> str:
-    """Which catalogue entry a configured base_url corresponds to.
+def all_providers() -> tuple[str, ...]:
+    """Every provider id the picker knows, in declaration order."""
+    return tuple(PROVIDERS)
 
-    Lets /status and the picker show the current choice by name instead of making
+
+def provider_for_config(base_url: str, mode: str) -> str:
+    """Which catalogue row a saved (base_url, mode) pair corresponds to.
+
+    Lets the wizard and /status show the current choice by name instead of making
     the operator recognise a URL. A trailing slash is not a different endpoint.
     """
+    m = (mode or "").strip().lower()
+    if m == MODE_CLI:
+        return PROVIDER_CLAUDE_CLI
     u = (base_url or "").strip().rstrip("/")
     if not u:
-        return ENDPOINT_ANTHROPIC
-    for eid, info in ENDPOINTS.items():
-        if info.base_url and info.base_url.rstrip("/") == u:
-            return eid
-    return ENDPOINT_CUSTOM
+        return PROVIDER_CLAUDE_CLI if m == MODE_CLI else PROVIDER_ANTHROPIC
+    for pid, d in PROVIDERS.items():
+        if d.base_url and d.base_url.rstrip("/") == u:
+            return pid
+    return PROVIDER_CUSTOM
