@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 from pathlib import Path
 
 # Match ``key: value`` where the value is a single scalar token (no
@@ -62,6 +63,7 @@ def _format_scalar(value: str) -> str:
     needs_quote = (
         ":" in v
         or "#" in v
+        or '"' in v          # a value that is itself quote-delimited must be quoted
         or v.startswith(("{", "[", "&", "*", "!", "|", ">", "%", "@", "`"))
         or v.endswith((",", "{", "["))
         or any(ch.isspace() for ch in v)
@@ -94,9 +96,13 @@ def read_scalar(path: Path, key: str) -> str | None:
         if m and m.group(1) == key:
             value, _comment = _split_inline_comment(m.group(2))
             if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
-                value = value[1:-1]
-                value = value.replace('\\"', '"').replace("\\\\", "\\")
-            return value.strip() or None
+                # Quoted: the delimiters are the quotes, so what sits between them is
+                # verbatim. Stripping here would discard exactly the whitespace
+                # _format_scalar quoted in order to keep.
+                inner = value[1:-1].replace('\\"', '"')
+                return inner.replace("\\\\", "\\")
+            # "" means the key is present and deliberately empty; None means absent.
+            return value.strip()
     return None
 
 
@@ -104,24 +110,38 @@ def _split_inline_comment(value: str) -> tuple[str, str]:
     """Split ``value   # comment`` into ``("value", "# comment")``.
 
     Handles the common case without breaking on values that legitimately
-    contain a hash (e.g. a URL fragment). Walking the string
-    character-by-character respects single and double quotes.
+    contain a hash (e.g. a URL fragment).
 
     Returns both halves rather than discarding the comment, because
     ``write_scalars`` has to put it back: config.yaml documents half its
     keys in a trailing comment, and rewriting a line without it deletes
     the explanation this module exists to preserve.
+
+    Only a quote at position 0 opens a YAML quoted scalar. The previous version
+    toggled quote state on every quote anywhere in the value, so a lone apostrophe
+    in a plain scalar -- an ordinary Windows path under a user named O'Brien, say --
+    hid the hash that followed it: read_scalar returned the comment as part of the
+    value, so /status looked up a path with the comment glued on, and write_scalars
+    dropped the comment entirely on rewrite.
     """
-    in_single = False
-    in_double = False
-    for i, ch in enumerate(value):
-        if ch == "'" and not in_double:
-            in_single = not in_single
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-        elif ch == "#" and not in_single and not in_double:
-            return value[:i].rstrip(), value[i:]
-    return value, ""
+    if value[:1] in ("'", '"'):
+        quote = value[0]
+        i = 1
+        while i < len(value):
+            if value[i] == "\\" and quote == '"':
+                i += 2          # an escaped character inside a double-quoted scalar
+                continue
+            if value[i] == quote:
+                i += 1          # past the closing quote
+                break
+            i += 1
+        head, rest = value[:i], value[i:]
+    else:
+        head, rest = "", value
+    cut = rest.find("#")
+    if cut == -1:
+        return (head + rest).rstrip(), ""
+    return (head + rest[:cut]).rstrip(), rest[cut:]
 
 
 def write_scalars(path: Path, updates: dict) -> bool:
@@ -183,17 +203,21 @@ def write_scalars(path: Path, updates: dict) -> bool:
 def _atomic_write(path: Path, body: str) -> None:
     """Write ``body`` to ``path`` via a same-directory temp file + rename.
 
-    ``os.replace`` is atomic on POSIX and Windows, so an interrupted
-    write can never leave a partial ``config.yaml`` on disk -- readers
-    either see the old version or the new one, never a half-written
-    intermediate.
+    Same shape as ``scripts/install_hook.py::_write_atomic``, deliberately: that one
+    already got this right, and two implementations of one operation in one repo
+    should not differ in how safe they are. ``mkstemp`` creates the file O_EXCL at
+    0600 under an unpredictable name, so there is no window where it exists at the
+    umask default and no fixed name to pre-plant -- the previous version wrote a
+    predictable ``config.yaml.tmp`` and chmod'd it only afterwards. ``fsync`` before
+    the rename means a host crash cannot leave the renamed file holding unflushed
+    bytes, and the temp is removed if anything raises instead of being left behind.
 
-    The temp file is chmod 0600 before the rename, so a reader of the
-    directory cannot catch the contents mid-write. Two consequences worth
-    knowing: a config the operator deliberately made group-readable comes
-    back private after a TUI write, and on Windows the call is effectively
-    a no-op (only the read-only bit exists there), which is why the mode
-    test skips off POSIX.
+    ``os.replace`` is atomic on POSIX and Windows, so a reader sees either the old
+    file or the new one, never a half-written intermediate.
+
+    A config the operator deliberately made group-readable still comes back private
+    after a TUI write, and on Windows the mode is effectively a no-op (only the
+    read-only bit exists there), which is why the mode test skips off POSIX.
 
     ``encoding`` and ``newline`` are explicit on purpose. config.yaml is
     UTF-8 (em dashes in the mode / provider / sandbox comments) and
@@ -202,10 +226,16 @@ def _atomic_write(path: Path, body: str) -> None:
     ending as CRLF on Windows, churning the whole file against its own
     normalization rule.
     """
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(body, encoding="utf-8", newline="\n")
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
-    os.replace(tmp, path)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(body)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise

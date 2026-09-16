@@ -54,9 +54,7 @@ from .config import (
     PKG_ROOT,
 )
 from .describe import (
-    MODE_API,
     MODE_AUTO,
-    MODE_CLI,
     VALID_MODES,
     all_modes,
     describe_mode,
@@ -111,7 +109,8 @@ def load_status(config_path: Path | None = None) -> Status:
     cfg_path = config_path or (PKG_ROOT / "config.yaml")
 
     def _read(key: str, default: str) -> str:
-        return config_writer.read_scalar(cfg_path, key) or default
+        on_disk = config_writer.read_scalar(cfg_path, key)
+        return default if on_disk is None else on_disk
 
     mode = _read("mode", MODE_AUTO)
     provider = _read("provider", "anthropic")
@@ -134,8 +133,12 @@ def load_status(config_path: Path | None = None) -> Status:
     if cli_available:
         from .transport import cli_auth_status   # lazy: pulls the anthropic SDK
         raw = cli_auth_status(SimpleNamespace(cli_path=cli_path))
-        if raw is not None:
-            cli_logged_in = bool(raw.get("loggedIn"))
+        flag = raw.get("loggedIn") if raw is not None else None
+        # Only a real bool is an answer. bool() on a missing key would render a
+        # signed-in CLI as NOT LOGGED IN, and on the string "false" would render a
+        # signed-out one as logged in -- the confident-wrong-answer shape this
+        # function was rewritten to remove. Anything else falls to "unknown".
+        cli_logged_in = flag if isinstance(flag, bool) else None
 
     has_api_key = bool(os.getenv("ANTHROPIC_API_KEY"))
 
@@ -247,7 +250,7 @@ def _prompt_choice(
         table.add_row(str(i), f"{value}{marker}", description)
 
     if allow_custom:
-        table.add_row("c", f"[bold yellow]custom[/bold yellow] …", f"[grey50]{custom_hint}[/grey50]")
+        table.add_row("c", "[bold yellow]custom[/bold yellow] …", f"[grey50]{custom_hint}[/grey50]")
 
     table.add_row("q", "[bold red]cancel[/bold red]", "[grey50]leave picker without changes[/grey50]")
 
@@ -428,9 +431,12 @@ def _run_auth_probe(console: Console) -> None:
     from .config import load_config
     from .subquery import sub_query
 
-    cfg = load_config()
-    target = models.select(cfg, models.Role.SUB)
     try:
+        # Inside the guard: models.select resolves the auth mode, which runs
+        # auth.require_anthropic -- that raises NotImplementedError for any provider
+        # but anthropic, the exact value /status flags as UNSUPPORTED.
+        cfg = load_config()
+        target = models.select(cfg, models.Role.SUB)
         res = sub_query(cfg, "Reply with exactly: ok", target, max_tokens=16)
     except Exception as exc:                       # noqa: BLE001
         console.print(f"[red]auth probe FAILED[/red]: {type(exc).__name__}: {exc}")
@@ -533,6 +539,23 @@ def _dispatch(
     return True
 
 
+def _dispatch_guarded(line: str, console: Console, config_path: Path) -> bool:
+    """Run one command, reporting a handler exception instead of ending the session.
+
+    Every handler reaches the operator through here, so this is the one place that has
+    to catch: without it an OSError from a config write, or require_anthropic refusing
+    a provider, exits the REPL with a traceback mid-session. Returns True (keep going)
+    on failure and leaves LAST_EXIT_CODE nonzero so --one-shot still reports it.
+    """
+    global LAST_EXIT_CODE
+    try:
+        return _dispatch(line, console, config_path)
+    except Exception as exc:                       # noqa: BLE001
+        LAST_EXIT_CODE = 1
+        console.print(f"[red]command FAILED[/red]: {type(exc).__name__}: {exc}")
+        return True
+
+
 def run_repl(config_path: Path | None = None, console: Console | None = None) -> int:
     """Main REPL -- reads slash commands from stdin until /quit.
 
@@ -556,7 +579,7 @@ def run_repl(config_path: Path | None = None, console: Console | None = None) ->
         except (EOFError, KeyboardInterrupt):
             console.print("\n[grey50]bye[/grey50]")
             return 0
-        if not _dispatch(line, console, cfg_path):
+        if not _dispatch_guarded(line, console, cfg_path):
             console.print("[grey50]bye[/grey50]")
             return 0
 
@@ -588,7 +611,7 @@ def main(argv: list[str] | None = None) -> int:
     console = Console()
     cfg_path = config_path or (PKG_ROOT / "config.yaml")
     if one_shot is not None:
-        _dispatch(one_shot, console, cfg_path)
+        _dispatch_guarded(one_shot, console, cfg_path)
         return LAST_EXIT_CODE
     return run_repl(cfg_path, console=console)
 

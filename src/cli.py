@@ -14,8 +14,6 @@ prints the same docstring as ``src/tui.py``.
 
 from __future__ import annotations
 
-import sys
-
 
 def main() -> int:
     # Lazy import: importing src.tui pulls rich + the engine's import
