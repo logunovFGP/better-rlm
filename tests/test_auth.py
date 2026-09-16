@@ -1,4 +1,6 @@
 import dataclasses
+import os
+from unittest import mock
 
 import pytest
 
@@ -14,7 +16,21 @@ def _clear_env(monkeypatch):
 
 
 def _cfg(**over):
-    return dataclasses.replace(load_config(), **over)
+    """A Config from the baked-in defaults, never from the operator's config.yaml.
+
+    load_config() reads this checkout's own config.yaml, which made every test here
+    depend on how the developer happens to have it set up: a perfectly valid
+    `base_url: <minimax>` turned test_explicit_api_requires_key red, because the key
+    variable the code looks for moves with the configured provider. A test must not
+    read the machine it runs on.
+    """
+    import better_rlm.config as _c
+
+    with mock.patch.object(_c, "config_file", lambda: _c.PKG_ROOT / "__absent__.yaml"):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("RLM_")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            base = load_config()
+    return dataclasses.replace(base, **over)
 
 
 def test_clean_secret_ignores_placeholders_and_whitespace():

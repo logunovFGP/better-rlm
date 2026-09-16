@@ -100,6 +100,7 @@ class Status:
     env_provider: str | None    # set when RLM_PROVIDER override is in effect
     has_api_key: bool
     base_url: str = ""          # "" = Anthropic's own endpoint (the SDK default)
+    key_env: str = ""           # the ACTIVE provider's key variable ("" = CLI login)
 
     def mode_is_pinned(self) -> bool:
         """True when an RLM_MODE env var overrides config.yaml.
@@ -156,7 +157,10 @@ def load_status(config_path: Path | None = None) -> Status:
         # function was rewritten to remove. Anything else falls to "unknown".
         cli_logged_in = flag if isinstance(flag, bool) else None
 
-    has_api_key = bool(os.getenv("ANTHROPIC_API_KEY"))
+    # The ACTIVE provider's variable, not a fixed one: a MiniMax setup with no
+    # ANTHROPIC_API_KEY is configured, and saying "MISSING" there would be wrong.
+    key_var = describe_provider(provider_for_config(base_url, mode)).key_env
+    has_api_key = bool(key_var and os.getenv(key_var))
 
     return Status(
         mode=mode,
@@ -171,6 +175,7 @@ def load_status(config_path: Path | None = None) -> Status:
         env_provider=env_provider,
         has_api_key=has_api_key,
         base_url=base_url,
+        key_env=key_var,
     )
 
 
@@ -229,7 +234,12 @@ def render_status(st: Status) -> str:
     if st.env_provider:
         pin += f"\n  RLM_PROVIDER={st.env_provider} env var pins provider at registration"
 
-    api_line = "ANTHROPIC_API_KEY=set" if st.has_api_key else "ANTHROPIC_API_KEY=MISSING"
+    # Name the variable the active provider actually reads, so the operator knows
+    # which one to set rather than being told a fixed name that may not apply.
+    if not st.key_env:
+        api_line = "not needed — the `claude` CLI holds the credential"
+    else:
+        api_line = f"{st.key_env}={'set' if st.has_api_key else 'MISSING'}"
 
     # auth.require_anthropic raises on every other provider at every door that leads
     # to a model call, so say so here rather than letting the next rlm_query be the

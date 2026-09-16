@@ -314,13 +314,13 @@ class ApiTransport(CompletionTransport):
     def _sync_client(self):
         if self._client is None:
             from .auth import make_client
-            self._client = make_client(async_=False, base_url=self.cfg.base_url)
+            self._client = make_client(async_=False, base_url=self.cfg.base_url, cfg=self.cfg)
         return self._client
 
     def _async_client(self):
         if self._aclient is None:
             from .auth import make_client
-            self._aclient = make_client(async_=True, base_url=self.cfg.base_url)
+            self._aclient = make_client(async_=True, base_url=self.cfg.base_url, cfg=self.cfg)
         return self._aclient
 
     @staticmethod

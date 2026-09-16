@@ -70,6 +70,30 @@ def require_anthropic(cfg: Config) -> None:
         )
 
 
+def key_env_for(cfg: Config) -> str:
+    """Which environment variable holds the API key for the configured provider.
+
+    Per provider, not one shared name -- the same split cline-2 keeps by storing a
+    settings entry per provider id. One shared variable meant configuring a second
+    provider overwrote the first one's key.
+    """
+    from .describe import describe_provider, provider_for_config   # data-only, no cycle
+
+    pid = provider_for_config(cfg.base_url, cfg.mode)
+    return describe_provider(pid).key_env or "ANTHROPIC_API_KEY"
+
+
+def api_key_for(cfg: Config) -> str:
+    """The configured provider's key, or '' when it is not set.
+
+    Deliberately does NOT fall back to another provider's variable. Falling back
+    would send the key you gave Anthropic to whatever third-party endpoint is
+    configured -- handing a credential to a vendor it was never issued for. A missing
+    key must fail as missing.
+    """
+    return _clean_secret(os.getenv(key_env_for(cfg))) or ""
+
+
 def claude_cli_available(cfg: Config) -> bool:
     """True if the ``claude`` CLI binary is on PATH. Login is the CLI's own concern —
     a present-but-not-logged-in CLI surfaces a clear auth error at call time."""
@@ -78,12 +102,21 @@ def claude_cli_available(cfg: Config) -> bool:
 
 def auth_status() -> str:
     """Which explicit credential is present in the environment (for status display):
-    'oauth' (a CLAUDE_CODE_OAUTH_TOKEN), 'apikey' (ANTHROPIC_API_KEY), or 'none'.
-    NOTE: claude-cli mode needs NEITHER — the CLI uses its own keychain login."""
+    'oauth' (a CLAUDE_CODE_OAUTH_TOKEN), 'apikey' (any provider key), or 'none'.
+
+    Takes no Config on purpose -- it answers "is there a credential at all", which the
+    startup line asks before a provider is resolved. Checks every provider's variable,
+    since a MiniMax-only setup has no ANTHROPIC_API_KEY and is not credential-less.
+
+    NOTE: claude-cli mode needs NEITHER — the CLI uses its own keychain login.
+    """
+    from .describe import PROVIDERS   # data-only, no cycle
+
     if _clean_secret(os.getenv("CLAUDE_CODE_OAUTH_TOKEN")):
         return "oauth"
-    if _clean_secret(os.getenv("ANTHROPIC_API_KEY")):
-        return "apikey"
+    for d in PROVIDERS.values():
+        if d.key_env and _clean_secret(os.getenv(d.key_env)):
+            return "apikey"
     return "none"
 
 
@@ -106,8 +139,8 @@ def resolve_auth_mode(cfg: Config) -> str:
             )
         return "oauth"
     if m == MODE_API:
-        if not _clean_secret(os.getenv("ANTHROPIC_API_KEY")):
-            raise RuntimeError("mode=api but ANTHROPIC_API_KEY is not set.")
+        if not api_key_for(cfg):
+            raise RuntimeError(f"mode=api but {key_env_for(cfg)} is not set.")
         return "apikey"
     # auto: prefer the CLI (reuse the Claude Code login), else the API key.
     if claude_cli_available(cfg):
@@ -117,11 +150,11 @@ def resolve_auth_mode(cfg: Config) -> str:
     raise RuntimeError(
         "No transport available. Either install + log into the `claude` CLI "
         "(recommended — reuses your Claude Code login, no key needed), or set "
-        "ANTHROPIC_API_KEY and mode=api."
+        f"{key_env_for(cfg)} and mode=api."
     )
 
 
-def make_client(async_: bool = False, base_url: str = ""):
+def make_client(async_: bool = False, base_url: str = "", cfg: Config | None = None):
     """Build an Anthropic SDK client for the **api** transport, from ANTHROPIC_API_KEY
     (used by transport.ApiTransport). The claude-cli transport does NOT use this — the
     CLI authenticates itself. SDK retries are disabled (ratelimit.py owns retry).
@@ -132,10 +165,11 @@ def make_client(async_: bool = False, base_url: str = ""):
     that config.yaml is the single visible owner of the setting; an env var read
     behind our back would make ``better-rlm where`` unable to say where calls go.
     """
-    key = _clean_secret(os.getenv("ANTHROPIC_API_KEY"))
+    var = key_env_for(cfg) if cfg is not None else "ANTHROPIC_API_KEY"
+    key = _clean_secret(os.getenv(var))
     if not key:
         raise RuntimeError(
-            "The API transport requires ANTHROPIC_API_KEY. Use mode=claude-cli "
+            f"The API transport requires {var}. Use mode=claude-cli "
             "(or the default 'auto') to reuse your Claude Code login instead."
         )
     cls = anthropic.AsyncAnthropic if async_ else anthropic.Anthropic

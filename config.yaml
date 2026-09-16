@@ -1,5 +1,5 @@
 # RLM MCP server configuration. Values here override the baked-in defaults in better_rlm/config.py.
-mode: auto                             # auto | claude-cli | api. auto: prefer the `claude` CLI
+mode: api                              # auto | claude-cli | api. auto: prefer the `claude` CLI
                                        # (reuses your Claude Code login — no token/API key needed),
                                        # else fall back to ANTHROPIC_API_KEY. Override per-launch
                                        # with the RLM_MODE env var. claude-cli forces the CLI; api forces the SDK.
@@ -78,3 +78,5 @@ sources_file: ~/.rlm/sources.yaml      # registry of named external sources (see
                                        # OUTSIDE the repo on purpose, so a site's clusters, endpoints
                                        # and tooling stay out of the checkout and out of every diff.
                                        # Ships absent: no file = no sources, and none are built in.
+
+base_url: "https://api.minimax.io/anthropic"
