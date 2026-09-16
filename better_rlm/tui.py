@@ -36,6 +36,7 @@ import os
 import shutil
 import subprocess
 import sys
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -851,6 +852,120 @@ def _dispatch_guarded(line: str, console: Console, config_path: Path) -> bool:
         return True
 
 
+@dataclass(frozen=True)
+class MenuItem:
+    """One row of the main menu. Mirrors cline-2's ``MenuOption``
+    (``views/onboarding/model.ts``): a label, a detail line explaining what it does
+    right now, and the slash command it stands for."""
+
+    key: str
+    label: str
+    detail: str
+    command: str
+
+
+def build_menu(st: Status) -> list[MenuItem]:
+    """What to offer, given the state the configuration is actually in.
+
+    cline-2's machine opens on ``menu``, not on the mode picker, and filters the rows
+    by state (``getMainMenuOptions``). The same idea, with one addition that matters
+    more here than there: anything currently BROKEN leads. An operator who lands on a
+    config that cannot make a model call should be offered the fix first, not asked to
+    know which slash command repairs it.
+    """
+    items: list[MenuItem] = []
+
+    # Problems first, most-blocking first.
+    needs_key = bool(st.key_env) and not st.has_api_key
+    if st.mode != MODE_CLI and needs_key:
+        provider = describe_provider(provider_for_config(st.base_url, st.mode)).label
+        items.append(MenuItem(
+            "", f"Supply your {provider} key",
+            f"{st.key_env} is not set — every model-backed tool fails until it is",
+            "/provider-key",
+        ))
+    if st.base_url and cli_will_win(st):
+        items.append(MenuItem(
+            "", "Fix the mode that is ignoring your endpoint",
+            f"mode={st.mode} routes to the `{st.cli_path}` CLI, so your endpoint is unused",
+            "/mode",
+        ))
+    if st.mode == MODE_CLI and st.cli_logged_in is False:
+        items.append(MenuItem(
+            "", "Sign the `claude` CLI in",
+            "mode=claude-cli, but the CLI has no login — model calls will fail",
+            "/provider-key",
+        ))
+
+    items += [
+        MenuItem("", "Run guided setup", "mode, then provider, then credential, then models", "/setup"),
+        MenuItem("", "Change mode", f"currently {st.mode}", "/mode"),
+        MenuItem("", "Change provider",
+                 f"currently {describe_provider(provider_for_config(st.base_url, st.mode)).label}",
+                 "/provider"),
+        MenuItem("", "Change models", f"root {st.root_model}, sub {st.sub_model}", "/model"),
+        MenuItem("", "Test the connection", "one tiny model call that proves auth works", "/auth-probe"),
+        MenuItem("", "Run the verify gate", "the test suite", "/test"),
+    ]
+    return [dataclasses.replace(it, key=str(n)) for n, it in enumerate(items, 1)]
+
+
+def render_menu(items: list[MenuItem]) -> Table:
+    table = Table(title="What would you like to do?", show_header=False)
+    table.add_column("#", justify="right", style="cyan", no_wrap=True)
+    table.add_column("action", style="white")
+    table.add_column("detail", style="grey50")
+    for it in items:
+        table.add_row(it.key, it.label, it.detail)
+    table.add_row("s", "Slash commands", "type any /command directly — /help lists them")
+    table.add_row("q", "Quit", "")
+    return table
+
+
+def run_menu(config_path: Path | None = None, console: Console | None = None) -> int:
+    """The default surface: show the configuration, offer what to do about it, repeat.
+
+    A bare ``better-rlm`` used to drop straight into the mode picker, which assumes
+    the operator wants to walk all four steps. Most of the time they want one thing --
+    usually the thing that is currently broken -- and the menu names it.
+    """
+    cfg_path = config_path or config_file()
+    console = console or Console()
+    while True:
+        st = load_status(cfg_path)
+        console.print()
+        console.print(Panel(render_status(st), title="[bold]better-rlm[/bold]",
+                            border_style="green"))
+        items = build_menu(st)
+        console.print(render_menu(items))
+        try:
+            choice = Prompt.ask("[bold green]Pick one[/bold green]", console=console,
+                                default="q").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[grey50]bye[/grey50]")
+            return 0
+        if choice.lower() in ("q", "quit", "exit"):
+            console.print("[grey50]bye[/grey50]")
+            return 0
+        if choice.lower() == "s":
+            return run_repl(cfg_path, console=console)
+        if choice.startswith("/"):
+            if not _dispatch_guarded(choice, console, cfg_path):
+                return 0
+            continue
+        match = next((it for it in items if it.key == choice), None)
+        if match is None:
+            console.print(f"[yellow]not an option: {choice!r}[/yellow]")
+            continue
+        if match.command == "/provider-key":
+            # The credential alone, without re-walking the provider picker.
+            pid = provider_for_config(st.base_url, st.mode)
+            auth_step(console, pid, st, env_for_config(cfg_path))
+            continue
+        if not _dispatch_guarded(match.command, console, cfg_path):
+            return 0
+
+
 def run_repl(
     config_path: Path | None = None,
     console: Console | None = None,
@@ -924,9 +1039,11 @@ def main(argv: list[str] | None = None) -> int:
     if one_shot is not None:
         _dispatch_guarded(one_shot, console, cfg_path)
         return LAST_EXIT_CODE
-    # A bare invocation opens in configuration mode. Passing --config or any other
-    # flag means the caller is driving it deliberately, so they get the plain REPL.
-    return run_repl(cfg_path, console=console, setup=not args_were_given)
+    # A bare invocation opens the menu: show the configuration, offer what to do about
+    # it. Flags mean the caller is driving deliberately, so they get the plain REPL.
+    if args_were_given:
+        return run_repl(cfg_path, console=console)
+    return run_menu(cfg_path, console=console)
 
 
 if __name__ == "__main__":  # pragma: no cover
