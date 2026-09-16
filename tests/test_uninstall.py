@@ -115,7 +115,7 @@ def test_registration_removal_is_guarded_by_the_checkout_path(sh, ps1):
 
 
 # --- line endings: Windows-only scripts must stay CRLF ------------------------
-@pytest.mark.parametrize("name", ["run_server.cmd", "install.ps1", "uninstall.ps1"])
+@pytest.mark.parametrize("name", ["run_server.cmd", "run_tui.cmd", "install.ps1", "uninstall.ps1"])
 def test_windows_only_scripts_keep_crlf(name):
     """`.gitattributes` pins these to eol=crlf, so a checkout produces CRLF on every
     platform. An editor (or a script) that rewrites one with LF silently undoes that —
