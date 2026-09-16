@@ -76,7 +76,32 @@ else
   fi
 fi
 
-# 2) Skill links --------------------------------------------------------------
+# 2) better-rlm command -------------------------------------------------------
+# Before the venv: once .venv_sh is gone the link is dangling, and a dangling
+# link is exactly the orphan this step exists to prevent. Ownership-guarded the
+# same way the skill links and the MCP registration are -- another checkout may
+# legitimately own the global name, and silently unlinking theirs would make an
+# uninstall here break an install there.
+echo "==> better-rlm command"
+BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
+SHIM="$DIR/.venv_sh/bin/better-rlm"
+LINK="$BIN_DIR/better-rlm"
+if [ -L "$LINK" ]; then
+  # -L before -e: the link is dangling if .venv_sh went first, and -e is false for one.
+  TARGET="$(readlink "$LINK")"
+  if [ "$TARGET" = "$SHIM" ]; then
+    run rm -f "$LINK"
+    did "removed $LINK"
+  else
+    echo "  WARNING: $LINK points at another checkout ($TARGET) — left as-is."
+  fi
+elif [ -e "$LINK" ]; then
+  echo "  WARNING: $LINK is a real file, not a link — left as-is (not ours to delete)."
+else
+  echo "  better-rlm not linked — nothing to do"
+fi
+
+# 3) Skill links --------------------------------------------------------------
 # Loops skills/*/ for the same reason install.sh does: adding a skill needs no edit here.
 echo "==> Skill links (~/.claude/skills)"
 for SRC in "$DIR"/skills/*/; do
@@ -99,7 +124,7 @@ for SRC in "$DIR"/skills/*/; do
   fi
 done
 
-# 3) Oversized-read hook -----------------------------------------------------
+# 4) Oversized-read hook -----------------------------------------------------
 # Ownership-checked like the registration above: the settings.json entry is removed only
 # when its command names the hook file THIS uninstall deletes. A stale entry left behind
 # is worse than an orphaned symlink - a PreToolUse hook pointing at a missing file fails
@@ -115,7 +140,7 @@ else
   python3 "$DIR/scripts/install_hook.py" --remove
 fi
 
-# 4) Verify gate --------------------------------------------------------------
+# 5) Verify gate --------------------------------------------------------------
 echo "==> Verify gate (core.hooksPath)"
 if ! git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1; then
   echo "  not a git checkout — skipped"
@@ -131,7 +156,7 @@ else
   fi
 fi
 
-# 5) Python env + build artefacts --------------------------------------------
+# 6) Python env + build artefacts --------------------------------------------
 # .venv goes too: the pre-push gate and `uv run` recreate it on demand, so removing it
 # costs nothing and leaving it behind contradicts "uninstalled".
 echo "==> Python env + build artefacts"
@@ -144,7 +169,7 @@ for P in .venv_sh .venv rlm_mcp.egg-info; do
   fi
 done
 
-# 6) .env ---------------------------------------------------------------------
+# 7) .env ---------------------------------------------------------------------
 # install.sh creates this by copying .env.example. Untouched, it holds no secret and can go.
 # Edited, it may hold CLAUDE_CODE_OAUTH_TOKEN or an API key — deleting that silently would
 # destroy a credential the operator pasted, so it is reported and kept instead.
@@ -160,7 +185,7 @@ else
   echo "             rm $DIR/.env"
 fi
 
-# 7) Loaded contexts + logs (opt-in) -----------------------------------------
+# 8) Loaded contexts + logs (opt-in) -----------------------------------------
 echo "==> Store dir (~/.rlm)"
 STORE="$HOME/.rlm"
 if [ ! -d "$STORE" ]; then
@@ -174,7 +199,7 @@ else
   echo "  data. Delete with: ./uninstall.sh --purge-data"
 fi
 
-# 8) Sandbox image (opt-in) --------------------------------------------------
+# 9) Sandbox image (opt-in) --------------------------------------------------
 echo "==> Docker sandbox image (rlm-sandbox)"
 if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   echo "  docker unavailable — skipped"

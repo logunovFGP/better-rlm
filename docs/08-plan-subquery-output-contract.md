@@ -24,16 +24,16 @@ independently green and mergeable. Two items get no code and say why.
 ## Context to load first
 
 - `docs/07-review-session-budget-and-resume.md` §4, §5, §9, §10 — the findings this closes.
-- `src/batch.py` — `run`, `one`, `_render`, `_reduce`, `_scan_cache`, `_mk_prompt`.
-- `src/subquery.py` — `sub_query`, `sub_query_batch`; both already take `system`.
-- `src/transport.py` `_argv`/`_prepare` — the flag plumbing, already tested in both modes.
-- `src/results.py` — `content_key`, `run_key`, `sweep`.
-- `src/context_store.py` — `_with_byte_offsets`, `_offsets_still_apply`, the `chunks` records.
+- `better_rlm/batch.py` — `run`, `one`, `_render`, `_reduce`, `_scan_cache`, `_mk_prompt`.
+- `better_rlm/subquery.py` — `sub_query`, `sub_query_batch`; both already take `system`.
+- `better_rlm/transport.py` `_argv`/`_prepare` — the flag plumbing, already tested in both modes.
+- `better_rlm/results.py` — `content_key`, `run_key`, `sweep`.
+- `better_rlm/context_store.py` — `_with_byte_offsets`, `_offsets_still_apply`, the `chunks` records.
 - `TRUNK-BASED-PATTERNS.md` — the loop. Name the step as you go.
 
 ## Defect being fixed (measured)
 
-`grep -rn "system=" src/ tests/` returns **nothing**. Every transport, `_call`,
+`grep -rn "system=" better_rlm/ tests/` returns **nothing**. Every transport, `_call`,
 `sub_query` and `sub_query_batch` accepts a `system` argument and no caller has ever
 passed one, so every sub-model call runs under the `claude` CLI's default coding-assistant
 persona. The output contract sits in the user turn — the prompt first, then the chunk
@@ -72,7 +72,7 @@ answer cached under the old persona becomes a wrong answer that still looks vali
 
 ### Steps
 
-1. **Two constants in `src/batch.py`**, next to `BATCH_MAX_TOKENS`. Measured with
+1. **Two constants in `better_rlm/batch.py`**, next to `BATCH_MAX_TOKENS`. Measured with
    `config.estimate_tokens`: `MAP_SYSTEM` 694 chars / ~173 tokens, `TERSE_SYSTEM` 242
    chars / ~60 tokens. `MAP_SYSTEM` × 33 = ~5,709 input tokens, against the ~300K output
    it targets.
@@ -106,7 +106,7 @@ answer cached under the old persona becomes a wrong answer that still looks vali
    `AnthropicTransport._kwargs` already forwards `system` when truthy, so both auth paths
    are covered with no branch.
 
-3. **`system` into both cache keys** (`src/results.py`). `content_key(chunk_text, prompt,
+3. **`system` into both cache keys** (`better_rlm/results.py`). `content_key(chunk_text, prompt,
    model)` and `run_key(prompt, model, strategy, n_chunks)` each gain the system text;
    thread it through `_scan_cache` from `batch.run` and `batch.estimate`. Hash the **text**,
    not a version tag — then any future edit to `MAP_SYSTEM` self-invalidates with no
@@ -116,7 +116,7 @@ answer cached under the old persona becomes a wrong answer that still looks vali
    answers came from a different contract. It also means the receipt run below needs no
    `fresh=True`.
 
-4. **`estimate_batch` counts it** (`src/budget.py`). Add `system: str = ""`, fold
+4. **`estimate_batch` counts it** (`better_rlm/budget.py`). Add `system: str = ""`, fold
    `estimate_tokens(system)` into `per_prompt_overhead`; pass it from `batch.estimate`
    and `batch.run`. An explicit parameter, not concatenation into `prompt` — that would
    be a lie the next reader has to decode. Worth two lines because the docstring already
@@ -152,7 +152,7 @@ answer cached under the old persona becomes a wrong answer that still looks vali
   forecast, which stays pessimistic for 48h per step 6. This is a hypothesis until that
   number exists; 5,709 input tokens is the price of testing it. If output does not fall by
   most of 5x, the diagnosis is wrong and Leaf 1 is the wrong fix, not an incomplete one.
-- Reconnect the `rlm` MCP server before measuring. Python imports `src/` once at startup.
+- Reconnect the `rlm` MCP server before measuring. Python imports `better_rlm/` once at startup.
 
 ---
 

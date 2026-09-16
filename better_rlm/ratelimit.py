@@ -47,7 +47,7 @@ from .logsetup import log_event
 #:    ceiling-learning that DID write to disk now lives in transport, next to its cfg.
 #:
 #: The retry decorator also wraps engine methods whose first argument is `self`
-#: (src/auth.py patches AnthropicClient.completion), so cfg cannot be threaded in
+#: (better_rlm/auth.py patches AnthropicClient.completion), so cfg cannot be threaded in
 #: positionally the way subquery's was.
 _CFG = load_config()
 _LOG = logging.getLogger("rlm-mcp")

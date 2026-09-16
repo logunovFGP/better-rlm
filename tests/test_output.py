@@ -1,5 +1,5 @@
-import src.output as out
-from src.output import bound_output
+import better_rlm.output as out
+from better_rlm.output import bound_output
 
 
 def test_under_cap_unchanged():
@@ -17,7 +17,7 @@ def test_skipped_sample_is_bounded_and_says_how_many_it_left_out():
     """The sample is capped at 20 because an unbounded list once wrote 3,000 entries /
     128 KB into a meta.json that list_metas() parses on every call. Capping silently
     would understate the damage, so the tail has to name the remainder."""
-    from src.output import skipped_block
+    from better_rlm.output import skipped_block
 
     class _Meta:
         file_count = 1

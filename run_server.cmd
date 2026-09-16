@@ -13,4 +13,4 @@ REM encoding at every host write itself, so this is belt-and-braces.
 set PYTHONUTF8=1
 REM Windows-only venv (.venv_windows) — kept separate from the POSIX .venv_sh so a
 REM WSL-shared checkout doesn't cross-clobber interpreters.
-"%~dp0.venv_windows\Scripts\python.exe" -m src.server
+"%~dp0.venv_windows\Scripts\python.exe" -m better_rlm.server

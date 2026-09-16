@@ -11,10 +11,10 @@ import time
 
 import pytest
 
-import src.batch as bt
-import src.budget as budget
-import src.results as results
-from src.config import load_config
+import better_rlm.batch as bt
+import better_rlm.budget as budget
+import better_rlm.results as results
+from better_rlm.config import load_config
 from tests.conftest import FrozenClock
 
 
@@ -184,7 +184,7 @@ def test_the_reduce_call_is_priced_at_the_cap_it_actually_runs_with(bcfg):
     """BATCH_MAX_TOKENS' own comment: the estimate and the call that spends the tokens
     must use the same number. The synthesis is issued at REDUCE_MAX_TOKENS, so a forecast
     that priced it at the per-chunk cap was not a forecast of this run."""
-    from src.batch import BATCH_MAX_TOKENS, REDUCE_MAX_TOKENS
+    from better_rlm.batch import BATCH_MAX_TOKENS, REDUCE_MAX_TOKENS
 
     assert REDUCE_MAX_TOKENS != BATCH_MAX_TOKENS, "otherwise this test proves nothing"
     at_map_cap = budget.estimate_batch(bcfg, [1_000] * 3, prompt="p",
@@ -547,7 +547,7 @@ def test_startup_sweeps_both_the_cache_and_the_store(bcfg, monkeypatch):
     housekeeping in Deps.create, beside log retention -- and deleting either call is
     otherwise invisible to every test in this file, which exercises the sweeps directly.
     """
-    import src.deps as deps_mod
+    import better_rlm.deps as deps_mod
     called: list[str] = []
     monkeypatch.setattr(deps_mod, "configure_logging", lambda cfg: None)
     monkeypatch.setattr(deps_mod.results, "sweep", lambda c: called.append("cache"))
@@ -588,7 +588,7 @@ def test_a_second_run_pays_only_for_the_chunks_it_is_missing(monkeypatch, batch_
     """THE headline fix. The incident was a 30-minute run that returned nothing and would
     have cost the same again. Here the second call must make model calls only for what
     the first did not finish."""
-    import src.subquery as sq
+    import better_rlm.subquery as sq
     d, _events = batch_ctx(4)
     asked: list[list[int]] = []
 
@@ -612,7 +612,7 @@ def test_a_second_run_pays_only_for_the_chunks_it_is_missing(monkeypatch, batch_
 def test_a_budget_stop_leaves_a_resumable_gap_not_a_lost_run(monkeypatch, batch_ctx):
     """A stopped run must (a) keep what it bought, (b) say it is partial, and (c) resume
     at the gap. Losing any of the three reproduces the original incident."""
-    import src.subquery as sq
+    import better_rlm.subquery as sq
     d, _events = batch_ctx(4)
     asked: list[list[int]] = []
 
@@ -650,11 +650,11 @@ def test_every_completion_reaches_the_ledger_including_the_engine_path(bcfg, mon
 
     Recording spend in subquery.py only left the single most expensive tool — rlm_query,
     whose sub-calls go through the engine's client (rebound onto get_transport by
-    src/auth.py) — spending its whole window budget invisibly, so rlm_estimate would then
+    better_rlm/auth.py) — spending its whole window budget invisibly, so rlm_estimate would then
     report headroom that had already been consumed. Recording in the transport is what
     makes "all model calls" mean all of them.
     """
-    import src.transport as tp
+    import better_rlm.transport as tp
 
     class _Backend:
         def complete(self, messages, system, model, max_tokens):
@@ -679,7 +679,7 @@ def test_every_completion_reaches_the_ledger_including_the_engine_path(bcfg, mon
 
 def test_the_ledger_wrapper_does_not_hide_which_backend_was_chosen(bcfg):
     """Wrapping every transport must stay invisible to callers that ask what they got."""
-    import src.transport as tp
+    import better_rlm.transport as tp
 
     class _Backend:
         def complete(self, *a):
@@ -800,7 +800,7 @@ def test_the_learned_ceiling_records_when_it_was_observed(bcfg, clock):
 def test_a_re_loaded_copy_of_the_same_file_pays_nothing(monkeypatch, batch_ctx):
     """The gap the ctx-keyed design had: same bytes, new ctx_id, full re-spend. Two
     different ctx_ids over identical chunk text must share every answer."""
-    import src.subquery as sq
+    import better_rlm.subquery as sq
     d, _ = batch_ctx(4)
     asked: list[list[int]] = []
 
@@ -823,7 +823,7 @@ def test_only_the_changed_chunk_is_re_asked(monkeypatch, batch_ctx):
     """Edit one file in a repo, re-analyse: exactly one call. This is the property that
     makes the cache worth having, and it only holds when chunk boundaries are stable --
     which is why default_strategy prefers `files`."""
-    import src.subquery as sq
+    import better_rlm.subquery as sq
     asked: list[list[int]] = []
 
     def fake_batch(cfg, prompts, model, concurrency=1, indices=None, on_result=None, **kw):

@@ -56,7 +56,7 @@ open(os.path.join(K8S, "db.yaml"), "w").write(
 open(os.path.join(REPO, "models.py"), "w").write("def make_user(name):\n    return {'name': name}\n")
 open(os.path.join(REPO, "api.py"), "w").write("from models import make_user\n\ndef handler(n):\n    return make_user(n)\n")
 
-import src.server as s  # noqa: E402
+import better_rlm.server as s  # noqa: E402
 
 
 def show(title, out):
@@ -124,5 +124,5 @@ if s._repl is not None:
 print("\n========== AUTH-GATED (require Claude Code OAuth token) ==========")
 print(f"rlm_query({ctx}, 'Summarize the dominant error pattern and its peak hour')  -> Sonnet root + Haiku sub")
 print(f"rlm_sub_query_batch({ctx}, 'List any error signatures in this chunk')        -> Haiku map-reduce")
-import src.auth as _a
+import better_rlm.auth as _a
 print("auth mode:", _a.auth_status(), " (run `claude setup-token`; set CLAUDE_CODE_OAUTH_TOKEN in .env)")

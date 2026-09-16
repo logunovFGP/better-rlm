@@ -100,16 +100,16 @@ untested fallback is exactly how regression 1 reached `main`.
 
 - `CLAUDE.md` (repo root) — verify command, vendored-engine rules, server-restart note
 - `TRUNK-BASED-PATTERNS.md` — leaf workflow; this plan is 3 sequential leaves
-- `src/chunking.py` — `Chunk` dataclass (line ~26), `chunk_text` (line ~90)
-- `src/context_store.py` — `read_text` (:368), `read_chunk` (:371), `set_chunks` (:402), `_finalize`/`meta.bytes` (:193), in-place file reference (:227)
-- `src/subquery.py` — `sub_query_batch` (:56), `work()` (:70), `pool.map` (:85)
-- `src/server.py` — `rlm_chunk_context` (:342, `set_chunks` call :358), `rlm_read_chunk` (:399), `rlm_sub_query` (:502), `rlm_sub_query_batch` (auto-chunk :543, prompt comprehension :550)
+- `better_rlm/chunking.py` — `Chunk` dataclass (line ~26), `chunk_text` (line ~90)
+- `better_rlm/context_store.py` — `read_text` (:368), `read_chunk` (:371), `set_chunks` (:402), `_finalize`/`meta.bytes` (:193), in-place file reference (:227)
+- `better_rlm/subquery.py` — `sub_query_batch` (:56), `work()` (:70), `pool.map` (:85)
+- `better_rlm/server.py` — `rlm_chunk_context` (:342, `set_chunks` call :358), `rlm_read_chunk` (:399), `rlm_sub_query` (:502), `rlm_sub_query_batch` (auto-chunk :543, prompt comprehension :550)
 - `tests/test_batch_failfast.py` — fake-store pattern to copy for new tests
 
 ## Defect being fixed (measured)
 
 `ContextStore.read_chunk` re-reads and re-decodes the **entire** context file per
-chunk (`src/context_store.py:378`). `rlm_sub_query_batch` calls it N times →
+chunk (`better_rlm/context_store.py:378`). `rlm_sub_query_batch` calls it N times →
 O(context²) per batch, plus the full prompt list (~= whole context) is held in RAM
 for the entire multi-minute batch.
 
@@ -127,15 +127,15 @@ of file size. (Chunk *time* still reads the full text once — inherent, out of 
 
 1. Verify command is exactly `uv run --extra dev pytest -q`. Green before every merge.
 2. Branching: `leaf/<type>/<slug>` off `main`, merge `--no-ff`, delete after. No worktrees.
-3. Do not touch `rlm/` (vendored engine) — all changes live in `src/` and `tests/`.
+3. Do not touch `rlm/` (vendored engine) — all changes live in `better_rlm/` and `tests/`.
 4. Do not add caching of decoded text. `load_file` references user files in place
-   (`src/context_store.py:227`); a text cache can go stale. Out of scope.
+   (`better_rlm/context_store.py:227`); a text cache can go stale. Out of scope.
 5. Python floor is 3.11 (`pyproject.toml`): `Path.read_text` has **no** `newline`
    parameter before 3.13 — use `path.open(encoding=..., errors=..., newline="")`.
 6. Behavior contract that every leaf preserves: for any already-stored context,
    `read_chunk(ctx, i)` returns *exactly* `read_text(ctx)[start:end]` for that
    chunk's char offsets.
-7. Edits to `src/` do not affect a running MCP server until it is reconnected —
+7. Edits to `better_rlm/` do not affect a running MCP server until it is reconnected —
    never claim a fix is live from disk state.
 
 ---
@@ -147,7 +147,7 @@ offsets. No reader uses them yet — this leaf is inert for behavior.
 
 ### Steps
 
-1. **Kill newline translation in `read_text`** (`src/context_store.py:368`) so
+1. **Kill newline translation in `read_text`** (`better_rlm/context_store.py:368`) so
    decoded char offsets correspond 1:1 to on-disk bytes for CRLF files:
 
    ```python
@@ -162,12 +162,12 @@ offsets. No reader uses them yet — this leaf is inert for behavior.
 
    Consistency requirement: chunk char offsets (produced by `chunk_text` over this
    text) and the byte-offset walk in step 3 MUST both operate on this same
-   untranslated text. Nothing else in `src/` may re-introduce translation.
+   untranslated text. Nothing else in `better_rlm/` may re-introduce translation.
    Impact check: `read_text` callers are `server.py:351,471,517,543,649` and
    `read_chunk` — all feed model prompts or the sandbox; `\r` survival is benign.
    Store-written content files are written `newline=""` already and are unaffected.
 
-2. **Add fields to `Chunk`** (`src/chunking.py`, dataclass at ~:26):
+2. **Add fields to `Chunk`** (`better_rlm/chunking.py`, dataclass at ~:26):
 
    ```python
    byte_start: int = -1   # -1 = unknown; readers must fall back
@@ -176,7 +176,7 @@ offsets. No reader uses them yet — this leaf is inert for behavior.
 
    `as_dict` uses `asdict` — picks them up automatically.
 
-3. **Compute offsets in `set_chunks`** (`src/context_store.py:402`), not in
+3. **Compute offsets in `set_chunks`** (`better_rlm/context_store.py:402`), not in
    `chunk_text` — the store knows the file, so this covers every caller
    (`server.py:358`, `server.py:545`, tests). Algorithm: single prefix-sum pass,
    then self-validate against the raw file size:
@@ -230,7 +230,7 @@ when they don't (old metas, invalid-UTF-8 files).
 
 ### Steps
 
-1. **Fast path in `read_chunk`** (`src/context_store.py:371`):
+1. **Fast path in `read_chunk`** (`better_rlm/context_store.py:371`):
 
    ```python
    ch = meta.chunks[index]
@@ -278,7 +278,7 @@ cheap, or laziness re-introduces slow reads *serially* inside workers).
 
 ### Steps
 
-1. **`sub_query_batch` accepts callables** (`src/subquery.py:56`) — minimal,
+1. **`sub_query_batch` accepts callables** (`better_rlm/subquery.py:56`) — minimal,
    backward-compatible; do NOT pass a generator to the pool (`pool.map` +
    `enumerate` submits eagerly; tiny callables are fine to materialize, 120 KB
    strings are not):
@@ -298,7 +298,7 @@ cheap, or laziness re-introduces slow reads *serially* inside workers).
 
    Existing string-list callers (tests) keep working unchanged.
 
-2. **Server passes builders** (`src/server.py:550`) — replace the comprehension:
+2. **Server passes builders** (`better_rlm/server.py:550`) — replace the comprehension:
 
    ```python
    def _mk_prompt(i: int, _n: int = n, _p: str = prompt) -> str:

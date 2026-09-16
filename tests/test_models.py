@@ -1,7 +1,7 @@
 import dataclasses
 
-from src.config import MODEL_HAIKU, MODEL_OPUS, MODEL_SONNET_5, load_config
-from src.models import Role, configured, map_for_mode, policy_name
+from better_rlm.config import MODEL_HAIKU, MODEL_OPUS, MODEL_SONNET_5, load_config
+from better_rlm.models import Role, configured, map_for_mode, policy_name
 
 
 def test_apikey_mode_uses_configured_models_verbatim():

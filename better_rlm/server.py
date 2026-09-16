@@ -3,7 +3,7 @@
 
 Fork of eesb99/rlm-mcp, modernized for the current rlms engine:
   * Anthropic models — Sonnet 5 root (Opus 4.8 override), Haiku 4.5 sub-LLM,
-    selected via a strategy (src/models.py): under Claude Code OAuth each role
+    selected via a strategy (better_rlm/models.py): under Claude Code OAuth each role
     maps to the closest subscription-supported sibling.
   * Auth reuses Claude Code's OAuth (run `claude setup-token`) — NO API key needed;
     ANTHROPIC_API_KEY is an opt-in fallback only.
@@ -12,7 +12,7 @@ Fork of eesb99/rlm-mcp, modernized for the current rlms engine:
   * Bounded tool output — raw-content tools capped tight (~4 KB) so file content never
     floods the root context; synthesis answers (rlm_query/sub_query) bound generously.
 
-Run:  python -m src.server   (stdio transport)
+Run:  python -m better_rlm.server   (stdio transport)
 """
 
 from __future__ import annotations
@@ -150,7 +150,7 @@ def rlm_load_file(path: str, data_type: str = "text") -> str:
 
 
 def _sources() -> dict[str, sources.Source]:
-    """Re-read the registry on every call: a running server holds its own copy of src/,
+    """Re-read the registry on every call: a running server holds its own copy of better_rlm/,
     and this file is the one thing operators edit routinely (see sources.py)."""
     return sources.load_sources(CFG.sources_file)
 

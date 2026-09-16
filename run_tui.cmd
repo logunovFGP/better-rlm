@@ -7,4 +7,4 @@ REM the Windows-only venv lives at .venv_windows\Scripts.
 setlocal
 cd /d %~dp0
 set PYTHONUTF8=1
-"%~dp0.venv_windows\Scripts\python.exe" -m src.cli %*
+"%~dp0.venv_windows\Scripts\python.exe" -m better_rlm.cli %*

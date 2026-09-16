@@ -54,7 +54,7 @@ computed from token counts × verified rates (Sonnet $3/$15, Opus $5/$25, Haiku 
 
 ## OAuth → `claude` CLI transport (verified live 2026-06-30)
 Under OAuth the server drives the official `claude` CLI instead of the HTTP API (Strategy in
-`src/transport.py`). Verified end-to-end with a `claude setup-token` token in `.env`, **no API key**:
+`better_rlm/transport.py`). Verified end-to-end with a `claude setup-token` token in `.env`, **no API key**:
 
 - **CLI mechanics / OAuth headless:** `claude -p --output-format json --model claude-haiku-4-5
   --safe-mode --tools "" --no-session-persistence` → `{"subtype":"success","result":"OK",

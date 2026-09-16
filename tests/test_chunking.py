@@ -1,4 +1,4 @@
-from src.chunking import chunk_text
+from better_rlm.chunking import chunk_text
 
 
 def _reconstructs(text, chunks):

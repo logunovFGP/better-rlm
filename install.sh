@@ -37,6 +37,39 @@ else
   .venv_sh/bin/pip install -e ".[dev,pdf]"
 fi
 
+echo "==> better-rlm command"
+# The editable install above creates .venv_sh/bin/better-rlm (pyproject
+# [project.scripts]). That directory is not on PATH, so link the one file --
+# same `ln -sfn` pattern the skill step below uses. The shebang inside it is
+# absolute, so the link resolves to THIS checkout's interpreter from anywhere.
+#
+# One global name, many possible checkouts: the last installer to run owns it.
+# Report a hijack instead of doing it silently -- the per-checkout scripts
+# (./run_tui.sh, ./run_server.sh) stay the way to address a specific one.
+BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
+SHIM="$DIR/.venv_sh/bin/better-rlm"
+LINK="$BIN_DIR/better-rlm"
+if [ ! -x "$SHIM" ]; then
+  echo "  WARNING: $SHIM was not created — is [project.scripts] still in pyproject.toml?"
+elif [ -e "$LINK" ] && [ ! -L "$LINK" ]; then
+  echo "  WARNING: $LINK exists and is not a symlink — leaving it."
+  echo "           Run this checkout with $DIR/run_tui.sh instead."
+else
+  PREV="$(readlink "$LINK" 2>/dev/null || true)"
+  mkdir -p "$BIN_DIR"
+  ln -sfn "$SHIM" "$LINK"
+  if [ -n "$PREV" ] && [ "$PREV" != "$SHIM" ]; then
+    echo "  NOTE: 'better-rlm' pointed at another checkout and now points here."
+    echo "        was: $PREV"
+  fi
+  echo "  linked $LINK -> $SHIM"
+  case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *) echo "  WARNING: $BIN_DIR is not on PATH — add it to your shell profile:"
+       echo "             export PATH=\"$BIN_DIR:\$PATH\"" ;;
+  esac
+fi
+
 echo "==> Docker sandbox image (rlm-sandbox)"
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   # Non-fatal: a registry timeout on the base image must not abort setup under `set -e`
@@ -113,7 +146,7 @@ else
   elif [ "$AUTH" -eq 1 ]; then
     echo "  Not logged in. Running \`claude setup-token\` — complete it in the browser."
     echo "  It prints the token once; paste it at the hidden prompt afterwards and this"
-    echo "  script stores it in $DIR/.env (gitignored, 0600, loaded by src/config.py)."
+    echo "  script stores it in $DIR/.env (gitignored, 0600, loaded by better_rlm/config.py)."
     echo
     if claude setup-token; then
       if [ -t 0 ]; then

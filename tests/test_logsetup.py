@@ -6,8 +6,8 @@ import os
 import sys
 from pathlib import Path
 
-from src.config import load_config
-import src.logsetup as ls
+from better_rlm.config import load_config
+import better_rlm.logsetup as ls
 
 
 def _cfg(tmp_path, **over):
@@ -242,12 +242,12 @@ def test_sweep_collects_orphaned_tmps_but_spares_one_in_flight(tmp_path):
 def test_the_suite_never_attaches_a_file_handler_to_the_real_log_dir():
     """Regression guard for the conftest fixture that keeps pytest out of ~/.rlm/logs.
 
-    Importing src.server runs ``configure_logging(CFG)`` against the REAL config, which
+    Importing better_rlm.server runs ``configure_logging(CFG)`` against the REAL config, which
     is how 18 of 20 files in the operator's live log dir came to be pytest debris. The
     autouse fixture strips that handler before every test; this asserts it is gone even
     right after the import that installs it.
     """
-    import src.server  # noqa: F401 - the import IS the thing under test
+    import better_rlm.server  # noqa: F401 - the import IS the thing under test
 
     real_dir = load_config().log_dir.resolve()
     for h in logging.getLogger(ls.LOGGER_NAME).handlers:

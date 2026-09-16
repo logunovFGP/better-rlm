@@ -2,7 +2,7 @@
 """Write VERSION into .claude-plugin/plugin.json. Run after bumping VERSION.
 
 plugin.json is static JSON read by Claude Code's plugin loader before any of this
-project's code runs, so it cannot import src.version the way everything else does. This
+project's code runs, so it cannot import better_rlm.version the way everything else does. This
 is the one place a second copy is unavoidable -- so it is generated rather than typed,
 and tests/test_plugin_manifest.py fails if the two ever drift.
 

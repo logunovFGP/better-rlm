@@ -5,7 +5,7 @@ resolved to, or the error. Use this to pick the right model per role under OAuth
 Usage:  python scripts/probe_models.py
 """
 import re
-import src.auth as auth
+import better_rlm.auth as auth
 
 CANDIDATES = [
     "claude-haiku-4-5",

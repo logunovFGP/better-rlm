@@ -72,3 +72,54 @@ def test_release_reads_the_version_from_the_same_file_the_package_does():
     # The specific thing that would break: parsing a [project] version that no longer exists.
     assert "tomllib" not in gate[0]["run"]
     assert "['project']['version']" not in gate[0]["run"]
+
+
+# --- PyPI publish -------------------------------------------------------------
+# PyPI is the one irreversible step in this workflow: a version number burned there
+# can never be reused, even after a yank. These pin the properties that keep an
+# accidental or unauthenticated publish from happening.
+
+
+def test_publish_job_runs_only_after_a_green_release():
+    publish = _workflow()["jobs"]["publish"]
+    assert publish["needs"] == "release", (
+        "publish must depend on release — otherwise a failed verify still reaches PyPI"
+    )
+
+
+def test_publish_is_skipped_on_a_dry_run():
+    # The whole point of dry_run is 'change nothing anywhere'. A publish step that
+    # ignores it would push to PyPI from a run whose summary says it published nothing.
+    assert "!inputs.dry_run" in _workflow()["jobs"]["publish"]["if"].replace(" ", "")
+
+
+def test_publish_uses_trusted_publishing_and_stores_no_token():
+    """OIDC, not a stored API token.
+
+    A PyPI token in repo secrets is a long-lived credential that publishes as you
+    from anywhere it leaks. Trusted Publishing mints a short-lived one per run, so
+    the repository holds no publishing credential at all.
+    """
+    publish = _workflow()["jobs"]["publish"]
+    assert publish["permissions"] == {"id-token": "write"}, (
+        "publish needs exactly id-token: write — job permissions replace the "
+        "workflow-level block, so anything extra is over-granting"
+    )
+    body = WORKFLOW.read_text(encoding="utf-8")
+    assert "pypa/gh-action-pypi-publish" in body
+    for forbidden in ("PYPI_API_TOKEN", "PYPI_TOKEN", "with:\n          password:"):
+        assert forbidden not in body, f"{forbidden} — publishing must not use a stored token"
+
+
+def test_publish_ships_the_artifacts_the_release_job_built():
+    """GitHub and PyPI must receive byte-identical files.
+
+    A publish job that runs its own `uv build` can produce a different wheel than the
+    one attached to the GitHub release — same version, different bytes, and no way to
+    tell afterwards which one a user installed.
+    """
+    steps = _workflow()["jobs"]["publish"]["steps"]
+    assert any("download-artifact" in (s.get("uses") or "") for s in steps)
+    assert not any("uv build" in (s.get("run") or "") for s in steps), (
+        "publish rebuilds instead of reusing the release job's dist/"
+    )

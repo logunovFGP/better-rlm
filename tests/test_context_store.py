@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from src.chunking import chunk_text
-from src.context_store import ContextStore, _text_digest
+from better_rlm.chunking import chunk_text
+from better_rlm.context_store import ContextStore, _text_digest
 
 
 def _lines(store, meta, text, *, chunk_lines=1, **kw):

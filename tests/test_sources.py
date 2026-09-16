@@ -3,8 +3,8 @@ import sys
 
 import pytest
 
-from src.context_store import ContextStore
-from src.sources import DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT_S, load_sources, resolve
+from better_rlm.context_store import ContextStore
+from better_rlm.sources import DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT_S, load_sources, resolve
 
 PY = sys.executable  # never a shell builtin: these tests must pass on Windows too
 
@@ -219,7 +219,7 @@ def test_command_context_gets_byte_offsets_on_every_platform(cfg):
     fast path must engage either way: it briefly did not on Windows, which silently left
     every command-sourced context there on the O(file)-per-chunk path while the same
     command on Linux ran fast. Content-driven, so this asserts the same on both."""
-    from src.chunking import chunk_text
+    from better_rlm.chunking import chunk_text
 
     code = "import sys" + chr(59) + " [sys.stdout.write('line %d\\n' % i) for i in range(60)]"
     store = ContextStore(cfg)
@@ -266,7 +266,7 @@ def test_load_command_kills_a_command_that_overruns_its_timeout(cfg):
 
 # --- the rlm_load_source tool contract -------------------------------------
 def _server(monkeypatch, cfg, tmp_path, body):
-    import src.server as S
+    import better_rlm.server as S
     monkeypatch.setattr(S, "CFG", dataclasses.replace(cfg, sources_file=_registry(tmp_path, body)))
     monkeypatch.setattr(S, "STORE", ContextStore(S.CFG))
     return S
@@ -337,5 +337,5 @@ def test_config_exposes_a_sources_file_path(cfg, tmp_path):
     # The registry lives outside the repo so a site's infrastructure never lands in a diff.
     assert dataclasses.replace(cfg, sources_file=tmp_path / "s.yaml").sources_file.name \
         == "s.yaml"
-    from src.config import load_config
+    from better_rlm.config import load_config
     assert load_config().sources_file.name == "sources.yaml"

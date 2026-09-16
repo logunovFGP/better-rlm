@@ -29,9 +29,9 @@ refused outright rather than served by a path the budget cannot see (§9).
 
 | Sub-cause | Mechanism | Where |
 |---|---|---|
-| No forecast before spending | `rlm_estimate` / `budget.estimate_batch` + a **ceiling** for `rlm_query` (which cannot be forecast) | `src/budget.py`, `src/batch.py` |
-| Nothing stopped the run before the wall | a **floor** under every completion at 95% of the window, plus the batch's polite early-stop `Gate` | `src/transport.py`, `src/budget.py` |
-| Completed work lived only in memory | content-addressed **answer cache** (batch) and **checkpoint/resume** (`rlm_query`) | `src/results.py`, `rlm/core/rlm.py`, `src/engine.py` |
+| No forecast before spending | `rlm_estimate` / `budget.estimate_batch` + a **ceiling** for `rlm_query` (which cannot be forecast) | `better_rlm/budget.py`, `better_rlm/batch.py` |
+| Nothing stopped the run before the wall | a **floor** under every completion at 95% of the window, plus the batch's polite early-stop `Gate` | `better_rlm/transport.py`, `better_rlm/budget.py` |
+| Completed work lived only in memory | content-addressed **answer cache** (batch) and **checkpoint/resume** (`rlm_query`) | `better_rlm/results.py`, `rlm/core/rlm.py`, `better_rlm/engine.py` |
 
 Plus a `~/.rlm/usage.jsonl` **ledger** of every completion so the next forecast sees
 what the last run spent.
@@ -40,14 +40,14 @@ what the last run spent.
 
 | Commit | What | Read first |
 |---|---|---|
-| `fd95a61` feat | Ledger, estimate, `Gate`, per-chunk persistence, `rlm_estimate`/`rlm_budget`, skill routing; tests stopped writing into the real `~/.rlm` | `src/budget.py` |
-| `ab3d161` fix | `bound_output` measured raw bytes; the MCP client counts JSON-encoded chars. A 131,072-byte reply arrived as 134,245 and was refused — a finished 30-call batch surfaced as an error | `src/output.py::encoded_len` |
+| `fd95a61` feat | Ledger, estimate, `Gate`, per-chunk persistence, `rlm_estimate`/`rlm_budget`, skill routing; tests stopped writing into the real `~/.rlm` | `better_rlm/budget.py` |
+| `ab3d161` fix | `bound_output` measured raw bytes; the MCP client counts JSON-encoded chars. A 131,072-byte reply arrived as 134,245 and was refused — a finished 30-call batch surfaced as an error | `better_rlm/output.py::encoded_len` |
 | `505c333` test | Eight hand-copied `_Meta`/`_Store` stubs → one `batch_ctx` factory | `tests/conftest.py` |
-| `8d44108` fix | Ledger moved to the transport (engine calls were invisible to it); the test-isolation redirect had been conditional on import order and a resume test passed by reading its own leftovers from the real store | `src/transport.py::_LedgeredTransport` |
-| `e783141` refactor | `Deps(cfg, store, log, clock)` injected; map-reduce logic → `src/batch.py`; `server.py` 996 → 667 lines, tools are one-line adapters | `src/deps.py`, `src/batch.py` |
-| `7dd9676` test | `Clock` injected for wall-clock positions only; 11 tests for arithmetic that had zero coverage | `src/config.py::Clock`, `tests/conftest.py::FrozenClock` |
-| `2928c59` feat | Cache re-keyed by `(chunk bytes, prompt, model)`; `files`-first chunking; "never fits" vs "wait"; `rlm_query` ceiling | `src/results.py` |
-| `c9a9a0c` feat | Floor at the transport; engine converts a refused call into a resumable `SessionBudgetError`; `rlm_query` checkpoints transcript + `state.dill` and resumes | `rlm/core/rlm.py::completion`, `src/engine.py::run_query` |
+| `8d44108` fix | Ledger moved to the transport (engine calls were invisible to it); the test-isolation redirect had been conditional on import order and a resume test passed by reading its own leftovers from the real store | `better_rlm/transport.py::_LedgeredTransport` |
+| `e783141` refactor | `Deps(cfg, store, log, clock)` injected; map-reduce logic → `better_rlm/batch.py`; `server.py` 996 → 667 lines, tools are one-line adapters | `better_rlm/deps.py`, `better_rlm/batch.py` |
+| `7dd9676` test | `Clock` injected for wall-clock positions only; 11 tests for arithmetic that had zero coverage | `better_rlm/config.py::Clock`, `tests/conftest.py::FrozenClock` |
+| `2928c59` feat | Cache re-keyed by `(chunk bytes, prompt, model)`; `files`-first chunking; "never fits" vs "wait"; `rlm_query` ceiling | `better_rlm/results.py` |
+| `c9a9a0c` feat | Floor at the transport; engine converts a refused call into a resumable `SessionBudgetError`; `rlm_query` checkpoints transcript + `state.dill` and resumes | `rlm/core/rlm.py::completion`, `better_rlm/engine.py::run_query` |
 
 ## 3. Where to look first — risk-ranked
 
@@ -58,17 +58,17 @@ what the last run spent.
    `state.dill` is read *inside* the `with` (the env is torn down as the exception leaves).
    All local edits carry `# better-rlm:` (eight did not until the review — §9);
    `rlm/UPSTREAM.md` lists them.
-2. **`src/transport.py::_LedgeredTransport`**. `check_or_raise` runs *before* dispatch on
+2. **`better_rlm/transport.py::_LedgeredTransport`**. `check_or_raise` runs *before* dispatch on
    both sync and async paths; the wrapper is rebuilt per call (it binds a cfg) and only the
    inner transport is cached. Check the refusal is not ledgered.
-3. **`src/results.py`**. Key = `sha256(chunk_text ⧺ prompt ⧺ model)`; chunk *position* is
+3. **`better_rlm/results.py`**. Key = `sha256(chunk_text ⧺ prompt ⧺ model)`; chunk *position* is
    deliberately excluded. Entries are atomic (tmp + `os.replace`); a hit touches mtime;
    `sweep` is LRU by mtime under `cache_max_bytes` with a cooldown sentinel. No TTL.
-4. **`src/budget.py::judge`**. `possible = max_call_tokens <= usable`; `fits` requires
+4. **`better_rlm/budget.py::judge`**. `possible = max_call_tokens <= usable`; `fits` requires
    `possible`. `render` has three branches: unknown ceiling, impossible, fits/does-not-fit.
-5. **`src/batch.py::run`**. Order: ensure chunked → `_scan_cache` → estimate → refuse
+5. **`better_rlm/batch.py::run`**. Order: ensure chunked → `_scan_cache` → estimate → refuse
    (impossible) → refuse (no headroom) → `Gate` → fan-out with `on_result=_persist`.
-6. **`src/deps.py`** — the only place real config is loaded and log handlers installed.
+6. **`better_rlm/deps.py`** — the only place real config is loaded and log handlers installed.
 7. **`tests/conftest.py`** — four autouse guards: no Docker, no live model call, no real log
    dir, plus `cfg` redirecting every `Path` field (enforced by
    `test_config.py::test_every_config_path_is_redirected_by_the_cfg_fixture`).
@@ -249,7 +249,7 @@ Verify is **368 passed, 1 skipped** (was 354).
 **Two claims this document made that were false, and are now corrected in place:**
 
 - §1 said the three sub-causes were closed "for **every** model call the server makes".
-  They were closed for Anthropic only. `src/auth.py` returned early for every other
+  They were closed for Anthropic only. `better_rlm/auth.py` returned early for every other
   provider into a throttle-only patch that never resolved our transport, so those runs
   recorded no spend, passed no floor and learned no ceiling. **Non-Anthropic providers now
   raise `NotImplementedError` at the first model call** (`auth.require_anthropic`), read-only
@@ -331,7 +331,7 @@ item in this document to a leaf or to a stated refusal. Three leaves landed: `b0
 `fbde525`, `158c432`.
 
 **No sub-model call had ever carried a system prompt.** `sub_query`, `sub_query_batch` and
-both transports have always accepted one; `grep -rn "system=" src/ tests/` returned
+both transports have always accepted one; `grep -rn "system=" better_rlm/ tests/` returned
 nothing. So every chunk was answered by the `claude` CLI's default coding-assistant
 persona, which explains its work — the 328,453 output tokens §10 measured at a
 2,048-per-call cap. The contract sat in the user turn, prompt first and chunk after, ~10K

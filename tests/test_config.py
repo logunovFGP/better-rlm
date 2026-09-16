@@ -1,6 +1,6 @@
 import pytest
 
-from src.config import (
+from better_rlm.config import (
     MODEL_HAIKU,
     MODEL_SONNET,
     MODEL_SONNET_5,

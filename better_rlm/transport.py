@@ -517,7 +517,7 @@ class _LedgeredTransport(CompletionTransport):
     Placed HERE, at the one point all callers resolve a transport through, because the
     alternative was recording per call site and the call sites are not equivalent: our
     own map-reduce goes through subquery.py, but rlm_query's recursive fan-out goes
-    through the engine's client, which src/auth.py rebinds onto this same factory. With
+    through the engine's client, which better_rlm/auth.py rebinds onto this same factory. With
     the recording in subquery.py only, an rlm_query run — the most expensive tool here —
     spent its entire window budget invisibly, and rlm_estimate would then report
     headroom that had already been consumed.

@@ -1,4 +1,4 @@
-"""Tests for ``src.describe`` -- the data-only mode catalogue.
+"""Tests for ``better_rlm.describe`` -- the data-only mode catalogue.
 
 Mirrors cline-2's ``describeMode()``-style tests: every value comes back
 in the expected shape, every unknown input is rendered as a help hint
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.describe import (
+from better_rlm.describe import (
     AUTO_DESCRIPTION,
     HOST_MODE_LABEL,
     MODE_API,
@@ -94,7 +94,7 @@ def test_no_provider_catalogue_is_exported() -> None:
     record no spend and pass no gate. A catalogue here is how a picker offering those
     four gets re-added, so the absence is the thing worth pinning.
     """
-    import src.describe as d
+    import better_rlm.describe as d
 
     for gone in ("PROVIDERS", "describe_provider", "all_providers"):
         assert not hasattr(d, gone), f"{gone} is back; see auth.require_anthropic"

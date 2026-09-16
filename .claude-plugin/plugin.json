@@ -20,7 +20,7 @@
         "pdf",
         "python",
         "-m",
-        "src.server"
+        "better_rlm.server"
       ],
       "env": {
         "PYTHONUTF8": "1"

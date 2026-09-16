@@ -4,8 +4,8 @@ import types
 
 import pytest
 
-import src.transport as tp
-from src.transport import (
+import better_rlm.transport as tp
+from better_rlm.transport import (
     ApiTransport,
     CliCompletionError,
     CliRateLimitError,
@@ -188,7 +188,7 @@ def test_cli_complete_with_mocked_subprocess(cfg, monkeypatch):
 
 
 def test_cli_rate_limit_is_recognized_by_ratelimit():
-    import src.ratelimit as rl
+    import better_rlm.ratelimit as rl
     assert rl._is_rate_limit(CliRateLimitError("rate limited"))
     assert not rl._is_rate_limit(CliCompletionError("some other failure"))
 
@@ -240,7 +240,7 @@ def test_the_transport_refuses_a_call_that_would_cross_the_line_without_spending
     the batch. Placing the check here, where the ledger already is, makes it structural:
     the refused call must never reach the backend and must not be ledgered."""
     import dataclasses
-    import src.budget as budget
+    import better_rlm.budget as budget
 
     cfg = dataclasses.replace(cfg, session_budget_tokens=100_000, budget_stop_fraction=0.95)
     budget.record(cfg, "m", 94_000, 0)
@@ -268,7 +268,7 @@ def test_the_floor_reserves_what_a_call_emits_not_the_cap_the_cli_discards(cfg):
     cap under-reserves, and a floor whose whole job is to stop short of the wall lets one
     call step over it. Ceiling picked so the cap fits and the measured figure does not."""
     import dataclasses
-    import src.budget as budget
+    import better_rlm.budget as budget
 
     cfg = dataclasses.replace(cfg, session_budget_tokens=90_000, budget_stop_fraction=0.95)
     for _ in range(8):                       # measured mean output: 10,000 per call
@@ -320,7 +320,7 @@ def test_the_ledger_records_the_transports_total_when_it_beats_our_estimate(cfg)
     in -- and max() picks whichever is closer to the truth with no knowledge of which
     transport is in play, exactly as expected_output does for the output side."""
     import json
-    import src.budget as budget
+    import better_rlm.budget as budget
 
     class _Backend:
         def complete(self, messages, system, model, max_tokens):
@@ -348,7 +348,7 @@ def test_the_floor_reserves_the_measured_input_overhead(cfg):
     Ceiling picked so the bare estimate fits and the estimate-plus-overhead does not.
     """
     import dataclasses
-    import src.budget as budget
+    import better_rlm.budget as budget
 
     # Teaching the overhead necessarily spends: 8 records of itok 29,001 against est 1.
     # The ceiling is then picked so the leftover headroom sits BETWEEN the two reserves,
