@@ -135,6 +135,30 @@ The package ships the vendored engine as top-level `rlm`, the same import name u
 `rlms` distribution uses. Installing both into one environment collides; use separate
 virtualenvs.
 
+<details>
+<summary><b>Releasing (maintainers)</b></summary>
+
+```bash
+echo 0.4.0 > VERSION && uv run python scripts/sync_version.py
+git commit -am "chore: 0.4.0" && git push origin main
+git tag v0.4.0 && git push origin v0.4.0      # this publishes
+```
+
+The tag push runs the suite on Linux and Windows, builds, creates the GitHub release and
+uploads to PyPI via Trusted Publishing — no API token is stored in the repository. Run
+**Actions → Release → Run workflow** with `dry_run` first whenever the pipeline itself
+changed: it verifies and builds while tagging and publishing nothing.
+
+There is deliberately no branch or schedule trigger. A PyPI version number is burned once
+and cannot be reclaimed even after a yank, so publishing requires someone to name the
+version by pushing a tag.
+
+First release only: add a [pending publisher](https://docs.pypi.org/trusted-publishers/)
+on PyPI — project `better-rlm`, owner `logunovFGP`, repository `better-rlm`, workflow
+`release.yml`.
+
+</details>
+
 ---
 
 ### Install from a checkout

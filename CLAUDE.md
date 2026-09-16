@@ -116,10 +116,26 @@ is why `server` must not depend on a shell script.
 
 ### Publishing
 
-`better-rlm` on PyPI. One version number is burned per release and can never be
-reused, even after a yank -- so `release.yml` stays **`workflow_dispatch` only**
-(`tests/test_release.py` fails on any other trigger), and `publish` runs last,
-after the GitHub release, because that one is reversible and PyPI is not.
+`better-rlm` on PyPI. Cutting a release is two commands:
+
+```bash
+# VERSION is the single source; sync_version.py propagates it to plugin.json
+echo 0.4.0 > VERSION && uv run python scripts/sync_version.py && git commit -am "chore: 0.4.0"
+git tag v0.4.0 && git push origin main v0.4.0
+```
+
+The tag push runs verify on both platforms, builds, creates the GitHub release and
+publishes to PyPI. `workflow_dispatch` does the same and additionally offers
+`dry_run` (verify + build, tag nothing, publish nothing) -- use it first when
+anything about the pipeline changed.
+
+One version number is burned per release and can never be reused, even after a
+yank. So there is **no `push: branches` and no `schedule` trigger**: pushing a
+version tag is an explicit human act, landing a PR is not, and
+`tests/test_release.py::test_a_merge_can_never_publish` fails if a branch filter
+is ever added. A `concurrency` group serialises releases per version so two runs
+cannot race toward the irreversible step. `publish` runs last, after the GitHub
+release, because that one is reversible and PyPI is not.
 
 Publishing uses **Trusted Publishing (OIDC)**: no PyPI token exists in this
 repository's secrets. The `publish` job holds exactly `id-token: write`, and

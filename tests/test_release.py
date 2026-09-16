@@ -27,10 +27,54 @@ def _triggers(wf: dict) -> dict:
     return wf.get("on", wf.get(True))
 
 
-def test_release_is_manual_only():
-    assert set(_triggers(_workflow())) == {"workflow_dispatch"}, (
-        "release.yml gained a non-manual trigger — a release must only happen by request"
+def test_release_only_fires_on_an_explicit_request():
+    """A release happens by request. Pushing a version tag is a request; landing a
+    PR is not, and a schedule is not.
+
+    This used to assert workflow_dispatch was the ONLY trigger. A tag push is now
+    allowed so publishing is hands-off once a human names the version -- but the
+    property that guard existed to protect is unchanged and asserted below: nothing
+    that happens on a branch can reach PyPI.
+    """
+    assert set(_triggers(_workflow())) == {"workflow_dispatch", "push"}, (
+        "release.yml gained a trigger that is not an explicit request"
     )
+
+
+def test_a_merge_can_never_publish():
+    """The one that matters. `push:` with a `branches:` key would publish whatever
+    just landed on it, and a PyPI version number cannot be reclaimed afterwards."""
+    push = _triggers(_workflow())["push"]
+    assert set(push) == {"tags"}, f"push must filter on tags only, got {sorted(push)}"
+    assert "branches" not in push
+    for pattern in push["tags"]:
+        assert pattern.startswith("v"), pattern
+        assert "*" not in pattern.replace("[0-9]+", ""), (
+            f"{pattern!r} is looser than vMAJOR.MINOR.PATCH — a stray tag would release"
+        )
+
+
+def test_release_is_serialised_per_version():
+    """Two dispatches seconds apart both clear the 'already released' gate before
+    either has created the release, and both reach the step that cannot be undone."""
+    wf = _workflow()
+    assert "concurrency" in wf, "no concurrency group — concurrent releases can race"
+    assert not wf["concurrency"].get("cancel-in-progress"), (
+        "cancelling a release mid-flight can leave a tag without a PyPI upload"
+    )
+
+
+def test_version_is_taken_from_the_dispatch_input_or_the_tag():
+    # Both entry points must land on the same normalised value, or the VERSION-file
+    # agreement gate below compares the wrong thing and the tag/package disagree.
+    env = _workflow()["jobs"]["release"]["env"]["VERSION"]
+    assert "inputs.version" in env and "github.ref_name" in env, env
+    steps = _workflow()["jobs"]["release"]["steps"]
+    norm = [s for s in steps if "malformed" in (s.get("name") or "").lower()]
+    assert norm, "the version-normalising step is gone"
+    body = norm[0]["run"]
+    assert "${VERSION#v}" in body, "a tag push supplies vX.Y.Z — the v must be stripped"
+    assert "GITHUB_ENV" in body, "the normalised value must reach the later steps"
 
 
 def test_verify_job_runs_the_repos_own_verify_command_on_both_platforms():
@@ -48,7 +92,7 @@ def test_release_job_never_interpolates_the_version_into_a_shell_line():
     # ${{ inputs.version }} inside a run block is textual substitution, so a crafted
     # dispatch input would execute. It must arrive as an environment variable instead.
     release = _workflow()["jobs"]["release"]
-    assert release["env"]["VERSION"] == "${{ inputs.version }}"
+    assert release["env"]["VERSION"] == "${{ inputs.version || github.ref_name }}"
     for step in release["steps"]:
         assert "${{ inputs.version }}" not in step.get("run", ""), step.get("name")
 
@@ -105,10 +149,19 @@ def test_publish_uses_trusted_publishing_and_stores_no_token():
         "publish needs exactly id-token: write — job permissions replace the "
         "workflow-level block, so anything extra is over-granting"
     )
-    body = WORKFLOW.read_text(encoding="utf-8")
-    assert "pypa/gh-action-pypi-publish" in body
-    for forbidden in ("PYPI_API_TOKEN", "PYPI_TOKEN", "with:\n          password:"):
-        assert forbidden not in body, f"{forbidden} — publishing must not use a stored token"
+    steps = publish["steps"]
+    upload = [s for s in steps if "pypa/gh-action-pypi-publish" in (s.get("uses") or "")]
+    assert upload, "the publish step is gone"
+    # Assert the PROPERTY, not one formatting of it: an earlier version of this test
+    # matched the literal "with:\n          password:", which any other indentation,
+    # key order, or an env: block would have slipped straight past.
+    for step in steps:
+        assert "password" not in (step.get("with") or {}), (
+            f"{step.get('uses') or step.get('name')} passes a password — "
+            "publishing must use OIDC, not a stored token"
+        )
+        assert not any("PYPI" in k.upper() for k in (step.get("env") or {})), step
+    assert "secrets." not in WORKFLOW.read_text(encoding="utf-8").split("publish:")[1]
 
 
 def test_publish_ships_the_artifacts_the_release_job_built():
