@@ -170,3 +170,40 @@ def test_an_arrow_key_is_not_read_as_escape():
         except ChildProcessError:
             pass
     assert b"GOT:down" in out, out[-200:]
+
+
+# --- masked secret echo -------------------------------------------------------
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("", ""),
+    ("abc", "•••"),                       # too short to reveal anything
+    ("sk-12345", "••••••••"),             # 8 chars: 2+2 would leak half
+    ("sk-123456", "sk•••••56"),           # 9 chars: first two, last two
+    ("sk-ant-api03-abcdefghijkl-xy", "sk••••••••••••••••••••••••xy"),
+])
+def test_mask_shows_first_and_last_two(value, expected):
+    """cline echoes API keys in the clear; hiding them entirely was worse than both.
+
+    A silent paste gives no way to tell whether the clipboard held the key, held
+    nothing, or held the wrong thing -- and the answer only arrives at the first
+    model call. Two characters each end is enough to recognise a key you just
+    copied, and not enough to reconstruct one.
+    """
+    from better_rlm.picker import mask_secret
+
+    assert mask_secret(value) == expected
+
+
+def test_mask_never_reveals_more_than_four_characters():
+    from better_rlm.picker import mask_secret
+
+    for n in range(0, 60):
+        secret = "x" * n
+        assert len(mask_secret(secret).replace("•", "")) <= 4, n
+
+
+def test_mask_preserves_length_so_a_truncated_paste_is_visible():
+    from better_rlm.picker import mask_secret
+
+    assert len(mask_secret("sk-abcdefghij")) == len("sk-abcdefghij")

@@ -64,7 +64,10 @@ from .describe import (
     MODE_API,
     MODE_AUTO,
     MODE_CLI,
+    PROVIDER_ANTHROPIC,
+    PROVIDER_CLAUDE_CLI,
     PROVIDER_CUSTOM,
+    PROVIDER_MINIMAX,
     PROVIDERS,
     VALID_MODES,
     all_modes,
@@ -489,14 +492,10 @@ def auth_step(console: Console, provider_id: str, st: Status,
     hidden = sys.stdin.isatty()
     console.print(
         f"[grey50]Paste your key for {d.label}. "
-        + ("Input is hidden.[/grey50]" if hidden
-           else "[yellow]stdin is not a terminal: input will NOT be hidden.[/yellow][/grey50]")
+        "Shown masked — first and last two characters, so you can tell a good paste "
+        "from an empty clipboard.[/grey50]"
     )
-    try:
-        key = Prompt.ask(d.key_env, console=console, password=hidden).strip()
-    except (EOFError, KeyboardInterrupt):
-        console.print("\n[grey50]cancelled[/grey50]")
-        return False
+    key = picker.read_secret(console, d.key_env)
     if not key:
         console.print("[grey50]empty, nothing written[/grey50]")
         return False
@@ -957,6 +956,84 @@ def render_menu(items: list[MenuItem]) -> Table:
     return table
 
 
+ONBOARDING_CHOICES: list[tuple[str, str, str, str, str]] = [
+    # (provider id, icon, label, detail, mode it implies)
+    (PROVIDER_CLAUDE_CLI, "✦", "Use your Claude Code subscription",
+     "Reuse the `claude` CLI login — no API key, no per-token cost", MODE_CLI),
+    (PROVIDER_ANTHROPIC, "⚙", "Anthropic API key",
+     "api.anthropic.com directly. Higher limits than the subscription", MODE_API),
+    (PROVIDER_MINIMAX, "⚙", "MiniMax",
+     "Anthropic-compatible endpoint. Use MiniMax model ids", MODE_API),
+    (PROVIDER_CUSTOM, "⚙", "Another Anthropic-compatible endpoint",
+     "A gateway, a proxy, or a self-hosted server", MODE_API),
+]
+
+
+def needs_onboarding(st: Status) -> bool:
+    """Whether this install can make a model call at all.
+
+    cline runs onboarding when there is no provider configured. The equivalent
+    question here is whether a credential exists for the configured provider: a
+    config that cannot call a model is not configured, whatever config.yaml says.
+    """
+    if st.mode == MODE_CLI:
+        return st.cli_logged_in is not True
+    if st.key_env and st.has_api_key:
+        return False
+    # auto can fall back to the CLI, so a signed-in CLI counts.
+    return not (st.mode == MODE_AUTO and st.cli_available and st.cli_logged_in is True)
+
+
+def run_onboarding(console: Console, config_path: Path) -> bool:
+    """First run: ask which provider, then set everything that follows from it.
+
+    Ported from cline's ``OnboardingMainMenuScreen`` + ``MAIN_MENU``, which is
+    provider-flavoured rather than mode-flavoured -- "Sign in with Claude Code",
+    "Bring your own provider". That is one question instead of two, and it is the
+    better shape: an operator knows which account they have, not which transport
+    the tool should therefore pick. The mode follows from the answer.
+    """
+    items = [
+        SearchableItem(key=pid, label=label, detail=detail, tag=icon)
+        for pid, icon, label, detail, _mode in ONBOARDING_CHOICES
+    ]
+    res = picker.choose_cards(
+        console,
+        "Welcome to better-rlm",
+        "Connect a model provider to get started.",
+        items,
+    )
+    if res.key == picker.CANCEL:
+        console.print("[grey50]setup cancelled — nothing written[/grey50]")
+        return False
+
+    pid = res.key
+    mode = next(m for p_, _i, _l, _d, m in ONBOARDING_CHOICES if p_ == pid)
+    d = describe_provider(pid)
+
+    base_url = d.base_url
+    if pid == PROVIDER_CUSTOM:
+        base_url = Prompt.ask("[bold]base URL[/bold]", console=console).strip()
+        if not base_url:
+            console.print("[grey50]no URL given — nothing written[/grey50]")
+            return False
+
+    _save(config_path, {"mode": mode, "base_url": base_url}, console)
+    st = load_status(config_path)
+    ok = auth_step(console, pid, st, env_for_config(config_path))
+
+    console.print()
+    console.print(Panel(render_status(load_status(config_path)),
+                        title="[bold]Ready[/bold]" if ok else "[bold]Not finished[/bold]",
+                        border_style="green" if ok else "yellow"))
+    if ok:
+        console.print("[grey50]Models keep their defaults; change them any time with "
+                      "[bold]better-rlm[/bold] → Change models.[/grey50]")
+        console.print("[grey50]A running server keeps its own copy: "
+                      "`claude mcp restart rlm` to pick this up.[/grey50]")
+    return ok
+
+
 def run_menu(config_path: Path | None = None, console: Console | None = None) -> int:
     """The default surface: show the configuration, offer what to do about it, repeat.
 
@@ -968,6 +1045,13 @@ def run_menu(config_path: Path | None = None, console: Console | None = None) ->
     console = console or Console()
     while True:
         st = load_status(cfg_path)
+        if needs_onboarding(st) and picker.interactive():
+            # Nothing here can make a model call yet, so ask rather than presenting a
+            # maintenance menu to someone who has not configured anything.
+            run_onboarding(console, cfg_path)
+            st = load_status(cfg_path)
+            if needs_onboarding(st):
+                return 0                      # cancelled; do not loop the welcome
         console.print()
         console.print(Panel(render_status(st), title="[bold]better-rlm[/bold]",
                             border_style="green"))
@@ -1072,7 +1156,6 @@ def main(argv: list[str] | None = None) -> int:
     can gate on it. Without it, run_repl takes over stdin.
     """
     args = list(sys.argv[1:] if argv is None else argv)
-    args_were_given = bool(args)
     config_path: Path | None = None
     one_shot: str | None = None
     while args:
@@ -1094,10 +1177,9 @@ def main(argv: list[str] | None = None) -> int:
     if one_shot is not None:
         _dispatch_guarded(one_shot, console, cfg_path)
         return LAST_EXIT_CODE
-    # A bare invocation opens the menu: show the configuration, offer what to do about
-    # it. Flags mean the caller is driving deliberately, so they get the plain REPL.
-    if args_were_given:
-        return run_repl(cfg_path, console=console)
+    # The menu is the surface, whether or not --config pointed somewhere else: that
+    # flag only says WHICH config to edit. Only --one-shot means "do this one thing
+    # and exit", and it is handled above.
     return run_menu(cfg_path, console=console)
 
 
