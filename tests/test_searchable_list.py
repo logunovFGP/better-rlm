@@ -348,3 +348,108 @@ def test_paste_ceilings_are_set():
 
     assert 0 < _PASTE_MAX <= 1024 * 1024
     assert 0 < _PASTE_TIMEOUT_S <= 10
+
+
+# --- the Windows console path ------------------------------------------------
+#
+# picker.read_key has two implementations and only the POSIX one was covered; the
+# Windows branch carried `# pragma: no cover` and three defects, each measured on a
+# real Windows 11 console before these tests were written.
+
+WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="msvcrt is Windows-only")
+
+
+@pytest.fixture
+def fake_console(monkeypatch):
+    """Drive the Windows key reader from a scripted buffer, not a real console.
+
+    msvcrt is patched rather than stubbed as a module so the test exercises exactly
+    the calls _read_key_windows makes: getwch to read, kbhit to ask whether more is
+    already queued, ungetwch to hand a keypress back.
+    """
+    import msvcrt
+
+    def install(chars):
+        buf = list(chars)
+        monkeypatch.setattr(msvcrt, "getwch", lambda: buf.pop(0))
+        monkeypatch.setattr(msvcrt, "kbhit", lambda: bool(buf))
+        monkeypatch.setattr(msvcrt, "ungetwch", lambda c: buf.insert(0, c))
+        return buf
+
+    return install
+
+
+@WINDOWS_ONLY
+def test_windows_ctrl_c_raises_like_posix(fake_console):
+    """Ctrl+C must reach callers as KeyboardInterrupt on both platforms.
+
+    POSIX gets that free: cbreak leaves ISIG on, so the kernel signals. msvcrt hands
+    back the byte instead, so the old branch returned '\x03' as literal text -- the
+    operator typed a control character into the search field with no way to abort.
+    """
+    from better_rlm.picker import read_key
+
+    fake_console(["\x03"])
+    with pytest.raises(KeyboardInterrupt):
+        read_key()
+
+
+@WINDOWS_ONLY
+def test_windows_paste_arrives_whole_and_does_not_bleed(fake_console):
+    """A paste is one unit, and a CR inside it stays a separate keypress.
+
+    The old branch returned one character per call, so a pasted key submitted itself
+    at the first CR and the remainder queued up to type itself into the NEXT prompt.
+    """
+    from better_rlm.picker import read_key
+
+    rest = fake_console(list("sk-ant-SECRET") + ["\r"] + list("next-field"))
+    assert read_key() == "sk-ant-SECRET"
+    assert read_key() == "enter"
+    assert "".join(rest) == "next-field"
+
+
+@WINDOWS_ONLY
+def test_windows_paste_is_bounded(fake_console):
+    """Bounded like the POSIX paste path, so a stuck console cannot grow it forever."""
+    from better_rlm.picker import _PASTE_MAX, read_key
+
+    fake_console(list("x" * (_PASTE_MAX + 500)))
+    assert len(read_key()) <= _PASTE_MAX
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("seq,want", [
+    (["\xe0", "H"], "up"), (["\xe0", "P"], "down"),
+    (["\xe0", "K"], "left"), (["\xe0", "M"], "right"),
+    (["\r"], "enter"), (["\n"], "enter"), (["\x1b"], "escape"),
+    (["\x08"], "backspace"), (["\t"], "tab"), (["a"], "a"),
+])
+def test_windows_named_keys(fake_console, seq, want):
+    """The names the POSIX path returns, from the console's scan codes."""
+    from better_rlm.picker import read_key
+
+    fake_console(seq)
+    assert read_key() == want
+
+
+def test_every_name_the_windows_map_returns_is_a_registered_key_name():
+    """A name outside KEY_NAMES is typed into the field as literal text.
+
+    key_text() treats anything not in KEY_NAMES as text, so naming a key the set does
+    not carry makes pressing it type its own name -- into the credential prompt too,
+    where the masked echo hides what was typed. Caught while adding Home/End/Delete
+    to the Windows map: key_text("home") returned "home". The Windows vocabulary is
+    now exactly the POSIX one, and this keeps the two from drifting apart again.
+
+    Runs on every platform: the maps are module-level data, so Linux CI guards the
+    Windows branch here even though it cannot execute it.
+    """
+    from better_rlm.picker import _ARROWS, KEY_NAMES, _WIN_ARROWS, _WIN_NAMED
+
+    assert set(_WIN_ARROWS.values()) <= KEY_NAMES, "unregistered arrow name"
+    assert set(_WIN_NAMED.values()) <= KEY_NAMES, "unregistered key name"
+    assert set(_ARROWS.values()) == set(_WIN_ARROWS.values()), (
+        "the two platforms no longer name the same arrow set"
+    )
+
