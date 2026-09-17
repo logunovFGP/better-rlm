@@ -1008,6 +1008,30 @@ better-rlm
   q  Quit
 ```
 
+On a **first run** — no credential for the configured provider — it shows the
+onboarding screen instead of the menu: a welcome, and one card per provider.
+
+```
+                      Welcome to better-rlm
+             Connect a model provider to get started.
+
+  ╭──────────────────────────────────────────────────────────╮
+  │ ✦  Use your Claude Code subscription   →                 │
+  │    Reuse the `claude` CLI login — no API key             │
+  ╰──────────────────────────────────────────────────────────╯
+  ╭──────────────────────────────────────────────────────────╮
+  │ ⚙  MiniMax                                               │
+  │    Anthropic-compatible endpoint                         │
+  ╰──────────────────────────────────────────────────────────╯
+
+            ↑/↓ navigate, Enter to select, Esc to exit
+```
+
+One question sets the mode and the provider together, then it asks for the
+credential. Keys echo **masked** — `sk••••••••••••yz`, first and last two characters
+— so you can tell a good paste from an empty clipboard without the key landing in
+your scrollback.
+
 On a terminal every list is a **live picker**: arrow keys move a highlight, typing
 filters, Enter selects, Esc cancels — cline-2's dialog interaction
 (`components/dialogs/*.tsx`), with its `searchable-list` scoring and windowing ported

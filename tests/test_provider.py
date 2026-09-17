@@ -499,3 +499,40 @@ def test_menu_keys_are_unique_and_sequential():
     for st in (_st(), _st(mode=MODE_API, key_env="MINIMAX_API_KEY")):
         keys = [i.key for i in build_menu(st)]
         assert keys == [str(n) for n in range(1, len(keys) + 1)], keys
+
+
+# --- first run ----------------------------------------------------------------
+
+
+def test_onboarding_runs_when_no_call_can_be_made():
+    """cline runs onboarding when no provider is configured. The equivalent question
+    is whether a credential exists: a config that cannot call a model is not
+    configured, whatever config.yaml says."""
+    from better_rlm.tui import needs_onboarding
+
+    assert needs_onboarding(_st(mode=MODE_API, key_env="MINIMAX_API_KEY", has_api_key=False))
+    assert needs_onboarding(_st(mode=MODE_CLI, cli_logged_in=False))
+    assert needs_onboarding(_st(mode=MODE_AUTO, cli_available=False, has_api_key=False))
+
+
+def test_onboarding_is_skipped_once_it_can():
+    from better_rlm.tui import needs_onboarding
+
+    assert not needs_onboarding(_st(mode=MODE_API, key_env="MINIMAX_API_KEY", has_api_key=True))
+    assert not needs_onboarding(_st(mode=MODE_CLI, cli_logged_in=True))
+    # auto falls back to the CLI, so a signed-in CLI is a working config.
+    assert not needs_onboarding(_st(mode=MODE_AUTO, cli_available=True, cli_logged_in=True))
+
+
+def test_every_onboarding_choice_sets_a_coherent_mode():
+    """One question sets both, cline-style. A row pairing a CLI provider with api --
+    or an endpoint provider with claude-cli -- would write a config that ignores the
+    answer the operator just gave."""
+    from better_rlm.tui import ONBOARDING_CHOICES
+    from better_rlm.describe import AUTH_CLI, PROVIDERS
+
+    for pid, icon, label, detail, mode in ONBOARDING_CHOICES:
+        assert pid in PROVIDERS, pid
+        assert icon and label and detail
+        expected = MODE_CLI if PROVIDERS[pid].auth == AUTH_CLI else MODE_API
+        assert mode == expected, f"{pid} would be configured unreachable"

@@ -53,13 +53,15 @@ mirrors cline-2's mode/model picker (`describe.py` is the data-only twin of
 cline-2's `describeMode()`). It writes to `config.yaml` only -- never to
 `.env` -- and is purely additive: the MCP server's runtime is unaffected.
 
-It does **not** offer a provider picker, and must not grow one back.
-`auth.require_anthropic` raises on every provider but `anthropic` at every
-door that leads to a model call, because only its transport passes through
-the session-window ledger; a picker writing `provider: openai` would produce
-a config.yaml the server refuses. `/status` shows the value and flags a bad
-one. `config.PROVIDER_KEY_ENV` was deleted in `f855b9c` for the same reason
--- do not re-add it, here or in `describe.py`.
+It **does** offer a provider picker, and the rule it must keep is below in
+"Endpoints vs providers": every row is `provider: anthropic` and differs only
+by endpoint and credential. This paragraph used to ban the picker outright;
+that ban was aimed at the wrong thing and contradicted the sections that
+follow it.
+
+It writes `config.yaml` and, for a credential, `.env` -- the latter added when
+the setup flow took over supplying keys, which is the step being ported from
+cline's `runProviderChange`. `better_rlm/envfile.py` owns that write.
 
 Same "proxy vs host" terminology as cline-2: `claude-cli` is the **proxy**
 path (spawns the `claude` CLI), `api` is the **host** path (talks to the
@@ -139,6 +141,28 @@ Two rules for anything added here:
     stdin from a pipe. Every picker goes through `tui._select`, which chooses the live
     picker or the numbered prompt and returns the same sentinels, so callers never
     branch and the two cannot drift.
+
+### First run asks; later runs offer
+
+`better-rlm` with no working credential shows cline's onboarding
+(`views/onboarding/screens.tsx::OnboardingMainMenuScreen`): a centred welcome, one
+bordered card per provider, an arrow on the selection. Once a credential exists it
+shows the maintenance menu instead. `tui.needs_onboarding(st)` is the switch, and it
+asks whether a model call is possible -- not whether config.yaml has values in it. A
+config that cannot call a model is not configured.
+
+The onboarding question is **provider-flavoured, not mode-flavoured**, because
+cline's MAIN_MENU is ("Sign in with Claude Code", "Bring your own provider"). One
+question sets both: an operator knows which account they have, not which transport
+the tool should therefore pick. `ONBOARDING_CHOICES` pairs each provider with the
+mode it implies, and `test_every_onboarding_choice_sets_a_coherent_mode` fails if a
+row would configure something unreachable.
+
+API keys echo **masked** -- first two and last two characters, the rest dots. cline
+shows them in the clear; hiding them entirely is what we had, and it was worse than
+either, because a silent paste gives no way to tell a good clipboard from an empty
+one until the first model call fails. `mask_secret` never reveals more than four
+characters and preserves length, so a truncated paste is visible.
 
 ### Credentials are per provider
 
