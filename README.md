@@ -1008,6 +1008,12 @@ better-rlm
   q  Quit
 ```
 
+On a terminal every list is a **live picker**: arrow keys move a highlight, typing
+filters, Enter selects, Esc cancels — cline-2's dialog interaction
+(`components/dialogs/*.tsx`), with its `searchable-list` scoring and windowing ported
+whole. Off a terminal — a pipe, CI, `--one-shot` — the same lists render as numbered
+prompts, so scripts keep working.
+
 **Anything currently broken leads.** The menu is built from the live state, the way
 cline-2's `getMainMenuOptions()` filters its rows: a missing key, an endpoint the mode
 is ignoring, or a signed-out CLI appears as row 1 with the reason spelled out. A

@@ -114,6 +114,32 @@ Rules for anything added here:
   * **`base_url` without `mode: api` does nothing** -- the `claude` CLI ignores it.
     `/status` renders that combination as `IGNORED` rather than letting it look live.
 
+### The TUI is a port, not an approximation
+
+`better_rlm/searchable_list.py` is cline-2's
+`apps/cli/src/tui/components/searchable-list.tsx`: the 100/90/70/30 scoring ladder,
+section-first ordering, the three-pass window and the "do not hide a lone section
+header" correction. Kept faithful rather than tidied -- a cleaner-looking rewrite
+drifts from the thing it mirrors. Upstream's own three section/window cases are
+ported into `tests/test_searchable_list.py`, so a divergence fails there.
+
+`better_rlm/picker.py` reproduces the interaction (`useDialogKeyboard`): arrows move
+with wrap, typing filters and resets selection to the top, Enter resolves, Esc
+dismisses. Raw input is stdlib; a TUI framework would be a large dependency for one
+key loop.
+
+Two rules for anything added here:
+
+  * **`os.read(fd)`, never `sys.stdin.read()`.** The buffered text stream pulls a
+    whole escape sequence in one syscall and hands back its first byte, leaving the
+    rest where `select()` cannot see it -- every arrow key then reads as a bare Esc.
+    `test_an_arrow_key_is_not_read_as_escape` drives a real pty because nothing
+    smaller reproduces it.
+  * **Headless is a path, not a fallback.** The suite, CI and `--one-shot` all feed
+    stdin from a pipe. Every picker goes through `tui._select`, which chooses the live
+    picker or the numbered prompt and returns the same sentinels, so callers never
+    branch and the two cannot drift.
+
 ### Credentials are per provider
 
 Each provider reads its own variable -- `ANTHROPIC_API_KEY`, `MINIMAX_API_KEY`,
