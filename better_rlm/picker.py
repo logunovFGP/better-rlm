@@ -24,6 +24,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from rich.align import Align
 from rich.console import Console, Group
 from rich.panel import Panel
 from rich.text import Text
@@ -107,7 +108,20 @@ def raw_mode(stream=None):
     saved = termios.tcgetattr(fd)
     _RAW_HELD = True
     try:
-        tty.setraw(fd)
+        # setcbreak, NOT setraw. Both give unbuffered, unechoed input; setraw also
+        # clears OPOST/ONLCR, which stops the terminal translating the "\n" rich
+        # writes into CR-LF. The cursor then drops a row without returning to
+        # column 0, rich's cursor-up arithmetic lands in the wrong place, and every
+        # redraw appends a fresh copy of the frame instead of overwriting it.
+        #
+        # This only became visible when raw mode started being held across the whole
+        # Live loop: before that it was set around a single os.read and restored, so
+        # rich always rendered with post-processing on.
+        #
+        # cbreak also leaves ISIG on, so Ctrl+C arrives as SIGINT rather than as a
+        # \x03 byte -- the KeyboardInterrupt the callers already catch, raised by the
+        # kernel instead of by us.
+        tty.setcbreak(fd)
         out.write("\x1b[?2004h")
         out.flush()
         yield
@@ -294,9 +308,14 @@ def choose(console: Console, title: str, items: list[SearchableItem],
     # changed. It also fights the raw-mode key reader for the terminal, and floods a
     # pty fast enough to stall a writer. Redraw when the state changes, not on a clock.
     with raw_mode(console.file), Live(
+            # screen=True draws on the terminal's ALTERNATE buffer, the way a
+            # full-screen TUI does (cline's opentui the same). Every frame lands on
+            # a clean screen, so there is no cursor-up arithmetic to get wrong --
+            # which is what left the top of each previous frame on screen, once the
+            # content grew past what rich counted. The original screen is restored
+            # on exit, so the shell scrollback is untouched.
             _render(title, shown, selected, search, current_key, custom_hint),
-            console=console, auto_refresh=False, transient=True) as live:
-        live.refresh()
+            console=console, auto_refresh=False, screen=True) as live:
         while True:
             try:
                 key = read_key()
@@ -432,6 +451,13 @@ def choose_cards(console: Console, title: str, subtitle: str,
 
     selected = 0
 
+    # cline sizes its onboarding the same way (contentWidth = min(width - 4,
+    # HOME_VIEW_MAX_WIDTH)). A panel exactly as wide as the console wraps its last
+    # border character onto the next row, which makes the frame one line taller than
+    # rich accounted for -- so its cursor-up lands short and the previous frame's
+    # top lines are left on screen instead of being overwritten.
+    width = max(20, min(console.width - 4, 76))
+
     def frame() -> Group:
         parts: list[object] = [
             Text(title, style="bold", justify="center"),
@@ -449,14 +475,17 @@ def choose_cards(console: Console, title: str, subtitle: str,
                 body.append("\n   ")
                 body.append(it.detail, style="grey50")
             parts.append(Panel(body, border_style="cyan" if chosen else "grey30",
-                               padding=(0, 1)))
+                               padding=(0, 1), width=width))
         parts.append(Text(footer or "↑/↓ navigate, Enter to select, Esc to exit",
                           style="grey50", justify="center"))
-        return Group(*parts)
+        # ONE Align around the whole group, never one per part: Align.center with an
+        # explicit width pads each element vertically, so the frame occupied three
+        # more rows than rich counted, its cursor-up cleared too few, and the top of
+        # the previous frame survived every redraw.
+        return Align.center(Group(*parts), width=width)
 
     with raw_mode(console.file), Live(frame(), console=console, auto_refresh=False,
-                          transient=True) as live:
-        live.refresh()
+                                      screen=True) as live:
         while True:
             try:
                 key = read_key()
