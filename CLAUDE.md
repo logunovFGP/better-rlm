@@ -50,8 +50,8 @@ because it is on disk.
 
 The operator TUI (`better_rlm/tui.py`, entry `python -m better_rlm.cli` or `./run_tui.sh`)
 mirrors cline-2's mode/model picker (`describe.py` is the data-only twin of
-cline-2's `describeMode()`). It writes to `config.yaml` only -- never to
-`.env` -- and is purely additive: the MCP server's runtime is unaffected.
+cline-2's `describeMode()`). See "It does offer a provider picker" below for what it writes: `config.yaml`,
+and `.env` when it takes a credential.
 
 It **does** offer a provider picker, and the rule it must keep is below in
 "Endpoints vs providers": every row is `provider: anthropic` and differs only
