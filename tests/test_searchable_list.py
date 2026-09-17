@@ -207,3 +207,92 @@ def test_mask_preserves_length_so_a_truncated_paste_is_visible():
     from better_rlm.picker import mask_secret
 
     assert len(mask_secret("sk-abcdefghij")) == len("sk-abcdefghij")
+
+
+# --- paste ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("sk-abc123", "sk-abc123"),
+    ("sk-abc123\n", "sk-abc123"),          # copied a line out of a file
+    ("  sk-abc123  ", "sk-abc123"),        # copied with surrounding space
+    ("sk-abc\r\n", "sk-abc"),              # CRLF from a Windows clipboard
+    ("\n", ""),                            # nothing usable
+    ("", ""),
+])
+def test_clean_paste_keeps_the_key_and_drops_the_wrapping(raw, expected):
+    """A pasted key arrives with whatever the clipboard had around it. Rejecting the
+    burst because isprintable() is False on the whole string threw the key away and
+    left the prompt empty."""
+    from better_rlm.picker import clean_paste
+
+    assert clean_paste(raw) == expected
+
+
+@pytest.mark.skipif(os.name != "posix", reason="pty is POSIX-only")
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
+@pytest.mark.parametrize("payload", [
+    b"sk-test-abc123xyz",                          # plain burst, older terminal
+    b"\x1b[200~sk-test-abc123xyz\x1b[201~",        # bracketed paste
+    b"\x1b[200~sk-test-abc123xyz\n\x1b[201~",      # with the trailing newline
+])
+def test_a_pasted_key_arrives_whole(payload):
+    """Regression, and it made the prompt unusable rather than merely wrong.
+
+    read_key set raw mode per keypress and restored it in a finally, so between keys
+    the terminal was canonical. A paste is one burst: the first byte was read raw and
+    the remaining bytes landed in the line discipline, which buffered them until a
+    newline and then swallowed them as a line. Pasting a 40-character key produced
+    exactly one character, which is what Cmd+V looked like from the operator's side.
+    """
+    import pty
+    import select
+    import time
+
+    pid, fd = pty.fork()
+    if pid == 0:                                   # pragma: no cover - child
+        try:
+            import sys as _sys
+
+            # BOTH streams: picker.interactive() tests stdout too, and pytest's
+            # capture object is not a tty, so read_secret would take the headless
+            # path and never exercise raw mode at all.
+            _sys.stdin = os.fdopen(0, "r")
+            _sys.stdout = os.fdopen(1, "w")
+            from rich.console import Console
+            from better_rlm.picker import read_secret
+
+            os.write(1, b"READY\n")
+            got = read_secret(Console(file=_sys.stdout), "KEY")
+            os.write(1, f"GOT:{got}\n".encode())
+        except BaseException as exc:
+            os.write(1, f"ERR:{type(exc).__name__}:{exc}\n".encode())
+        os._exit(0)
+
+    def drain(marker: bytes, timeout: float = 5.0) -> bytes:
+        out = b""
+        end = time.time() + timeout
+        while time.time() < end and marker not in out:
+            if select.select([fd], [], [], 0.1)[0]:
+                try:
+                    out += os.read(fd, 4096)
+                except OSError:
+                    break
+        return out
+
+    try:
+        # Wait for the bracketed-paste enable sequence, not a sleep: it is the
+        # definitive "raw mode is on and the prompt is listening" signal. A sleep
+        # raced the child rich import and the paste landed in canonical mode.
+        assert b"\x1b[?2004h" in drain(b"\x1b[?2004h"), "never entered raw mode"
+        os.write(fd, payload)
+        time.sleep(0.3)
+        os.write(fd, b"\r")
+        out = drain(b"GOT:")
+    finally:
+        os.close(fd)
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+    assert b"GOT:sk-test-abc123xyz" in out, out[-200:]

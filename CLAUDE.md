@@ -137,6 +137,15 @@ Two rules for anything added here:
     rest where `select()` cannot see it -- every arrow key then reads as a bare Esc.
     `test_an_arrow_key_is_not_read_as_escape` drives a real pty because nothing
     smaller reproduces it.
+  * **Hold raw mode for the whole loop, never per keypress.** Setting it per key and
+    restoring it in a finally leaves the terminal canonical between keys. A paste is
+    one burst: the first byte is read raw and the rest land in the line discipline,
+    which buffers them until a newline and swallows them as a line -- Cmd+V on a
+    40-character key produced exactly one character. `raw_mode()` also enables
+    bracketed paste, so pasted content carrying a newline or an escape byte can never
+    be read as Enter or Esc. `read_key()` may therefore return TEXT LONGER THAN ONE
+    CHARACTER; callers append it as a unit and run it through `clean_paste()`, because
+    a key copied out of a file arrives with the newline attached.
   * **Headless is a path, not a fallback.** The suite, CI and `--one-shot` all feed
     stdin from a pipe. Every picker goes through `tui._select`, which chooses the live
     picker or the numbered prompt and returns the same sentinels, so callers never

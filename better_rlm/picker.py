@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from rich.console import Console, Group
@@ -49,15 +50,69 @@ def interactive() -> bool:
         return False
 
 
-def read_key() -> str:
-    """One keypress, as a name. 'up' 'down' 'left' 'right' 'enter' 'escape'
-    'backspace' 'tab', or the literal character typed.
+_RAW_HELD = False
+_PASTE_START = "200~"
+_PASTE_END = "\x1b[201~"
 
-    Escape is ambiguous in a terminal: a bare Esc and the start of an arrow
-    sequence are the same byte. Upstream gets this resolved by its runtime; here
-    the distinction is made by asking whether more bytes are already waiting,
-    which is what separates "the user pressed Esc" from "an escape sequence is
-    arriving".
+
+@contextmanager
+def raw_mode():
+    """Hold the terminal in raw mode for a whole input loop, and turn on bracketed
+    paste while we do.
+
+    Setting raw per keypress and restoring it afterwards -- which is what this used
+    to do -- leaves the terminal in canonical mode between keys. A paste arrives as
+    one burst: the first byte is read raw, and the rest land in the line discipline,
+    which buffers them until a newline and then swallows them as a line. Pasting a
+    40-character key produced exactly one character.
+
+    Bracketed paste (``ESC[?2004h``) makes the terminal wrap pasted content in
+    markers, so a key containing a newline or an escape byte can never be mistaken
+    for the operator pressing Enter or Esc.
+    """
+    global _RAW_HELD
+    if _RAW_HELD or sys.platform == "win32":
+        yield
+        return
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    _RAW_HELD = True
+    try:
+        tty.setraw(fd)
+        sys.stdout.write("\x1b[?2004h")
+        sys.stdout.flush()
+        yield
+    finally:
+        _RAW_HELD = False
+        sys.stdout.write("\x1b[?2004l")
+        sys.stdout.flush()
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
+def _read_pending(fd: int, limit: int = 65536) -> str:
+    """Whatever is already queued, without blocking. A paste is a burst."""
+    import select
+
+    out = ""
+    while select.select([fd], [], [], 0)[0]:
+        chunk = os.read(fd, limit)
+        if not chunk:
+            break
+        out += chunk.decode("utf-8", "replace")
+    return out
+
+
+def read_key() -> str:
+    """One keypress, as a name -- 'up' 'down' 'left' 'right' 'enter' 'escape'
+    'backspace' 'tab' -- or the literal text typed.
+
+    Text may be longer than one character: a paste is a burst of bytes and is
+    returned whole rather than one character per call, so callers append it as a
+    unit. Bracketed-paste markers are stripped and their content is never parsed as
+    keys.
     """
     if sys.platform == "win32":                             # pragma: no cover
         import msvcrt
@@ -70,27 +125,39 @@ def read_key() -> str:
                 "\t": "tab"}.get(ch, ch)
 
     import select
-    import termios
-    import tty
 
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
+    with raw_mode():
+        fd = sys.stdin.fileno()
         # os.read on the FD, never sys.stdin.read: Python's buffered text stream
         # pulls the whole escape sequence in one syscall, hands back the first
         # character, and leaves the rest in a buffer the OS-level select() cannot
-        # see -- so every arrow key was read as a bare Esc and cancelled the picker.
+        # see -- so every arrow key was read as a bare Esc.
         ch = os.read(fd, 1).decode("utf-8", "replace")
+
         if ch == "\x1b":
-            # A lone Esc and the start of an arrow sequence are the same byte. Ask
-            # whether more is already queued; nothing waiting means the key itself.
+            # A lone Esc and the start of a sequence are the same byte. Nothing
+            # queued behind it means the key itself.
             if not select.select([fd], [], [], 0.05)[0]:
                 return "escape"
-            rest = os.read(fd, 2).decode("utf-8", "replace")
-            if not rest.startswith("["):
+            rest = os.read(fd, 1).decode("utf-8", "replace")
+            if rest != "[":
                 return "escape"
-            return _ARROWS.get(rest[1:2], "")
+            seq = ""
+            while len(seq) < 8:
+                nxt = os.read(fd, 1).decode("utf-8", "replace")
+                seq += nxt
+                if nxt.isalpha() or nxt == "~":
+                    break
+            if seq == _PASTE_START:
+                body = ""
+                while _PASTE_END not in body:
+                    more = os.read(fd, 4096).decode("utf-8", "replace")
+                    if not more:
+                        break
+                    body += more
+                return body.split(_PASTE_END)[0]
+            return _ARROWS.get(seq[:1], "") if len(seq) == 1 else ""
+
         if ch in ("\r", "\n"):
             return "enter"
         if ch in ("\x7f", "\x08"):
@@ -101,9 +168,11 @@ def read_key() -> str:
             raise KeyboardInterrupt
         if ch == "\x04":
             raise EOFError
-        return ch
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        if not ch.isprintable():
+            return ""
+        # A printable byte may be the first of a paste that is not bracketed (an
+        # older terminal, or ssh). Take whatever else is already queued with it.
+        return ch + _read_pending(fd)
 
 
 @dataclass
@@ -186,8 +255,9 @@ def choose(console: Console, title: str, items: list[SearchableItem],
     # the time, and a background 30fps thread redraws a frame that cannot have
     # changed. It also fights the raw-mode key reader for the terminal, and floods a
     # pty fast enough to stall a writer. Redraw when the state changes, not on a clock.
-    with Live(_render(title, shown, selected, search, current_key, custom_hint),
-              console=console, auto_refresh=False, transient=True) as live:
+    with raw_mode(), Live(
+            _render(title, shown, selected, search, current_key, custom_hint),
+            console=console, auto_refresh=False, transient=True) as live:
         live.refresh()
         while True:
             try:
@@ -211,12 +281,24 @@ def choose(console: Console, title: str, items: list[SearchableItem],
                 search = search[:-1]
                 shown = filter_items(items, search)
                 selected = 0
-            elif len(key) == 1 and key.isprintable():
-                search += key
+            elif clean_paste(key):
+                search += clean_paste(key)
                 shown = filter_items(items, search)
                 selected = 0            # upstream's setSearch resets selection
             live.update(_render(title, shown, selected, search, current_key, custom_hint),
                         refresh=True)
+
+
+def clean_paste(text: str) -> str:
+    """What is usable from pasted text: printable characters, surrounds trimmed.
+
+    Copying a key out of a file or a dashboard brings a trailing newline with it,
+    and sometimes a leading space. Rejecting the burst because `isprintable()` is
+    False on the whole string threw the key away and left the prompt empty. A
+    newline is stripped rather than treated as Enter, so a two-line paste cannot
+    silently submit half a credential.
+    """
+    return "".join(c for c in text if c.isprintable()).strip()
 
 
 def mask_secret(value: str, keep: int = 2) -> str:
@@ -255,6 +337,11 @@ def read_secret(console: Console, label: str, keep: int = 2) -> str:
 
     buf: list[str] = []
     console.print(f"[grey50]{label}[/grey50] ", end="")
+    with raw_mode():
+        return _read_secret_loop(console, label, keep, buf)
+
+
+def _read_secret_loop(console: Console, label: str, keep: int, buf: list[str]) -> str:
     while True:
         try:
             key = read_key()
@@ -270,10 +357,13 @@ def read_secret(console: Console, label: str, keep: int = 2) -> str:
         if key == "backspace":
             if buf:
                 buf.pop()
-        elif len(key) == 1 and key.isprintable():
-            buf.append(key)
         else:
-            continue
+            # May be a whole pasted key, not one character, and a paste out of a file
+            # carries a trailing newline.
+            text = clean_paste(key)
+            if not text:
+                continue
+            buf.append(text)
         shown = mask_secret("".join(buf), keep)
         # \r and a pad wide enough to erase the previous, possibly longer, render.
         console.file.write("\r" + " " * (len(label) + len(buf) + 24) + "\r")
@@ -318,7 +408,8 @@ def choose_cards(console: Console, title: str, subtitle: str,
                           style="grey50", justify="center"))
         return Group(*parts)
 
-    with Live(frame(), console=console, auto_refresh=False, transient=True) as live:
+    with raw_mode(), Live(frame(), console=console, auto_refresh=False,
+                          transient=True) as live:
         live.refresh()
         while True:
             try:
