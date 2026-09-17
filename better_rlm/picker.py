@@ -145,6 +145,62 @@ def _read_pending(fd: int, limit: int = 65536) -> str:
     return out
 
 
+#: Windows has no termios, so the console is read through msvcrt instead. These two
+#: maps are the console's answer to the escape sequences _ARROWS covers on POSIX: a
+#: special key arrives as a '\x00' or '\xe0' prefix followed by a scan code.
+_WIN_ARROWS = {"H": "up", "P": "down", "K": "left", "M": "right"}
+_WIN_NAMED = {"\r": "enter", "\n": "enter", "\x1b": "escape",
+              "\x08": "backspace", "\t": "tab"}
+
+
+def _read_key_windows() -> str:
+    """The same contract as the POSIX path, on a console that has no termios.
+
+    Three behaviours the previous branch did not have. Each was measured against the
+    real msvcrt on Windows 11 before this was written:
+
+      * **Ctrl+C came back as the byte '\\x03'.** On POSIX, cbreak leaves ISIG on, so
+        the kernel raises KeyboardInterrupt and every caller already catches it --
+        raw_mode's docstring says as much. msvcrt.getwch swallows the signal and
+        returns the byte, so the operator typed a control character into the search
+        field and had no way to abort. Raise it here instead, so both platforms hand
+        callers the same exception.
+      * **A paste arrived one character per call**, where the POSIX path returns the
+        burst whole. Any CR inside the paste mapped to 'enter' and submitted the
+        field mid-paste -- and the remainder stayed queued, typing itself into the
+        NEXT prompt. msvcrt.kbhit() is this console's select(): drain what is already
+        queued and return it as one unit, bounded by _PASTE_MAX like the POSIX path.
+    The vocabulary is deliberately the same four arrows POSIX names and no more.
+    Naming Home/End/Delete here looked like an easy win and is a trap: key_text()
+    treats any name outside KEY_NAMES as literal text, so pressing Home would type
+    "home" into whatever is being edited -- including the credential prompt, where
+    the masked echo hides it. A new name has to be registered there first.
+
+    There is no bracketed paste to enable: the console delivers pasted text as
+    ordinary key events, which is exactly why kbhit is the right seam.
+    """
+    import msvcrt
+
+    ch = msvcrt.getwch()
+    if ch == "\x03":
+        raise KeyboardInterrupt
+    if ch in ("\x00", "\xe0"):
+        return _WIN_ARROWS.get(msvcrt.getwch(), "")
+    if ch in _WIN_NAMED:
+        return _WIN_NAMED[ch]
+
+    text = ch
+    while msvcrt.kbhit() and len(text) < _PASTE_MAX:
+        nxt = msvcrt.getwch()
+        if nxt in ("\x00", "\xe0") or nxt in _WIN_NAMED or nxt == "\x03":
+            # A keypress, not paste body. Put it back so the next read_key names it
+            # -- a paste ending in CR then submits, which is what was intended.
+            msvcrt.ungetwch(nxt)
+            break
+        text += nxt
+    return text
+
+
 def read_key() -> str:
     """One keypress, as a name -- 'up' 'down' 'left' 'right' 'enter' 'escape'
     'backspace' 'tab' -- or the literal text typed.
@@ -154,15 +210,8 @@ def read_key() -> str:
     unit. Bracketed-paste markers are stripped and their content is never parsed as
     keys.
     """
-    if sys.platform == "win32":                             # pragma: no cover
-        import msvcrt
-
-        ch = msvcrt.getwch()
-        if ch in ("\x00", "\xe0"):
-            return {"H": "up", "P": "down", "K": "left", "M": "right"}.get(
-                msvcrt.getwch(), "")
-        return {"\r": "enter", "\x1b": "escape", "\x08": "backspace",
-                "\t": "tab"}.get(ch, ch)
+    if sys.platform == "win32":
+        return _read_key_windows()
 
     import select
 

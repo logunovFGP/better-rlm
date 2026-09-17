@@ -11,10 +11,30 @@ its URL moves.
 from __future__ import annotations
 
 import dataclasses
+import os
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+
+def assert_owner_only(path: Path) -> None:
+    """The credential file is readable by its owner and nobody else.
+
+    Two platforms, two mechanisms, one property. The POSIX mode-bit assertion this
+    replaces failed on Windows with 0o666 -- not because the file was unprotected by
+    accident, but because os.chmod cannot protect it at all there. envfile._harden
+    uses an ACL instead, so that is what has to be asserted.
+    """
+    if os.name == "posix":
+        assert oct(path.stat().st_mode & 0o777) == "0o600"
+        return
+    out = subprocess.run(["icacls", str(path)], capture_output=True, text=True).stdout
+    aces = [ln for ln in out.splitlines()
+            if ":" in ln and "Successfully processed" not in ln]
+    assert len(aces) == 1, f"expected exactly one ACE, got:\n{out}"
+    assert (os.environ.get("USERNAME") or "").lower() in aces[0].lower(), out
 
 from better_rlm import config as cfgmod
 from better_rlm.config import load_config
@@ -411,7 +431,7 @@ def test_the_key_written_by_the_wizard_reaches_the_client(tmp_path, monkeypatch)
         assert tui.auth_step(Console(file=io.StringIO(), quiet=True),
                              PROVIDER_MINIMAX, st, env_path) is True
     assert envfile.has_var(env_path, "MINIMAX_API_KEY")
-    assert oct(env_path.stat().st_mode & 0o777) == "0o600"
+    assert_owner_only(env_path)
     assert "sk-fake-roundtrip" not in envfile.fingerprint("sk-fake-roundtrip")
 
     monkeypatch.setenv("MINIMAX_API_KEY", "sk-fake-roundtrip")

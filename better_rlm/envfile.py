@@ -6,18 +6,54 @@ from the prompt to the file and nowhere else, and the only things reported about
 are its length and a short hash.
 
 Deliberately not YAML: ``.env`` is read by python-dotenv, holds secrets, and must stay
-0600. ``config_writer`` owns config.yaml and has different rules -- its file is meant
-to be diffed and committed, this one must never be.
+owner-only -- 0600 on POSIX, a single-ACE ACL on Windows, both through ``_harden``.
+``config_writer`` owns config.yaml and has different rules -- its file is meant to be
+diffed and committed, this one must never be.
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 
 _MODE = 0o600
+
+
+def _harden(path: Path) -> None:
+    """Restrict ``path`` to its owner, on either platform.
+
+    On Windows ``os.chmod`` is not merely a weaker control, it is close to no control
+    at all: it toggles the read-only bit and nothing else, so a ``.env`` holding an
+    API key keeps whatever ACL it inherited from its directory while this module's
+    docstring promises 0600. Measured on a freshly created file here: six inherited
+    ACEs, one of them a local group holding Modify.
+
+    ``icacls`` is the platform equivalent -- drop inheritance, grant the current user
+    alone -- and after it the same file carries exactly one ACE. It has shipped with
+    Windows since Vista.
+
+    Failure raises, and that is deliberate. The POSIX ``os.chmod`` this replaces
+    raised too, and a credential written to a file we could not protect is precisely
+    the thing a caller must not be left believing succeeded.
+    """
+    if os.name != "nt":
+        os.chmod(path, _MODE)
+        return
+    user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+    if not user:
+        raise OSError(f"cannot restrict {path}: no USERNAME in the environment")
+    proc = subprocess.run(
+        ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if proc.returncode != 0:
+        raise OSError(
+            f"cannot restrict {path} to {user}: icacls exited {proc.returncode}: "
+            f"{(proc.stderr or proc.stdout).strip()[:200]}"
+        )
 
 
 def fingerprint(value: str) -> str:
@@ -50,7 +86,7 @@ def set_var(path: Path, key: str, value: str) -> str:
             fh.write(new_body)
             fh.flush()
             os.fsync(fh.fileno())
-        os.chmod(tmp, _MODE)
+        _harden(Path(tmp))
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -58,7 +94,7 @@ def set_var(path: Path, key: str, value: str) -> str:
         except OSError:
             pass
         raise
-    os.chmod(path, _MODE)
+    _harden(path)
     return fingerprint(value)
 
 
