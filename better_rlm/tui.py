@@ -69,6 +69,10 @@ from .describe import (
     PROVIDER_CUSTOM,
     PROVIDER_MINIMAX,
     PROVIDERS,
+    VENDORS,
+    all_vendors,
+    modes_for_vendor,
+    provider_for,
     VALID_MODES,
     all_modes,
     describe_mode,
@@ -956,17 +960,17 @@ def render_menu(items: list[MenuItem]) -> Table:
     return table
 
 
-ONBOARDING_CHOICES: list[tuple[str, str, str, str, str]] = [
-    # (provider id, icon, label, detail, mode it implies)
-    (PROVIDER_CLAUDE_CLI, "✦", "Use your Claude Code subscription",
-     "Reuse the `claude` CLI login — no API key, no per-token cost", MODE_CLI),
-    (PROVIDER_ANTHROPIC, "⚙", "Anthropic API key",
-     "api.anthropic.com directly. Higher limits than the subscription", MODE_API),
-    (PROVIDER_MINIMAX, "⚙", "MiniMax",
-     "Anthropic-compatible endpoint. Use MiniMax model ids", MODE_API),
-    (PROVIDER_CUSTOM, "⚙", "Another Anthropic-compatible endpoint",
-     "A gateway, a proxy, or a self-hosted server", MODE_API),
-]
+MODE_CARDS: dict[str, tuple[str, str, str]] = {
+    # mode -> (icon, label, detail). The labels are describe.py's, which are
+    # cline's host/proxy terminology, so the same words appear on this screen and
+    # in /mode-help rather than two descriptions of one thing.
+    MODE_CLI: ("✦", "OAuth — proxy mode",
+               "Reuse your `claude` CLI login. No API key, no per-token cost, "
+               "subject to subscription limits."),
+    MODE_API: ("⚙", "API key — host mode",
+               "Talk to the endpoint directly. Higher limits, per-token cost, "
+               "needs a key in .env."),
+}
 
 
 def needs_onboarding(st: Status) -> bool:
@@ -985,40 +989,47 @@ def needs_onboarding(st: Status) -> bool:
 
 
 def run_onboarding(console: Console, config_path: Path) -> bool:
-    """First run: ask which provider, then set everything that follows from it.
+    """First run: which vendor, then how to reach it, then the credential.
 
-    Ported from cline's ``OnboardingMainMenuScreen`` + ``MAIN_MENU``, which is
-    provider-flavoured rather than mode-flavoured -- "Sign in with Claude Code",
-    "Bring your own provider". That is one question instead of two, and it is the
-    better shape: an operator knows which account they have, not which transport
-    the tool should therefore pick. The mode follows from the answer.
+    Two screens, not one list of every combination. cline asks the vendor question
+    first (MAIN_MENU: "Sign in with Claude Code", "Bring your own provider") and only
+    shows ModePickerContent when the transport is genuinely open -- ``runProviderChange``
+    branches on the provider kind rather than always asking. Same here: Claude can be
+    reached two ways so it asks; MiniMax is API-only so there is nothing to ask.
     """
-    items = [
-        SearchableItem(key=pid, label=label, detail=detail, tag=icon)
-        for pid, icon, label, detail, _mode in ONBOARDING_CHOICES
+    vendors = [
+        SearchableItem(key=vid, label=VENDORS[vid].label,
+                       detail=VENDORS[vid].summary, tag=VENDORS[vid].icon)
+        for vid in all_vendors()
     ]
-    res = picker.choose_cards(
-        console,
-        "Welcome to better-rlm",
-        "Connect a model provider to get started.",
-        items,
-    )
+    res = picker.choose_cards(console, "Welcome to better-rlm",
+                              "Which provider do you have an account with?", vendors)
     if res.key == picker.CANCEL:
         console.print("[grey50]setup cancelled — nothing written[/grey50]")
         return False
+    vendor = res.key
 
-    pid = res.key
-    mode = next(m for p_, _i, _l, _d, m in ONBOARDING_CHOICES if p_ == pid)
-    d = describe_provider(pid)
-
-    base_url = d.base_url
-    if pid == PROVIDER_CUSTOM:
-        base_url = Prompt.ask("[bold]base URL[/bold]", console=console).strip()
-        if not base_url:
-            console.print("[grey50]no URL given — nothing written[/grey50]")
+    modes = modes_for_vendor(vendor)
+    if len(modes) == 1:
+        mode = modes[0]
+        icon, label, _detail = MODE_CARDS[mode]
+        console.print(f"[grey50]{VENDORS[vendor].label} is reached one way: "
+                      f"{label}.[/grey50]")
+    else:
+        cards = [
+            SearchableItem(key=m, label=MODE_CARDS[m][1], detail=MODE_CARDS[m][2],
+                           tag=MODE_CARDS[m][0])
+            for m in modes
+        ]
+        res = picker.choose_cards(console, f"{VENDORS[vendor].label}",
+                                  "How should better-rlm reach it?", cards)
+        if res.key == picker.CANCEL:
+            console.print("[grey50]setup cancelled — nothing written[/grey50]")
             return False
+        mode = res.key
 
-    _save(config_path, {"mode": mode, "base_url": base_url}, console)
+    pid = provider_for(vendor, mode)
+    _save(config_path, {"mode": mode, "base_url": describe_provider(pid).base_url}, console)
     st = load_status(config_path)
     ok = auth_step(console, pid, st, env_for_config(config_path))
 

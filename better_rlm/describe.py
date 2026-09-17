@@ -267,3 +267,81 @@ def provider_for_config(base_url: str, mode: str) -> str:
         if d.base_url and d.base_url.rstrip("/") == u:
             return pid
     return PROVIDER_CUSTOM
+
+
+# -- Vendors: who you have an account with -------------------------------------
+#
+# A provider id here pairs a vendor with a transport -- `claude-cli` and `anthropic`
+# are the same vendor reached two ways. That flattening is fine for the maintenance
+# picker, where the operator is changing one setting, and wrong for a first run,
+# where the question is "whose account do you have?" and the transport follows.
+#
+# cline splits it the same way: MAIN_MENU offers vendors ("Sign in with Claude
+# Code", "Bring your own provider") and the transport is decided by which row was
+# picked, with ModePickerContent only appearing when the answer is genuinely open.
+
+VENDOR_CLAUDE = "claude"
+VENDOR_MINIMAX = "minimax"
+
+
+@dataclass(frozen=True)
+class VendorDescription:
+    """One row of the first-run provider screen."""
+
+    label: str
+    icon: str
+    summary: str
+    modes: dict[str, str]        # session mode -> provider id it resolves to
+
+
+VENDORS: dict[str, VendorDescription] = {
+    VENDOR_CLAUDE: VendorDescription(
+        label="Claude",
+        icon="✦",
+        summary="Anthropic's models, by subscription or API key.",
+        modes={MODE_CLI: PROVIDER_CLAUDE_CLI, MODE_API: PROVIDER_ANTHROPIC},
+    ),
+    VENDOR_MINIMAX: VendorDescription(
+        label="MiniMax",
+        icon="⚙",
+        summary="Anthropic-compatible endpoint. API key only.",
+        modes={MODE_API: PROVIDER_MINIMAX},
+    ),
+}
+
+
+def all_vendors() -> tuple[str, ...]:
+    return tuple(VENDORS)
+
+
+def describe_vendor(vendor: str) -> VendorDescription:
+    v = (vendor or "").strip().lower()
+    info = VENDORS.get(v)
+    if info is None:
+        return VendorDescription(label=vendor or "(unknown)", icon=" ",
+                                 summary="Not a known vendor; pick one from the list.",
+                                 modes={})
+    return info
+
+
+def modes_for_vendor(vendor: str) -> tuple[str, ...]:
+    """The transports this vendor can actually be reached by.
+
+    One entry means there is no question to ask, and asking anyway is the shape
+    cline avoids by branching in runProviderChange rather than always showing the
+    mode picker.
+    """
+    return tuple(describe_vendor(vendor).modes)
+
+
+def provider_for(vendor: str, mode: str) -> str:
+    """Which provider id a (vendor, mode) pair resolves to."""
+    return describe_vendor(vendor).modes.get(mode, PROVIDER_ANTHROPIC)
+
+
+def vendor_of(provider: str) -> str:
+    """Reverse: which vendor a provider id belongs to."""
+    for vid, d in VENDORS.items():
+        if provider in d.modes.values():
+            return vid
+    return VENDOR_CLAUDE
