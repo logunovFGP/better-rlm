@@ -296,3 +296,55 @@ def test_a_pasted_key_arrives_whole(payload):
         except ChildProcessError:
             pass
     assert b"GOT:sk-test-abc123xyz" in out, out[-200:]
+
+
+# --- key names are not text ----------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["up", "down", "left", "right", "tab",
+                                  "enter", "escape", "backspace"])
+def test_a_named_key_carries_no_text(name):
+    """read_key overloads one str for key names and literal text, which was safe
+    only while text was always one character. When a paste started arriving whole,
+    the `len(key) == 1` guards went with it -- and pressing Left while entering a
+    credential appended the word "left" to it, invisibly, because the echo is
+    masked."""
+    from better_rlm.picker import key_text
+
+    assert key_text(name) == ""
+
+
+def test_real_text_still_reaches_the_buffer():
+    from better_rlm.picker import key_text
+
+    assert key_text("s") == "s"
+    assert key_text("sk-ant-abc\n") == "sk-ant-abc"
+
+
+def test_an_escape_sequence_riding_a_paste_is_stripped():
+    """An unbracketed paste is drained with whatever is queued behind it, so an
+    arrow pressed right after one arrives in the same burst. Filtering only
+    non-printables left the "[D" tail in the value."""
+    from better_rlm.picker import clean_paste
+
+    assert clean_paste("sk-test-abc123xyz\x1b[D") == "sk-test-abc123xyz"
+    assert clean_paste("sk-[abc]-123") == "sk-[abc]-123"      # real brackets survive
+
+
+def test_backspace_removes_one_character_of_a_pasted_key():
+    """buf held chunks, so a paste was one element and one Backspace deleted the
+    whole credential."""
+    buf: list[str] = []
+    buf.extend("sk-ant-api03-abcdefghijklmnop")
+    assert len(buf) == 29
+    buf.pop()
+    assert len(buf) == 28
+
+
+def test_paste_ceilings_are_set():
+    """A tty never reports EOF, so an end marker that never arrives must be bounded
+    by size and time or read_key blocks forever."""
+    from better_rlm.picker import _PASTE_MAX, _PASTE_TIMEOUT_S
+
+    assert 0 < _PASTE_MAX <= 1024 * 1024
+    assert 0 < _PASTE_TIMEOUT_S <= 10

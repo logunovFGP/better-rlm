@@ -19,6 +19,7 @@ get the numbered prompt there. cline draws the same line by testing the list mod
 from __future__ import annotations
 
 import os
+import re
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -39,7 +40,23 @@ from .searchable_list import (
 CANCEL = "__cancel__"
 CUSTOM = "__custom__"
 
+_CSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z~]")
+
 _ARROWS = {"A": "up", "B": "down", "C": "right", "D": "left"}
+
+#: Every value read_key can return that names a key rather than being literal text.
+#: read_key overloads one str for both, which was safe only while text was always
+#: exactly one character -- the `len(key) == 1` guards that used to exclude these
+#: went away when a paste started arriving whole. Without this set, pressing Left
+#: types "left" into whatever is being edited, including a credential, where the
+#: masked echo hides it.
+KEY_NAMES = frozenset({"up", "down", "left", "right", "enter", "escape",
+                       "backspace", "tab"})
+
+
+def key_text(key: str) -> str:
+    """The literal text a key event carries: "" for a named key or an empty read."""
+    return "" if key in KEY_NAMES else clean_paste(key)
 
 
 def interactive() -> bool:
@@ -53,10 +70,14 @@ def interactive() -> bool:
 _RAW_HELD = False
 _PASTE_START = "200~"
 _PASTE_END = "\x1b[201~"
+#: Ceilings for a bracketed paste. Generous for any credential or model id, and
+#: small enough that a marker that never arrives fails fast instead of hanging.
+_PASTE_MAX = 64 * 1024
+_PASTE_TIMEOUT_S = 2.0
 
 
 @contextmanager
-def raw_mode():
+def raw_mode(stream=None):
     """Hold the terminal in raw mode for a whole input loop, and turn on bracketed
     paste while we do.
 
@@ -69,6 +90,10 @@ def raw_mode():
     Bracketed paste (``ESC[?2004h``) makes the terminal wrap pasted content in
     markers, so a key containing a newline or an escape byte can never be mistaken
     for the operator pressing Enter or Esc.
+
+    ``stream`` is where those escapes go. Callers pass the console they draw
+    through, so a Console pointed at something other than stdout cannot leave
+    bracketed paste toggled on a terminal it never wrote to.
     """
     global _RAW_HELD
     if _RAW_HELD or sys.platform == "win32":
@@ -77,18 +102,19 @@ def raw_mode():
     import termios
     import tty
 
+    out = stream or sys.stdout
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd)
     _RAW_HELD = True
     try:
         tty.setraw(fd)
-        sys.stdout.write("\x1b[?2004h")
-        sys.stdout.flush()
+        out.write("\x1b[?2004h")
+        out.flush()
         yield
     finally:
         _RAW_HELD = False
-        sys.stdout.write("\x1b[?2004l")
-        sys.stdout.flush()
+        out.write("\x1b[?2004l")
+        out.flush()
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
 
@@ -144,13 +170,25 @@ def read_key() -> str:
                 return "escape"
             seq = ""
             while len(seq) < 8:
+                # Time-bounded: the 0.05s guard above covers only the byte after
+                # ESC. A partial CSI -- a disconnect mid-sequence, a resize racing
+                # input -- otherwise blocks here forever with the terminal in raw
+                # mode, where Ctrl+C is not delivered as a signal either.
+                if not select.select([fd], [], [], 0.05)[0]:
+                    return ""
                 nxt = os.read(fd, 1).decode("utf-8", "replace")
                 seq += nxt
                 if nxt.isalpha() or nxt == "~":
                     break
             if seq == _PASTE_START:
                 body = ""
-                while _PASTE_END not in body:
+                # Bounded both ways. A tty never reports EOF, so `if not more`
+                # cannot end this loop: a paste cancelled mid-transfer, or a
+                # terminal that sends the start marker but not the end, would
+                # otherwise block forever while body grew without limit.
+                while _PASTE_END not in body and len(body) < _PASTE_MAX:
+                    if not select.select([fd], [], [], _PASTE_TIMEOUT_S)[0]:
+                        break
                     more = os.read(fd, 4096).decode("utf-8", "replace")
                     if not more:
                         break
@@ -255,7 +293,7 @@ def choose(console: Console, title: str, items: list[SearchableItem],
     # the time, and a background 30fps thread redraws a frame that cannot have
     # changed. It also fights the raw-mode key reader for the terminal, and floods a
     # pty fast enough to stall a writer. Redraw when the state changes, not on a clock.
-    with raw_mode(), Live(
+    with raw_mode(console.file), Live(
             _render(title, shown, selected, search, current_key, custom_hint),
             console=console, auto_refresh=False, transient=True) as live:
         live.refresh()
@@ -281,8 +319,8 @@ def choose(console: Console, title: str, items: list[SearchableItem],
                 search = search[:-1]
                 shown = filter_items(items, search)
                 selected = 0
-            elif clean_paste(key):
-                search += clean_paste(key)
+            elif (text := key_text(key)):
+                search += text
                 shown = filter_items(items, search)
                 selected = 0            # upstream's setSearch resets selection
             live.update(_render(title, shown, selected, search, current_key, custom_hint),
@@ -298,7 +336,11 @@ def clean_paste(text: str) -> str:
     newline is stripped rather than treated as Enter, so a two-line paste cannot
     silently submit half a credential.
     """
-    return "".join(c for c in text if c.isprintable()).strip()
+    # Strip CSI sequences first. An unbracketed paste is drained with whatever else
+    # is queued behind it, so an arrow pressed right after one arrives in the same
+    # burst -- and filtering only non-printables leaves its "[D" tail behind as
+    # literal text in the value.
+    return "".join(c for c in _CSI.sub("", text) if c.isprintable()).strip()
 
 
 def mask_secret(value: str, keep: int = 2) -> str:
@@ -335,13 +377,15 @@ def read_secret(console: Console, label: str, keep: int = 2) -> str:
 
         return Prompt.ask(label, console=console).strip()
 
-    buf: list[str] = []
     console.print(f"[grey50]{label}[/grey50] ", end="")
-    with raw_mode():
-        return _read_secret_loop(console, label, keep, buf)
+    with raw_mode(console.file):
+        return _read_secret_loop(console, label, keep)
 
 
-def _read_secret_loop(console: Console, label: str, keep: int, buf: list[str]) -> str:
+def _read_secret_loop(console: Console, label: str, keep: int) -> str:
+    # Characters, never chunks: a pasted burst extended one element at a time so
+    # Backspace removes one character rather than the whole credential.
+    buf: list[str] = []
     while True:
         try:
             key = read_key()
@@ -358,15 +402,17 @@ def _read_secret_loop(console: Console, label: str, keep: int, buf: list[str]) -
             if buf:
                 buf.pop()
         else:
-            # May be a whole pasted key, not one character, and a paste out of a file
-            # carries a trailing newline.
-            text = clean_paste(key)
+            # May be a whole pasted key rather than one character, and a paste out
+            # of a file carries a trailing newline. A named key carries no text.
+            text = key_text(key)
             if not text:
                 continue
-            buf.append(text)
+            buf.extend(text)
         shown = mask_secret("".join(buf), keep)
         # \r and a pad wide enough to erase the previous, possibly longer, render.
-        console.file.write("\r" + " " * (len(label) + len(buf) + 24) + "\r")
+        # Sized from the character count: len(buf) was the element count, which a
+        # paste made 1, leaving the old mask on screen after a Backspace.
+        console.file.write("\r" + " " * (len(label) + len("".join(buf)) + 24) + "\r")
         console.file.write(f"{label} {shown}")
         console.file.flush()
 
@@ -408,7 +454,7 @@ def choose_cards(console: Console, title: str, subtitle: str,
                           style="grey50", justify="center"))
         return Group(*parts)
 
-    with raw_mode(), Live(frame(), console=console, auto_refresh=False,
+    with raw_mode(console.file), Live(frame(), console=console, auto_refresh=False,
                           transient=True) as live:
         live.refresh()
         while True:
