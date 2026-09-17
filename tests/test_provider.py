@@ -524,15 +524,47 @@ def test_onboarding_is_skipped_once_it_can():
     assert not needs_onboarding(_st(mode=MODE_AUTO, cli_available=True, cli_logged_in=True))
 
 
-def test_every_onboarding_choice_sets_a_coherent_mode():
-    """One question sets both, cline-style. A row pairing a CLI provider with api --
-    or an endpoint provider with claude-cli -- would write a config that ignores the
-    answer the operator just gave."""
-    from better_rlm.tui import ONBOARDING_CHOICES
-    from better_rlm.describe import AUTH_CLI, PROVIDERS
+def test_every_vendor_offers_only_modes_that_can_reach_it():
+    """The invariant the flat ONBOARDING_CHOICES list used to carry.
 
-    for pid, icon, label, detail, mode in ONBOARDING_CHOICES:
-        assert pid in PROVIDERS, pid
-        assert icon and label and detail
-        expected = MODE_CLI if PROVIDERS[pid].auth == AUTH_CLI else MODE_API
-        assert mode == expected, f"{pid} would be configured unreachable"
+    A vendor offering a mode it cannot be reached by would write a config that
+    ignores the answer the operator just gave -- MiniMax under claude-cli routes to
+    Anthropic, and the endpoint is silently unused.
+    """
+    from better_rlm.describe import (
+        AUTH_CLI, MODE_API, MODE_CLI, PROVIDERS, VENDORS,
+        all_vendors, describe_vendor, modes_for_vendor, provider_for, vendor_of,
+    )
+
+    for vid in all_vendors():
+        d = describe_vendor(vid)
+        assert d.label and d.icon and d.summary
+        assert modes_for_vendor(vid), f"{vid} is unreachable"
+        for mode, pid in d.modes.items():
+            assert pid in PROVIDERS, (vid, mode, pid)
+            expected = MODE_CLI if PROVIDERS[pid].auth == AUTH_CLI else MODE_API
+            assert mode == expected, f"{vid} offers {mode} for a {expected} provider"
+            assert provider_for(vid, mode) == pid
+            assert vendor_of(pid) == vid
+
+
+def test_claude_offers_both_transports_and_minimax_only_one():
+    """The shape of the first-run questions: Claude has a real choice to make, so it
+    is asked; MiniMax does not, so asking would be a screen with one answer."""
+    from better_rlm.describe import (
+        MODE_API, MODE_CLI, VENDOR_CLAUDE, VENDOR_MINIMAX, modes_for_vendor,
+    )
+
+    assert set(modes_for_vendor(VENDOR_CLAUDE)) == {MODE_CLI, MODE_API}
+    assert set(modes_for_vendor(VENDOR_MINIMAX)) == {MODE_API}
+
+
+def test_every_mode_a_vendor_offers_has_a_card():
+    """A mode with no card would render a blank row in the second screen."""
+    from better_rlm.describe import all_vendors, modes_for_vendor
+    from better_rlm.tui import MODE_CARDS
+
+    for vid in all_vendors():
+        for mode in modes_for_vendor(vid):
+            icon, label, detail = MODE_CARDS[mode]
+            assert icon and label and detail, mode

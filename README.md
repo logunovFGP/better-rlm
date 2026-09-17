@@ -1027,8 +1027,15 @@ onboarding screen instead of the menu: a welcome, and one card per provider.
             ↑/↓ navigate, Enter to select, Esc to exit
 ```
 
-One question sets the mode and the provider together, then it asks for the
-credential. Keys echo **masked** — `sk••••••••••••yz`, first and last two characters
+Two questions, then the credential. First the vendor, then — only when there is a
+real choice — how to reach it:
+
+| | transports |
+|---|---|
+| **Claude** | OAuth (proxy, your `claude` CLI login) or API key (host) |
+| **MiniMax** | API key only — so it says so and skips the question |
+
+Keys echo **masked** — `sk••••••••••••yz`, first and last two characters
 — so you can tell a good paste from an empty clipboard without the key landing in
 your scrollback.
 

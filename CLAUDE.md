@@ -151,12 +151,23 @@ shows the maintenance menu instead. `tui.needs_onboarding(st)` is the switch, an
 asks whether a model call is possible -- not whether config.yaml has values in it. A
 config that cannot call a model is not configured.
 
-The onboarding question is **provider-flavoured, not mode-flavoured**, because
-cline's MAIN_MENU is ("Sign in with Claude Code", "Bring your own provider"). One
-question sets both: an operator knows which account they have, not which transport
-the tool should therefore pick. `ONBOARDING_CHOICES` pairs each provider with the
-mode it implies, and `test_every_onboarding_choice_sets_a_coherent_mode` fails if a
-row would configure something unreachable.
+Two screens: **vendor, then transport**. `describe.VENDORS` is the layer above
+providers, because a provider id pairs a vendor with a transport -- `claude-cli` and
+`anthropic` are the same vendor reached two ways. That flattening is right for the
+maintenance picker, where one setting is being changed, and wrong for a first run,
+where the question is whose account you have and the transport follows.
+
+  * **Claude** -> OAuth (proxy) or API key (host). Two ways, so it asks.
+  * **MiniMax** -> API key only. One way, so it says so and moves on.
+
+cline branches the same way: MAIN_MENU offers vendors, and `runProviderChange` shows
+`ModePickerContent` only when the transport is genuinely open rather than always
+asking. A screen with one answer is not a question.
+
+`test_every_vendor_offers_only_modes_that_can_reach_it` fails if a vendor offers a
+transport it cannot be reached by -- MiniMax under `claude-cli` would route to
+Anthropic and silently ignore the endpoint. `test_every_mode_a_vendor_offers_has_a_card`
+fails on a mode with no card, which would render a blank row.
 
 API keys echo **masked** -- first two and last two characters, the rest dots. cline
 shows them in the clear; hiding them entirely is what we had, and it was worse than
