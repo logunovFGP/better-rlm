@@ -56,7 +56,8 @@ from .config import (
     config_file,
     env_file,
 )
-from . import envfile
+from . import envfile, picker
+from .searchable_list import SearchableItem
 from .describe import (
     AUTH_API_KEY,
     AUTH_CLI,
@@ -271,6 +272,38 @@ PICKER_KEEP = "__keep__"
 PICKER_CUSTOM = "__custom__"
 
 
+def _select(console: Console, title: str, options: list[tuple[str, str]],
+            current: str, allow_custom: bool = False, custom_hint: str = "",
+            sections: dict[str, str] | None = None,
+            tags: dict[str, str] | None = None) -> str:
+    """One selection, through the live picker on a terminal and the numbered prompt
+    off one.
+
+    Every picker goes through here so the two paths cannot drift: a terminal gets
+    cline's interaction (arrow keys, a highlight, type-to-filter), and a pipe -- the
+    suite, CI, ``--one-shot`` -- gets the prompt it can actually answer. Returns the
+    same sentinels either way, so no caller has to know which ran.
+    """
+    if not picker.interactive():
+        return _prompt_choice(console, title, options, current,
+                              allow_custom=allow_custom, custom_hint=custom_hint)
+    items = [
+        SearchableItem(key=value, label=value, detail=detail,
+                       section=(sections or {}).get(value, ""),
+                       tag=(tags or {}).get(value, ""))
+        for value, detail in options
+    ]
+    res = picker.choose(console, title, items, current_key=current,
+                        custom_hint=custom_hint if allow_custom else "")
+    if res.key == picker.CANCEL:
+        return ACTION_CANCEL
+    if res.key == picker.CUSTOM:
+        return PICKER_CUSTOM
+    # Upstream opens on the current value and Enter alone is a no-op; keep that,
+    # so a picker opened by accident changes nothing.
+    return PICKER_KEEP if res.key == current else res.key
+
+
 def _prompt_choice(
     console: Console,
     title: str,
@@ -356,12 +389,7 @@ def pick_mode(console: Console, current: str) -> str:
             expand=False,
         )
     )
-    return _prompt_choice(
-        console,
-        title=f"Mode (current: {current})",
-        options=options,
-        current=current,
-    )
+    return _select(console, f"Mode (current: {current})", options, current)
 
 
 def pick_provider(console: Console, mode: str, current: str) -> str:
@@ -381,14 +409,15 @@ def pick_provider(console: Console, mode: str, current: str) -> str:
         d = PROVIDERS[pid]
         auth = "claude CLI login" if d.auth == AUTH_CLI else f"{d.key_env} in .env"
         options.append((pid, f"{d.summary}  [{auth}]"))
-    return _prompt_choice(
-        console,
-        title=f"Provider (current: {current})",
-        options=options,
-        current=current,
-        allow_custom=mode != MODE_CLI,
-        custom_hint="an Anthropic-compatible base URL",
-    )
+    sections = {pid: ("proxy — the `claude` CLI runs it" if PROVIDERS[pid].mode == MODE_CLI
+                      else "host — better-rlm runs it")
+                for pid in providers_for_mode(mode) if pid != PROVIDER_CUSTOM}
+    tags = {pid: (PROVIDERS[pid].key_env or "no key needed")
+            for pid in providers_for_mode(mode) if pid != PROVIDER_CUSTOM}
+    return _select(console, f"Provider (current: {current})", options, current,
+                   allow_custom=mode != MODE_CLI,
+                   custom_hint="an Anthropic-compatible base URL",
+                   sections=sections, tags=tags)
 
 
 def env_for_config(config_path: Path) -> Path:
@@ -604,14 +633,8 @@ def pick_model(console: Console, current: str, kind: str = "root") -> str:
         (MODEL_OPUS, "override for the hardest tasks (1M ctx)"),
         (MODEL_HAIKU, "cheap sub-LLM (200K ctx)"),
     ]
-    return _prompt_choice(
-        console,
-        title=f"{kind} model (current: {current})",
-        options=curated,
-        current=current,
-        allow_custom=True,
-        custom_hint="type a model id (e.g. claude-opus-4-8) and press Enter",
-    )
+    return _select(console, f"{kind} model (current: {current})", curated, current,
+                   allow_custom=True, custom_hint="type a model id")
 
 
 # -- Persistence -----------------------------------------------------------
@@ -862,6 +885,7 @@ class MenuItem:
     label: str
     detail: str
     command: str
+    section: str = "Actions"
 
 
 def build_menu(st: Status) -> list[MenuItem]:
@@ -882,19 +906,19 @@ def build_menu(st: Status) -> list[MenuItem]:
         items.append(MenuItem(
             "", f"Supply your {provider} key",
             f"{st.key_env} is not set — every model-backed tool fails until it is",
-            "/provider-key",
+            "/provider-key", "Needs attention",
         ))
     if st.base_url and cli_will_win(st):
         items.append(MenuItem(
             "", "Fix the mode that is ignoring your endpoint",
             f"mode={st.mode} routes to the `{st.cli_path}` CLI, so your endpoint is unused",
-            "/mode",
+            "/mode", "Needs attention",
         ))
     if st.mode == MODE_CLI and st.cli_logged_in is False:
         items.append(MenuItem(
             "", "Sign the `claude` CLI in",
             "mode=claude-cli, but the CLI has no login — model calls will fail",
-            "/provider-key",
+            "/provider-key", "Needs attention",
         ))
 
     items += [
@@ -910,7 +934,18 @@ def build_menu(st: Status) -> list[MenuItem]:
     return [dataclasses.replace(it, key=str(n)) for n, it in enumerate(items, 1)]
 
 
+def menu_items_to_searchable(items: list[MenuItem]) -> list[SearchableItem]:
+    """Menu rows as picker rows, with the problems grouped apart from the routine
+    actions so a broken config reads as a short list of fixes rather than a wall."""
+    out: list[SearchableItem] = []
+    for it in items:
+        out.append(SearchableItem(key=it.command + "#" + it.label, label=it.label,
+                                  detail=it.detail, section=it.section, payload=it))
+    return out
+
+
 def render_menu(items: list[MenuItem]) -> Table:
+    """The headless rendering. The live picker draws its own."""
     table = Table(title="What would you like to do?", show_header=False)
     table.add_column("#", justify="right", style="cyan", no_wrap=True)
     table.add_column("action", style="white")
@@ -937,32 +972,52 @@ def run_menu(config_path: Path | None = None, console: Console | None = None) ->
         console.print(Panel(render_status(st), title="[bold]better-rlm[/bold]",
                             border_style="green"))
         items = build_menu(st)
-        console.print(render_menu(items))
-        try:
-            choice = Prompt.ask("[bold green]Pick one[/bold green]", console=console,
-                                default="q").strip()
-        except (EOFError, KeyboardInterrupt):
-            console.print("\n[grey50]bye[/grey50]")
-            return 0
-        if choice.lower() in ("q", "quit", "exit"):
-            console.print("[grey50]bye[/grey50]")
-            return 0
-        if choice.lower() == "s":
-            return run_repl(cfg_path, console=console)
-        if choice.startswith("/"):
-            if not _dispatch_guarded(choice, console, cfg_path):
+
+        if picker.interactive():
+            rows = menu_items_to_searchable(items)
+            rows.append(SearchableItem(key="__repl__", label="Slash commands",
+                                       detail="type any /command directly",
+                                       section="Other"))
+            rows.append(SearchableItem(key="__quit__", label="Quit", section="Other"))
+            res = picker.choose(console, "What would you like to do?", rows)
+            if res.key in (picker.CANCEL, "__quit__"):
+                console.print("[grey50]bye[/grey50]")
                 return 0
-            continue
-        match = next((it for it in items if it.key == choice), None)
-        if match is None:
-            console.print(f"[yellow]not an option: {choice!r}[/yellow]")
-            continue
-        if match.command == "/provider-key":
+            if res.key == "__repl__":
+                return run_repl(cfg_path, console=console)
+            chosen = res.item.payload if res.item else None
+            if chosen is None:
+                continue
+            command = chosen.command
+        else:
+            console.print(render_menu(items))
+            try:
+                choice = Prompt.ask("[bold green]Pick one[/bold green]", console=console,
+                                    default="q").strip()
+            except (EOFError, KeyboardInterrupt):
+                console.print("\n[grey50]bye[/grey50]")
+                return 0
+            if choice.lower() in ("q", "quit", "exit"):
+                console.print("[grey50]bye[/grey50]")
+                return 0
+            if choice.lower() == "s":
+                return run_repl(cfg_path, console=console)
+            if choice.startswith("/"):
+                if not _dispatch_guarded(choice, console, cfg_path):
+                    return 0
+                continue
+            match = next((it for it in items if it.key == choice), None)
+            if match is None:
+                console.print(f"[yellow]not an option: {choice!r}[/yellow]")
+                continue
+            command = match.command
+
+        if command == "/provider-key":
             # The credential alone, without re-walking the provider picker.
             pid = provider_for_config(st.base_url, st.mode)
             auth_step(console, pid, st, env_for_config(cfg_path))
             continue
-        if not _dispatch_guarded(match.command, console, cfg_path):
+        if not _dispatch_guarded(command, console, cfg_path):
             return 0
 
 
