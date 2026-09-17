@@ -179,7 +179,6 @@ class ProviderDescription:
     base_url: str          # "" = the SDK default, api.anthropic.com
     key_env: str
     summary: str
-    prompts_base_url: bool = False   # ask the operator for the URL
 
 
 PROVIDERS: dict[str, ProviderDescription] = {
@@ -214,7 +213,6 @@ PROVIDERS: dict[str, ProviderDescription] = {
         base_url="",
         key_env="RLM_API_KEY",
         summary="Any other endpoint speaking the Anthropic messages format.",
-        prompts_base_url=True,
     ),
 }
 
@@ -335,13 +333,30 @@ def modes_for_vendor(vendor: str) -> tuple[str, ...]:
 
 
 def provider_for(vendor: str, mode: str) -> str:
-    """Which provider id a (vendor, mode) pair resolves to."""
-    return describe_vendor(vendor).modes.get(mode, PROVIDER_ANTHROPIC)
+    """Which provider id a (vendor, mode) pair resolves to.
+
+    Raises on a pair that cannot be reached. Defaulting to Anthropic meant
+    ``provider_for("minimax", MODE_CLI)`` quietly configured a different vendor than
+    the operator picked, and the only symptom would be calls landing somewhere
+    unexpected. Callers pass pairs drawn from ``VENDORS``; anything else is a bug.
+    """
+    modes = describe_vendor(vendor).modes
+    if mode not in modes:
+        raise ValueError(
+            f"{vendor!r} cannot be reached by mode {mode!r} "
+            f"(it offers {sorted(modes) or 'nothing'})"
+        )
+    return modes[mode]
 
 
 def vendor_of(provider: str) -> str:
-    """Reverse: which vendor a provider id belongs to."""
+    """Reverse: which vendor a provider id belongs to, or "" when none does.
+
+    PROVIDER_CUSTOM is deliberately absent from VENDORS, so it has no vendor. This
+    returned VENDOR_CLAUDE for it -- and for any unknown id -- which would label a
+    custom endpoint "Claude" on any screen that named the vendor.
+    """
     for vid, d in VENDORS.items():
         if provider in d.modes.values():
             return vid
-    return VENDOR_CLAUDE
+    return ""

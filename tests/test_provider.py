@@ -568,3 +568,77 @@ def test_every_mode_a_vendor_offers_has_a_card():
         for mode in modes_for_vendor(vid):
             icon, label, detail = MODE_CARDS[mode]
             assert icon and label and detail, mode
+
+
+# --- review fixes -------------------------------------------------------------
+
+
+def test_a_cancelled_credential_leaves_the_endpoint_as_it_was(tmp_path):
+    """/provider wrote base_url before asking for the key, so abandoning the prompt
+    moved a working install onto an endpoint it had no credential for -- and
+    api_key_for will not fall back to another provider's key."""
+    import io
+    from rich.console import Console
+    from better_rlm import tui
+    from better_rlm.config_writer import read_scalar
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("mode: api\nprovider: anthropic\n")
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=sk-ant-working\n")
+
+    with patch.object(tui, "pick_provider", return_value=PROVIDER_MINIMAX), \
+            patch.object(tui, "auth_step", return_value=False):
+        tui._dispatch("/provider", Console(file=io.StringIO(), quiet=True), cfg)
+    assert not (read_scalar(cfg, "base_url") or ""), "the endpoint moved anyway"
+
+    # The success path must still persist it, or the rollback has eaten the feature.
+    with patch.object(tui, "pick_provider", return_value=PROVIDER_MINIMAX), \
+            patch.object(tui, "auth_step", return_value=True):
+        tui._dispatch("/provider", Console(file=io.StringIO(), quiet=True), cfg)
+    assert read_scalar(cfg, "base_url") == "https://api.minimax.io/anthropic"
+
+
+def test_an_unreachable_vendor_mode_pair_raises(tmp_path):
+    """Defaulting to Anthropic configured a vendor the operator did not pick, and the
+    only symptom was calls landing somewhere unexpected."""
+    from better_rlm.describe import MODE_CLI, VENDOR_MINIMAX, provider_for
+
+    with pytest.raises(ValueError):
+        provider_for(VENDOR_MINIMAX, MODE_CLI)
+    with pytest.raises(ValueError):
+        provider_for("not-a-vendor", MODE_API)
+
+
+def test_a_provider_with_no_vendor_reports_none():
+    """PROVIDER_CUSTOM is deliberately absent from VENDORS, so it has no vendor.
+    Returning Claude would label a custom endpoint as Anthropic's."""
+    from better_rlm.describe import vendor_of
+
+    assert vendor_of(PROVIDER_CUSTOM) == ""
+    assert vendor_of("nonsense") == ""
+
+
+def test_the_welcome_is_shown_once_and_falls_through_to_the_menu(tmp_path):
+    """Cancelling onboarding used to exit, leaving an unconfigured install with no way
+    to reach /test, the model pickers, or the menu row offering the missing key."""
+    import io
+    from rich.console import Console
+    from better_rlm import tui
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("mode: api\nprovider: anthropic\n")
+    calls = {"onboarding": 0}
+
+    def fake_onboarding(console, path):
+        calls["onboarding"] += 1
+        return False                     # operator pressed Esc
+
+    buf = io.StringIO()
+    with patch.object(tui.picker, "interactive", return_value=True), \
+            patch.object(tui, "run_onboarding", side_effect=fake_onboarding), \
+            patch.object(tui.Prompt, "ask", return_value="q"), \
+            patch.object(tui.picker, "choose",
+                         return_value=tui.picker.PickerResult(tui.picker.CANCEL)):
+        tui.run_menu(cfg, Console(file=buf, width=200))
+
+    assert calls["onboarding"] == 1, "the welcome asked again instead of falling through"

@@ -69,7 +69,6 @@ from .describe import (
     PROVIDER_CUSTOM,
     PROVIDER_MINIMAX,
     PROVIDERS,
-    VENDORS,
     all_vendors,
     modes_for_vendor,
     provider_for,
@@ -77,6 +76,7 @@ from .describe import (
     all_modes,
     describe_mode,
     describe_provider,
+    describe_vendor,
     provider_for_config,
     providers_for_mode,
 )
@@ -810,10 +810,18 @@ def _dispatch(
         else:
             provider_id = choice
             url = describe_provider(choice).base_url
+        previous = st.base_url
         _save(config_path, {"base_url": url}, console)
         st = load_status(config_path)
         _warn_if_endpoint_is_dead(console, st)
-        auth_step(console, provider_id, st, env_for_config(config_path))
+        if not auth_step(console, provider_id, st, env_for_config(config_path)):
+            # The endpoint moved but no credential exists for it, and api_key_for
+            # deliberately will not fall back to another provider's key -- so leaving
+            # this written turns a working install into one where every model call
+            # fails. Put the old endpoint back and say so.
+            _save(config_path, {"base_url": previous}, console)
+            console.print("[yellow]No credential supplied, so the endpoint was left "
+                          "as it was.[/yellow]")
         return True
 
     if cmd in ("/model", "/override", "/sub"):
@@ -998,8 +1006,8 @@ def run_onboarding(console: Console, config_path: Path) -> bool:
     reached two ways so it asks; MiniMax is API-only so there is nothing to ask.
     """
     vendors = [
-        SearchableItem(key=vid, label=VENDORS[vid].label,
-                       detail=VENDORS[vid].summary, tag=VENDORS[vid].icon)
+        SearchableItem(key=vid, label=describe_vendor(vid).label,
+                       detail=describe_vendor(vid).summary, tag=describe_vendor(vid).icon)
         for vid in all_vendors()
     ]
     res = picker.choose_cards(console, "Welcome to better-rlm",
@@ -1012,8 +1020,8 @@ def run_onboarding(console: Console, config_path: Path) -> bool:
     modes = modes_for_vendor(vendor)
     if len(modes) == 1:
         mode = modes[0]
-        icon, label, _detail = MODE_CARDS[mode]
-        console.print(f"[grey50]{VENDORS[vendor].label} is reached one way: "
+        _icon, label, _detail = MODE_CARDS[mode]
+        console.print(f"[grey50]{describe_vendor(vendor).label} is reached one way: "
                       f"{label}.[/grey50]")
     else:
         cards = [
@@ -1021,7 +1029,7 @@ def run_onboarding(console: Console, config_path: Path) -> bool:
                            tag=MODE_CARDS[m][0])
             for m in modes
         ]
-        res = picker.choose_cards(console, f"{VENDORS[vendor].label}",
+        res = picker.choose_cards(console, describe_vendor(vendor).label,
                                   "How should better-rlm reach it?", cards)
         if res.key == picker.CANCEL:
             console.print("[grey50]setup cancelled — nothing written[/grey50]")
@@ -1054,15 +1062,20 @@ def run_menu(config_path: Path | None = None, console: Console | None = None) ->
     """
     cfg_path = config_path or config_file()
     console = console or Console()
+    shown_welcome = False
     while True:
         st = load_status(cfg_path)
-        if needs_onboarding(st) and picker.interactive():
+        if needs_onboarding(st) and picker.interactive() and not shown_welcome:
             # Nothing here can make a model call yet, so ask rather than presenting a
             # maintenance menu to someone who has not configured anything.
             run_onboarding(console, cfg_path)
             st = load_status(cfg_path)
-            if needs_onboarding(st):
-                return 0                      # cancelled; do not loop the welcome
+            # Fall through to the menu whether or not it completed. Exiting here left
+            # an unconfigured install with no way to reach /test, the model pickers,
+            # or the menu row that offers the very credential that is missing -- and
+            # re-running would show the welcome again. `shown_welcome` stops the loop
+            # re-asking on the next pass; `q` is how you leave.
+            shown_welcome = True
         console.print()
         console.print(Panel(render_status(st), title="[bold]better-rlm[/bold]",
                             border_style="green"))
