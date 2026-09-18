@@ -493,3 +493,43 @@ def test_a_brand_new_install_runs_setup_even_when_the_claude_cli_is_logged_in(tm
     # Written but unreachable stays onboarding -- the half this repo adds to cline's.
     assert tui.needs_onboarding(
         _status(mode=tui.MODE_API, key_env="ANTHROPIC_API_KEY", has_api_key=False))
+
+
+def test_a_hand_typed_model_id_says_what_is_not_known_about_it(quiet_console) -> None:
+    """A custom id is accepted without checking it against a list -- the endpoint is
+    the authority. But accepting it silently hid two consequences: the engine has no
+    window for it, so it assumes the 128k default and chunks far earlier than a 1M
+    model needs, and it has no rate, so every cost line reads unpriced.
+
+    Found by typing MiniMax-Text-01 into the wizard and getting no indication that it
+    would be treated as an eighth the size of the MiniMax-M3 beside it in the list.
+    """
+    import io
+
+    from rich.console import Console
+
+    from better_rlm import tui
+
+    buf = io.StringIO()
+    tui.warn_unknown_model(Console(file=buf, width=200), "MiniMax-Text-01")
+    out = buf.getvalue()
+    assert "MiniMax-Text-01" in out
+    assert "128,000" in out, out
+    assert "unpriced" in out, out
+
+
+def test_a_catalogued_model_draws_no_warning(quiet_console) -> None:
+    """The warning has to stay quiet for every row the picker itself offers, or it
+    fires on the normal path and gets ignored."""
+    import io
+
+    from rich.console import Console
+
+    from better_rlm import tui
+    from better_rlm.describe import MODELS
+
+    for rows in MODELS.values():
+        for m in rows:
+            buf = io.StringIO()
+            tui.warn_unknown_model(Console(file=buf, width=200), m.id)
+            assert buf.getvalue() == "", f"{m.id} warned: {buf.getvalue()!r}"

@@ -68,6 +68,7 @@ from .describe import (
     VALID_MODES,
     all_modes,
     describe_mode,
+    describe_model,
     describe_provider,
     models_for,
     provider_for_config,
@@ -488,6 +489,58 @@ def env_for_config(config_path: Path) -> Path:
     return config_path.parent / ".env"
 
 
+def load_sidecar_env(config_path: Path) -> Path | None:
+    """Load the .env that belongs to the config being edited. Returns it, or None.
+
+    config.py runs ``load_dotenv(env_file())`` at IMPORT, which resolves the DEFAULT
+    .env and knows nothing about ``--config``. ``env_for_config`` writes beside the
+    config named on the command line. The two disagreed, so under
+    ``--config elsewhere`` the wizard wrote a key to a file nothing ever read back:
+    setup reported Ready, and the very next launch reported the key MISSING and
+    re-ran the whole wizard.
+
+    ``override=True`` because a config file and its credential are a pair -- the key
+    beside the file being edited has to beat whatever the default .env put into
+    os.environ at import. The cost is that an exported shell variable also loses,
+    which is the right trade for a flag whose whole purpose is "edit THAT config":
+    testing config A while silently authenticating as config B is the confusion this
+    pairing exists to prevent.
+    """
+    path = env_for_config(config_path)
+    if path == env_file() or not path.is_file():
+        return None
+    from dotenv import load_dotenv
+
+    load_dotenv(path, override=True)
+    return path
+
+
+def warn_unknown_model(console: Console, model_id: str) -> None:
+    """Say what is NOT known about a hand-typed model id.
+
+    A custom id is deliberately accepted without checking it against a list -- the
+    endpoint is the authority, not us. But accepting it silently hides two
+    consequences the operator cannot see: an id the engine has no window for is
+    assumed to be the default (8x smaller than a 1M model, so it chunks far
+    earlier), and an id with no published rate makes every cost line read unpriced.
+    """
+    from rlm.utils.token_utils import DEFAULT_CONTEXT_LIMIT, get_context_limit
+
+    from .config import COST_PER_MTOK
+
+    if describe_model(model_id) is not None:
+        return
+    notes = []
+    if get_context_limit(model_id) == DEFAULT_CONTEXT_LIMIT:
+        notes.append(f"its context window is unknown, so {DEFAULT_CONTEXT_LIMIT:,} "
+                     "tokens is assumed")
+    if model_id not in COST_PER_MTOK:
+        notes.append("it has no published rate here, so cost reports as unpriced")
+    if notes:
+        console.print(f"[yellow]{model_id} is not in the catalogue: "
+                      + "; ".join(notes) + ".[/yellow]")
+
+
 def auth_step(console: Console, provider_id: str, st: Status,
               env_path: Path | None = None) -> bool:
     """The credential step, branching on how the provider authenticates.
@@ -645,7 +698,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/help",            "show this list"),
     ("/status",          "show current mode / provider / model / cli login"),
     ("/mode-help",       "compare the three transport modes side-by-side"),
-    ("/setup",           "guided setup: mode -> provider -> credential -> models"),
+    ("/setup",           "guided setup: provider -> transport -> credentials -> models"),
     ("/mode",            "open the mode picker (writes config.yaml)"),
     ("/provider",        "pick the provider for the current mode (writes config.yaml)"),
     ("/model",           "open the root-model picker (writes config.yaml)"),
@@ -653,7 +706,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/sub",             "open the sub-model picker (writes config.yaml)"),
     ("/test",            "run `uv run --extra dev pytest -q` (the verify gate)"),
     ("/test-config",     "run a focused pytest on config/auth/transport modules"),
-    ("/auth-probe",      "send one tiny sub-model call to verify the auth path"),
+    ("/auth-probe",      "check the configured endpoint can be reached"),
     ("/quit",            "exit the TUI (also /exit)"),
 ]
 
@@ -807,6 +860,7 @@ def _dispatch(
         elif choice == PICKER_CUSTOM:
             custom = Prompt.ask(f"[bold]{kind} model id[/bold]", console=console).strip()
             if custom:
+                warn_unknown_model(console, custom)
                 _save(config_path, {key: custom}, console)
             else:
                 console.print("[grey50]empty value, no change[/grey50]")
@@ -1144,6 +1198,7 @@ def main(argv: list[str] | None = None) -> int:
 
     console = Console()
     cfg_path = config_path or config_file()
+    load_sidecar_env(cfg_path)
     try:
         if one_shot is not None:
             _dispatch_guarded(one_shot, console, cfg_path)
