@@ -119,8 +119,8 @@ def raw_mode(stream=None):
         # rich always rendered with post-processing on.
         #
         # cbreak also leaves ISIG on, so Ctrl+C arrives as SIGINT rather than as a
-        # \x03 byte -- the KeyboardInterrupt the callers already catch, raised by the
-        # kernel instead of by us.
+        # \x03 byte -- the same KeyboardInterrupt, raised by the kernel instead of by
+        # us. No picker catches it; it unwinds to cli.main, which exits 130.
         tty.setcbreak(fd)
         out.write("\x1b[?2004h")
         out.flush()
@@ -160,7 +160,7 @@ def _read_key_windows() -> str:
     real msvcrt on Windows 11 before this was written:
 
       * **Ctrl+C came back as the byte '\\x03'.** On POSIX, cbreak leaves ISIG on, so
-        the kernel raises KeyboardInterrupt and every caller already catches it --
+        the kernel raises KeyboardInterrupt and it unwinds to cli.main --
         raw_mode's docstring says as much. msvcrt.getwch swallows the signal and
         returns the byte, so the operator typed a control character into the search
         field and had no way to abort. Raise it here instead, so both platforms hand
@@ -368,7 +368,12 @@ def choose(console: Console, title: str, items: list[SearchableItem],
         while True:
             try:
                 key = read_key()
-            except (KeyboardInterrupt, EOFError):
+            except EOFError:
+                # EOF only. Ctrl+C is NOT a cancel: Esc already means "this screen,
+                # never mind", and catching both here left no key that leaves the
+                # program. Every picker returned CANCEL, whose caller loops and draws
+                # the next screen, so Ctrl+C anywhere read as "go back" and the menu
+                # reappeared. It propagates to cli.main now.
                 return PickerResult(CANCEL)
             if key == "escape":
                 return PickerResult(CANCEL)
@@ -457,7 +462,9 @@ def _read_secret_loop(console: Console, label: str, keep: int) -> str:
     while True:
         try:
             key = read_key()
-        except (KeyboardInterrupt, EOFError):
+        except EOFError:
+            # EOF only -- see choose(). Ctrl+C at a credential prompt has to leave,
+            # not hand back an empty string the caller then stores as "no key given".
             console.print()
             return ""
         if key == "enter":
@@ -538,7 +545,12 @@ def choose_cards(console: Console, title: str, subtitle: str,
         while True:
             try:
                 key = read_key()
-            except (KeyboardInterrupt, EOFError):
+            except EOFError:
+                # EOF only. Ctrl+C is NOT a cancel: Esc already means "this screen,
+                # never mind", and catching both here left no key that leaves the
+                # program. Every picker returned CANCEL, whose caller loops and draws
+                # the next screen, so Ctrl+C anywhere read as "go back" and the menu
+                # reappeared. It propagates to cli.main now.
                 return PickerResult(CANCEL)
             if key == "escape":
                 return PickerResult(CANCEL)
