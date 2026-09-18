@@ -110,6 +110,7 @@ class Status:
     has_api_key: bool
     base_url: str = ""          # "" = Anthropic's own endpoint (the SDK default)
     key_env: str = ""           # the ACTIVE provider's key variable ("" = CLI login)
+    config_written: bool = True  # False = no config.yaml on disk; every value is a default
 
     def mode_is_pinned(self) -> bool:
         """True when an RLM_MODE env var overrides config.yaml.
@@ -130,6 +131,7 @@ def load_status(config_path: Path | None = None) -> Status:
     live until the server reconnects.
     """
     cfg_path = config_path or config_file()
+    config_written = cfg_path.exists()
 
     def _read(key: str, default: str) -> str:
         on_disk = config_writer.read_scalar(cfg_path, key)
@@ -185,6 +187,7 @@ def load_status(config_path: Path | None = None) -> Status:
         has_api_key=has_api_key,
         base_url=base_url,
         key_env=key_var,
+        config_written=config_written,
     )
 
 
@@ -982,12 +985,25 @@ MODE_CARDS: dict[str, tuple[str, str, str]] = {
 
 
 def needs_onboarding(st: Status) -> bool:
-    """Whether this install can make a model call at all.
+    """Whether to run setup rather than the maintenance menu.
 
-    cline runs onboarding when there is no provider configured. The equivalent
-    question here is whether a credential exists for the configured provider: a
-    config that cannot call a model is not configured, whatever config.yaml says.
+    Two reasons, and either one is enough.
+
+    **Nothing has been configured yet.** This is cline's rule verbatim --
+    ``if (!isProviderConfigured(props.config)) return "onboarding"``. Without it a
+    brand-new install skipped setup entirely whenever the `claude` CLI happened to
+    be logged in: no config.yaml means `mode` defaults to `auto`, auto accepts a
+    signed-in CLI, so the gate answered "already fine" and went straight to the
+    maintenance menu. Every value on that screen was a default the operator had
+    never chosen. Having Claude Code installed is not the same as having configured
+    this tool.
+
+    **Or the configuration cannot make a model call.** This part is not cline's and
+    is kept: a config.yaml naming a provider whose key is missing is not configured
+    either, whatever the file says.
     """
+    if not st.config_written:
+        return True
     if st.mode == MODE_CLI:
         return st.cli_logged_in is not True
     if st.key_env and st.has_api_key:
