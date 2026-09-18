@@ -151,14 +151,22 @@ def test_no_checkout_message_names_the_subcommand_that_was_typed(installed, caps
 # --- shared -------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("argv", [[], ["config"], ["--one-shot", "/status"]])
-def test_non_subcommand_argv_falls_through_to_the_tui(argv):
+@pytest.mark.parametrize("argv,forwarded", [
+    ([], []),
+    (["config"], ["--menu"]),
+    (["--one-shot", "/status"], ["--one-shot", "/status"]),
+])
+def test_non_subcommand_argv_falls_through_to_the_tui(argv, forwarded):
     """Bare, `config`, and raw TUI flags all land in the TUI -- the last one keeps
-    `python -m better_rlm.cli --one-shot /status` working for CI."""
+    `python -m better_rlm.cli --one-shot /status` working for CI.
+
+    `config` becomes --menu rather than being dropped. Bare `better-rlm` is the setup
+    surface: it gates on needs_onboarding and, once setup finishes or is cancelled,
+    exits instead of falling through to the maintenance menu. Asking for `config` by
+    name asks for that menu, configured or not, so the two cannot be the same argv."""
     with patch("better_rlm.tui.main", return_value=0) as tui_main:
         assert cli.main(argv) == 0
-    forwarded = tui_main.call_args.args[0]
-    assert forwarded == [a for a in argv if a != "config"]
+    assert tui_main.call_args.args[0] == forwarded
 
 
 @pytest.mark.parametrize("flag", ["-h", "--help", "help"])
