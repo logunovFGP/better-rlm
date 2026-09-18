@@ -49,7 +49,7 @@ jobs:
         # breakages this catches are at the boundaries. Pinned explicitly because
         # a bare `uv run` picks whatever the runner happens to ship, which is how
         # "we support 3.14" would go untested while the pin claimed otherwise.
-        python: ["3.11", "3.14"]
+        python: ["3.12", "3.14"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
