@@ -437,7 +437,28 @@ def test_readme_documents_exactly_the_shipped_slash_commands() -> None:
         assert documented in shipped, f"README documents {documented}, which does not exist"
 
 
-def test_a_brand_new_install_runs_setup_even_when_the_claude_cli_is_logged_in(tmp_path, monkeypatch):
+def _status(**over):
+    """A Status with every field pinned, so no test reads this machine.
+
+    The first version of the test below called load_status and monkeypatched a
+    name that does not exist (`_cli_available`, with raising=False, so the patch
+    silently did nothing). It passed here only because this machine has a
+    logged-in `claude` CLI, and failed on all four CI jobs, which have none:
+    cli_logged_in came back None and mode `claude-cli` then reported
+    "not configured".
+    """
+    base = dict(
+        mode=tui.MODE_AUTO, provider="anthropic", root_model="claude-sonnet-5",
+        root_model_override="claude-opus-4-8", sub_model="claude-haiku-4-5",
+        cli_path="claude", cli_available=True, cli_logged_in=True,
+        env_mode=None, env_provider=None, has_api_key=False,
+        base_url="", key_env="", config_written=True,
+    )
+    base.update(over)
+    return tui.Status(**base)
+
+
+def test_a_brand_new_install_runs_setup_even_when_the_claude_cli_is_logged_in(tmp_path):
     """The gate cline states as `if (!isProviderConfigured(config))`.
 
     needs_onboarding asked only whether a model call could succeed. With no
@@ -448,20 +469,19 @@ def test_a_brand_new_install_runs_setup_even_when_the_claude_cli_is_logged_in(tm
 
     Having Claude Code installed is not the same as having configured this tool.
     """
-    cfg = tmp_path / "config.yaml"
-    monkeypatch.setattr(tui, "_cli_available", lambda _p: True, raising=False)
-
-    st = tui.load_status(cfg)
+    # Absent file: real load_status, and the machine cannot influence it because
+    # config_written short-circuits before any CLI state is consulted.
+    st = tui.load_status(tmp_path / "config.yaml")
     assert not st.config_written, "no file on disk, so nothing has been configured"
     assert tui.needs_onboarding(st), (
         "a machine with a logged-in `claude` CLI skipped setup entirely"
     )
 
-    # Written and reachable: the menu is right, and this is the case that must not
+    # Written and reachable: the menu is right. This is the case that must not
     # regress into always onboarding.
-    cfg.write_text("mode: claude-cli\nprovider: anthropic\n", encoding="utf-8")
-    assert not tui.needs_onboarding(tui.load_status(cfg))
+    assert not tui.needs_onboarding(
+        _status(mode=tui.MODE_CLI, cli_available=True, cli_logged_in=True))
 
     # Written but unreachable stays onboarding -- the half this repo adds to cline's.
-    cfg.write_text("mode: api\nprovider: anthropic\n", encoding="utf-8")
-    assert tui.needs_onboarding(tui.load_status(cfg))
+    assert tui.needs_onboarding(
+        _status(mode=tui.MODE_API, key_env="ANTHROPIC_API_KEY", has_api_key=False))
