@@ -455,6 +455,21 @@ def test_every_name_the_windows_map_returns_is_a_registered_key_name():
 
 
 
+def _throwaway_console():
+    """A Console that renders into memory.
+
+    StringIO, not open(os.devnull, "w"): that opens with the platform's default
+    encoding, which is cp1252 on the Windows runners, and the pickers draw "\u25b8"
+    and "\u2192". Both Windows jobs died with UnicodeEncodeError while the same
+    tests passed on Linux and macOS. It also leaked the file handle.
+    """
+    import io
+
+    from rich.console import Console
+
+    return Console(file=io.StringIO(), width=100)
+
+
 # --- Ctrl+C leaves; Esc goes back ---------------------------------------------
 #
 # These two keys were the same key. Every picker caught KeyboardInterrupt beside
@@ -482,7 +497,7 @@ def test_no_picker_swallows_ctrl_c(monkeypatch, call):
 
     items = [SearchableItem(key="a", label="A"), SearchableItem(key="b", label="B")]
     with pytest.raises(KeyboardInterrupt):
-        call(Console(file=open(os.devnull, "w")), items)
+        call(_throwaway_console(), items)
 
 
 @pytest.mark.parametrize("fn", ["choose", "choose_cards"])
@@ -499,7 +514,7 @@ def test_eof_is_still_a_cancel(monkeypatch, fn):
 
     items = [SearchableItem(key="a", label="A")]
     args = ("t", "s", items) if fn == "choose_cards" else ("t", items)
-    res = getattr(picker, fn)(Console(file=open(os.devnull, "w")), *args)
+    res = getattr(picker, fn)(_throwaway_console(), *args)
     assert res.key == picker.CANCEL
 
 
