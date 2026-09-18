@@ -22,7 +22,7 @@ import os
 import re
 import sys
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dc_field
 
 from rich.align import Align
 from rich.console import Console, Group
@@ -563,3 +563,138 @@ def choose_cards(console: Console, title: str, subtitle: str,
             else:
                 continue
             live.update(frame(), refresh=True)
+
+
+# --------------------------------------------------------------------------- #
+# Credential form
+# --------------------------------------------------------------------------- #
+#
+# cline's byo_apikey screen (views/onboarding/screens.tsx:283-366) is a FORM, not a
+# prompt: every field a provider declares renders as a labelled bordered box, Tab
+# cycles the ones actually present, and Enter on any of them submits the whole
+# thing. Ours had a bare masked prompt instead, which is why the endpoint was never
+# visible or editable at the moment the credential for it was being typed.
+#
+# Two deliberate differences from cline:
+#   * secret fields echo masked. cline renders keys in the clear; mask_secret
+#     already argues this repo's position.
+#   * Tab cycles forward only. Shift+Tab reads as "" on both platforms (POSIX
+#     ESC [ Z falls out of the arrow map, Windows 0x00 0x0F likewise), and naming
+#     a key without adding it to KEY_NAMES makes key_text return the name itself,
+#     typing "backtab" into whatever field has focus -- a credential included,
+#     where the masked echo hides it. With one or two fields, wrapping forward
+#     reaches everything.
+
+
+@dataclass(frozen=True)
+class Field:
+    """One row of a credential form."""
+
+    key: str                  # name the caller reads the value back under
+    label: str
+    value: str = ""           # prefill: a known endpoint, or a key already on file
+    secret: bool = False
+    hint: str = ""            # one grey line under the box
+
+
+@dataclass(frozen=True)
+class FormResult:
+    """Submitted values by field key. repr is suppressed: a form carries secrets,
+    and a dataclass in a traceback prints every field it holds."""
+
+    values: dict[str, str] = dc_field(default_factory=dict, repr=False)
+    cancelled: bool = False
+
+
+def _form_render(title: str, subtitle: str, fields: list[Field],
+                 values: list[str], focused: int, error: str):
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
+    grid = Table.grid(padding=(0, 0))
+    grid.add_column()
+    if subtitle:
+        grid.add_row(Text(subtitle, style="grey50"))
+        grid.add_row("")
+    for i, f in enumerate(fields):
+        on = i == focused
+        shown = mask_secret(values[i]) if f.secret else values[i]
+        body = Text(shown or "", style="white")
+        if on:
+            body.append("█", style="grey50")          # a block as the caret
+        elif not shown:
+            body = Text("(empty)", style="grey37")
+        grid.add_row(Panel(body, title=f.label, title_align="left",
+                           border_style="cyan" if on else "grey37",
+                           padding=(0, 1)))
+        if f.hint:
+            grid.add_row(Text(f"  {f.hint}", style="grey37"))
+    if error:
+        grid.add_row(Text(f"  {error}", style="red"))
+    foot = "Tab next field - Enter submit - Esc back"
+    grid.add_row(Text(f"\n{foot}", style="grey37"))
+    return Panel(grid, title=title, title_align="left", border_style="grey37")
+
+
+def ask(console: Console, title: str, fields: list[Field],
+        subtitle: str = "", error: str = "") -> FormResult:
+    """Collect several values on one screen. Returns cancelled=True on Esc or EOF.
+
+    Headless is a path, not a fallback: on a pipe the same fields are asked in the
+    same order and the same FormResult comes back, so callers never branch.
+    """
+    if not fields:
+        return FormResult({})
+    if not interactive():
+        return _ask_headless(console, title, fields, subtitle)
+
+    from rich.live import Live
+
+    values = [f.value for f in fields]
+    focused = 0
+    console.print()
+    with raw_mode(console.file), Live(
+        _form_render(title, subtitle, fields, values, focused, error),
+        console=console, auto_refresh=False, transient=True,
+    ) as live:
+        while True:
+            try:
+                key = read_key()
+            except EOFError:
+                return FormResult({}, cancelled=True)
+            if key == "escape":
+                return FormResult({}, cancelled=True)
+            if key == "enter":
+                return FormResult({f.key: values[i].strip()
+                                   for i, f in enumerate(fields)})
+            if key == "tab":
+                focused = (focused + 1) % len(fields)
+            elif key == "backspace":
+                values[focused] = values[focused][:-1]
+            elif (text := key_text(key)):
+                values[focused] += text
+            live.update(_form_render(title, subtitle, fields, values, focused, error),
+                        refresh=True)
+
+
+def _ask_headless(console: Console, title: str, fields: list[Field],
+                  subtitle: str) -> FormResult:
+    from rich.prompt import Prompt
+
+    console.print(f"[bold]{title}[/bold]")
+    if subtitle:
+        console.print(f"[grey50]{subtitle}[/grey50]")
+    out: dict[str, str] = {}
+    for f in fields:
+        if f.hint:
+            console.print(f"[grey37]{f.hint}[/grey37]")
+        try:
+            if f.secret:
+                out[f.key] = read_secret(console, f.label).strip()
+            else:
+                out[f.key] = Prompt.ask(f.label, default=f.value,
+                                        console=console).strip()
+        except (EOFError, KeyboardInterrupt):
+            raise
+    return FormResult(out)

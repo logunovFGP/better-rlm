@@ -17,6 +17,8 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
+from . import describe  # data-only: no package imports, no cycle
+
 PKG_ROOT = Path(__file__).resolve().parent.parent
 
 # In a checkout, PKG_ROOT is the repo root and the launchers / pyproject sit in it.
@@ -71,13 +73,18 @@ MODEL_SONNET = "claude-sonnet-4-6"  # 1M ctx — prior root (still selectable)
 MODEL_OPUS = "claude-opus-4-8"      # 1M ctx — root override for the hardest tasks
 MODEL_HAIKU = "claude-haiku-4-5"    # 200K ctx — cheap sub-LLM for chunk work
 
+# Derived from the picker's own catalogue rather than hand-maintained beside it.
+# Two tables meant a model could be offered with no rate, and cost_usd returns 0.0
+# for an unknown id -- so every MiniMax call priced at zero in the cost line, in a
+# fork whose stated reason to exist is the budget ledger. Same rows, one source.
+# Rows with no published rate (describe.ModelDescription.price_in is None) are
+# absent here on purpose; the display says "unpriced" instead of claiming $0.0000.
+# Cost is informational only on the OAuth/CLI path (it draws on the subscription).
 COST_PER_MTOK: dict[str, tuple[float, float]] = {
-    # Cost is informational only on the OAuth/CLI path (it draws on the subscription).
-    # Sonnet 5 rates cloned from Sonnet 4.6 pending published pricing.
-    MODEL_SONNET_5: (3.0, 15.0),
-    MODEL_SONNET: (3.0, 15.0),
-    MODEL_OPUS: (5.0, 25.0),
-    MODEL_HAIKU: (1.0, 5.0),
+    m.id: (m.price_in, m.price_out)
+    for _rows in describe.MODELS.values()
+    for m in _rows
+    if m.price_in is not None and m.price_out is not None
 }
 
 HAIKU_CONTEXT_TOKENS = 200_000

@@ -48,6 +48,8 @@ def assert_owner_only(path: Path) -> None:
 
 from better_rlm import config as cfgmod
 from better_rlm.config import load_config
+MINIMAX_URL = "https://api.minimax.io/anthropic"
+
 from better_rlm.describe import (
     AUTH_API_KEY,
     AUTH_CLI,
@@ -59,6 +61,8 @@ from better_rlm.describe import (
     PROVIDER_CUSTOM,
     PROVIDER_MINIMAX,
     PROVIDERS,
+    VENDOR_CLAUDE,
+    VENDOR_MINIMAX,
     all_providers,
     describe_provider,
     provider_for_config,
@@ -297,51 +301,96 @@ def test_no_test_writes_the_repo_config_or_env(request):
 # --- the guided flow ----------------------------------------------------------
 
 
-def test_setup_runs_clines_step_order(tmp_path, monkeypatch):
-    """mode -> provider -> credential -> models, the order cline-2's onboarding
-    machine uses (views/onboarding/model.ts). Each step narrows the next: the mode
-    decides which providers are reachable, the provider decides which credential is
-    even asked for, so running them out of order asks questions that cannot be
-    answered yet."""
+def test_the_wizard_runs_clines_step_order(tmp_path, monkeypatch):
+    """vendor -> transport -> credentials -> connectivity -> models.
+
+    cline's order, reduced to two vendors (views/onboarding/model.ts). Each step
+    narrows the next: the vendor decides which transports exist, the transport
+    decides whether a credential is even asked for, the resulting endpoint decides
+    which models are offered. Running them out of order asks questions that cannot
+    be answered yet.
+
+    Replaces test_setup_runs_clines_step_order, which pinned ["mode","provider",
+    "auth"] -- the order of the old run_setup, which asked for a transport before
+    knowing whose account it was reaching, and never asked about models at all.
+    """
     import io
     from rich.console import Console
-    from better_rlm import tui
+    from better_rlm import onboard, picker, probe, tui
 
     calls: list[str] = []
     p = tmp_path / "config.yaml"
-    p.write_text("mode: auto\nprovider: anthropic\n")
+    p.write_text("mode: auto" + chr(10) + "provider: anthropic" + chr(10))
 
-    monkeypatch.setattr(tui, "pick_mode", lambda *a, **k: (calls.append("mode"), "api")[1])
-    monkeypatch.setattr(tui, "pick_provider",
-                        lambda *a, **k: (calls.append("provider"), PROVIDER_MINIMAX)[1])
-    monkeypatch.setattr(tui, "auth_step", lambda *a, **k: (calls.append("auth"), True)[1])
-    monkeypatch.setattr(tui, "pick_model", lambda *a, **k: (calls.append("model"), tui.PICKER_KEEP)[1])
+    answers = iter([VENDOR_CLAUDE, MODE_API])
 
-    tui.run_setup(Console(file=io.StringIO(), quiet=True), p)
-    assert calls[:3] == ["mode", "provider", "auth"], calls
-    assert "model" in calls
+    def fake_cards(console, title, subtitle, rows, current=""):
+        calls.append("vendor" if not calls else "mode")
+        return next(answers)
+
+    def fake_ask(console, title, fields, subtitle="", error=""):
+        calls.append("credentials")
+        return picker.FormResult({"api_key": "sk-test-key-value"})
+
+    def fake_probe(cfg, model, **kw):
+        calls.append("probe")
+        return probe.ProbeResult(probe.PROBE_OK, "ok", "test")
+
+    monkeypatch.setattr(tui, "select_cards", fake_cards)
+    monkeypatch.setattr(picker, "ask", fake_ask)
+    monkeypatch.setattr(probe, "probe_endpoint", fake_probe)
+    monkeypatch.setattr(tui, "_select",
+                        lambda *a, **k: (calls.append("model"), tui.PICKER_KEEP)[1])
+
+    assert onboard.run(Console(file=io.StringIO(), quiet=True), p) is True
+    assert calls == ["vendor", "mode", "credentials", "probe",
+                     "model", "model", "model"], calls
 
     from better_rlm.config_writer import read_scalar
-    assert read_scalar(p, "mode") == "api"
-    assert read_scalar(p, "base_url") == "https://api.minimax.io/anthropic"
+    assert read_scalar(p, "mode") == MODE_API
+    assert read_scalar(p, "root_model") == "claude-sonnet-5"
+    assert read_scalar(p, "sub_model") == "claude-haiku-4-5"
 
 
-def test_setup_passes_the_chosen_mode_to_the_provider_picker(tmp_path, monkeypatch):
-    """cline passes modeFilter so the user is not offered a provider the mode they
-    just picked cannot reach. Without this the wizard would offer claude-cli after
-    the operator chose api, and the selection would quietly do nothing."""
+def test_the_wizard_offers_the_endpoints_own_models(tmp_path, monkeypatch):
+    """The reported bug: a MiniMax setup was offered claude-sonnet-5.
+
+    The old pick_model had one hardcoded list of four Anthropic ids whatever the
+    endpoint was, so choosing MiniMax and accepting the defaults wrote
+    root_model: claude-sonnet-5 against api.minimax.io -- which is what
+    config.yaml on the reporting machine actually contained.
+    """
     import io
     from rich.console import Console
-    from better_rlm import tui
+    from better_rlm import onboard, picker, probe, tui
 
-    seen = {}
+    offered: list[list[str]] = []
     p = tmp_path / "config.yaml"
-    p.write_text("mode: auto\n")
-    monkeypatch.setattr(tui, "pick_mode", lambda *a, **k: MODE_CLI)
-    monkeypatch.setattr(tui, "pick_provider",
-                        lambda console, mode, current: seen.setdefault("mode", mode) and None or tui.ACTION_CANCEL)
-    tui.run_setup(Console(file=io.StringIO(), quiet=True), p)
-    assert seen["mode"] == MODE_CLI
+    p.write_text("mode: auto" + chr(10))
+
+    def capture(console, title, rows, current, **kw):
+        offered.append([r[0] for r in rows])
+        return tui.PICKER_KEEP
+
+    monkeypatch.setattr(tui, "select_cards", lambda *a, **k: VENDOR_MINIMAX)
+    monkeypatch.setattr(picker, "ask",
+                        lambda *a, **k: picker.FormResult({"api_key": "sk-x",
+                                                           "base_url": MINIMAX_URL}))
+    monkeypatch.setattr(probe, "probe_endpoint",
+                        lambda *a, **k: probe.ProbeResult(probe.PROBE_OK, "ok", "mm"))
+    monkeypatch.setattr(tui, "_select", capture)
+
+    onboard.run(Console(file=io.StringIO(), quiet=True), p)
+
+    assert offered, "no model screen ran"
+    for rows in offered:
+        assert rows, "the model screen offered nothing at all"
+        assert all(r.startswith("MiniMax-") for r in rows), rows
+        assert not any(r.startswith("claude-") for r in rows), rows
+
+    from better_rlm.config_writer import read_scalar
+    assert read_scalar(p, "root_model") == "MiniMax-M3"
+    assert read_scalar(p, "base_url") == MINIMAX_URL
 
 
 def test_cli_provider_asks_for_no_key(tmp_path, monkeypatch):
@@ -655,6 +704,8 @@ def test_the_welcome_is_shown_once_and_falls_through_to_the_menu(tmp_path):
     from rich.console import Console
     from better_rlm import tui
 
+    from better_rlm import onboard as tui_onboard
+
     cfg = tmp_path / "config.yaml"
     cfg.write_text("mode: api\nprovider: anthropic\n")
     calls = {"onboarding": 0}
@@ -665,10 +716,155 @@ def test_the_welcome_is_shown_once_and_falls_through_to_the_menu(tmp_path):
 
     buf = io.StringIO()
     with patch.object(tui.picker, "interactive", return_value=True), \
-            patch.object(tui, "run_onboarding", side_effect=fake_onboarding), \
+            patch.object(tui_onboard, "run", side_effect=fake_onboarding), \
             patch.object(tui.Prompt, "ask", return_value="q"), \
             patch.object(tui.picker, "choose",
                          return_value=tui.picker.PickerResult(tui.picker.CANCEL)):
         tui.run_menu(cfg, Console(file=buf, width=200))
 
     assert calls["onboarding"] == 1, "the welcome asked again instead of falling through"
+
+
+# --- what the wizard writes, and when ------------------------------------------
+
+
+def _drive(monkeypatch, vendor, *, probe_ok=True, mode=None, key="sk-fake-wizard-key"):
+    """Answer every screen so the wizard runs start to finish without a terminal."""
+    from better_rlm import picker, probe, tui
+
+    answers = iter([vendor] + ([mode] if mode else []))
+    monkeypatch.setattr(tui, "select_cards", lambda *a, **k: next(answers))
+    monkeypatch.setattr(picker, "ask",
+                        lambda *a, **k: picker.FormResult({"api_key": key,
+                                                           "base_url": MINIMAX_URL}))
+    monkeypatch.setattr(
+        probe, "probe_endpoint",
+        lambda *a, **k: probe.ProbeResult(
+            probe.PROBE_OK if probe_ok else probe.PROBE_KEY_REJECTED,
+            "detail", "where", "" if probe_ok else "re-paste it"))
+    monkeypatch.setattr(tui, "_select", lambda *a, **k: tui.PICKER_KEEP)
+
+
+def test_the_wizard_writes_the_config_once_and_only_at_the_end(tmp_path, monkeypatch):
+    """Gather, probe, then write -- so a cancel needs no rollback to get wrong.
+
+    The old flow wrote mode and base_url before asking for the credential, with no
+    rollback on the first-run path (/provider had one; onboarding did not). A cancel
+    left a half-configured file behind.
+    """
+    from better_rlm import config_writer, onboard
+
+    p = tmp_path / "config.yaml"
+    p.write_text("mode: auto" + chr(10))
+    _drive(monkeypatch, VENDOR_MINIMAX)
+
+    writes: list[dict] = []
+    real = config_writer.write_scalars
+    monkeypatch.setattr(config_writer, "write_scalars",
+                        lambda path, updates: (writes.append(dict(updates)),
+                                               real(path, updates))[1])
+
+    import io
+    from rich.console import Console
+    assert onboard.run(Console(file=io.StringIO(), quiet=True), p) is True
+    assert len(writes) == 1, f"config.yaml was written {len(writes)} times: {writes}"
+    assert set(writes[0]) == {"mode", "base_url", "root_model",
+                              "root_model_override", "sub_model"}
+
+
+def test_the_wizard_never_writes_the_provider_key(tmp_path, monkeypatch):
+    """provider names the WIRE PROTOCOL and must stay anthropic.
+
+    MiniMax is reached as a base_url; writing provider: minimax would make
+    auth.require_anthropic raise at the first model call, which is the failure the
+    endpoint/provider split exists to prevent. Pinned by nothing until now.
+    """
+    import io
+    from rich.console import Console
+    from better_rlm import config_writer, onboard
+
+    p = tmp_path / "config.yaml"
+    p.write_text("mode: auto" + chr(10) + "provider: anthropic" + chr(10))
+    _drive(monkeypatch, VENDOR_MINIMAX)
+
+    writes: list[dict] = []
+    real = config_writer.write_scalars
+    monkeypatch.setattr(config_writer, "write_scalars",
+                        lambda path, updates: (writes.append(dict(updates)),
+                                               real(path, updates))[1])
+    onboard.run(Console(file=io.StringIO(), quiet=True), p)
+
+    assert all("provider" not in u for u in writes), writes
+    from better_rlm.config_writer import read_scalar
+    assert read_scalar(p, "provider") == "anthropic"
+
+
+@pytest.mark.parametrize("cancel_at", ["vendor", "credentials", "models"])
+def test_a_cancelled_wizard_writes_no_config(tmp_path, monkeypatch, cancel_at):
+    """Cancel at any screen and config.yaml is byte-identical."""
+    import io
+    from rich.console import Console
+    from better_rlm import onboard, picker, probe, tui
+
+    p = tmp_path / "config.yaml"
+    original = "mode: auto" + chr(10) + "root_model: claude-sonnet-5" + chr(10)
+    p.write_text(original)
+    before = p.read_bytes()
+
+    monkeypatch.setattr(tui, "select_cards",
+                        lambda *a, **k: tui.ACTION_CANCEL if cancel_at == "vendor"
+                        else VENDOR_MINIMAX)
+    monkeypatch.setattr(picker, "ask",
+                        lambda *a, **k: picker.FormResult({}, cancelled=True)
+                        if cancel_at == "credentials"
+                        else picker.FormResult({"api_key": "sk-x",
+                                                "base_url": MINIMAX_URL}))
+    monkeypatch.setattr(probe, "probe_endpoint",
+                        lambda *a, **k: probe.ProbeResult(probe.PROBE_OK, "d", "w"))
+    monkeypatch.setattr(tui, "_select", lambda *a, **k: tui.ACTION_CANCEL)
+
+    assert onboard.run(Console(file=io.StringIO(), quiet=True), p) is False
+    assert p.read_bytes() == before, "a cancelled wizard changed config.yaml"
+
+
+def test_a_failed_probe_keeps_the_key_it_already_wrote(tmp_path, monkeypatch):
+    """Nobody should re-paste a 100-character key because their Wi-Fi dropped.
+
+    The variable is per provider and overwrites cleanly next run, so keeping it costs
+    nothing and losing it costs a paste.
+    """
+    import io
+    from rich.console import Console
+    from better_rlm import envfile, onboard, tui
+
+    p = tmp_path / "config.yaml"
+    p.write_text("mode: auto" + chr(10))
+    _drive(monkeypatch, VENDOR_MINIMAX, probe_ok=False)
+    # The probe screen asks what to do; take the "write it anyway" row.
+    monkeypatch.setattr(tui, "_select",
+                        lambda console, title, rows, current, **k:
+                        "anyway" if title == "What now?" else tui.PICKER_KEEP)
+
+    onboard.run(Console(file=io.StringIO(), quiet=True), p)
+    assert envfile.has_var(tmp_path / ".env", "MINIMAX_API_KEY")
+    assert_owner_only(tmp_path / ".env")
+
+
+def test_a_key_written_by_the_wizard_is_visible_to_this_process(tmp_path, monkeypatch):
+    """config.py runs load_dotenv at IMPORT, so a later .env write is invisible here.
+
+    Without the os.environ export the connectivity probe on the very next screen
+    reports a perfectly good key as rejected, and /status prints MISSING.
+    """
+    import io
+    import os
+    from rich.console import Console
+    from better_rlm import onboard
+
+    p = tmp_path / "config.yaml"
+    p.write_text("mode: auto" + chr(10))
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    _drive(monkeypatch, VENDOR_MINIMAX, key="sk-fake-visible-to-this-process")
+
+    onboard.run(Console(file=io.StringIO(), quiet=True), p)
+    assert os.environ.get("MINIMAX_API_KEY") == "sk-fake-visible-to-this-process"

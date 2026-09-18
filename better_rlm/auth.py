@@ -154,7 +154,8 @@ def resolve_auth_mode(cfg: Config) -> str:
     )
 
 
-def make_client(async_: bool = False, base_url: str = "", cfg: Config | None = None):
+def make_client(async_: bool = False, base_url: str = "", cfg: Config | None = None,
+                timeout: float = _CLIENT_TIMEOUT):
     """Build an Anthropic SDK client for the **api** transport, from ANTHROPIC_API_KEY
     (used by transport.ApiTransport). The claude-cli transport does NOT use this — the
     CLI authenticates itself. SDK retries are disabled (ratelimit.py owns retry).
@@ -164,6 +165,10 @@ def make_client(async_: bool = False, base_url: str = "", cfg: Config | None = N
     Passed explicitly rather than left to the SDK's own ANTHROPIC_BASE_URL lookup so
     that config.yaml is the single visible owner of the setting; an env var read
     behind our back would make ``better-rlm where`` unable to say where calls go.
+
+    ``timeout`` defaults to the completion budget. The connectivity probe passes a
+    much shorter one: an unreachable host should fail the setup wizard in seconds,
+    not hold it for ten minutes.
     """
     var = key_env_for(cfg) if cfg is not None else "ANTHROPIC_API_KEY"
     key = _clean_secret(os.getenv(var))
@@ -173,7 +178,7 @@ def make_client(async_: bool = False, base_url: str = "", cfg: Config | None = N
             "(or the default 'auto') to reuse your Claude Code login instead."
         )
     cls = anthropic.AsyncAnthropic if async_ else anthropic.Anthropic
-    kwargs = {"api_key": key, "timeout": _CLIENT_TIMEOUT, "max_retries": _SDK_MAX_RETRIES}
+    kwargs = {"api_key": key, "timeout": timeout, "max_retries": _SDK_MAX_RETRIES}
     if (base_url or "").strip():
         kwargs["base_url"] = base_url.strip()
     return cls(**kwargs)

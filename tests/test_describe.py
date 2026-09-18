@@ -116,3 +116,123 @@ def test_mode_prose_never_promises_another_provider() -> None:
     ).lower()
     for vendor in ("gemini", "openai", "azure", "portkey"):
         assert vendor not in blob, f"mode prose still advertises {vendor}"
+
+
+# --- the model catalogue -------------------------------------------------------
+
+
+def test_the_minimax_base_url_does_not_end_in_v1():
+    """cline stores MiniMax as .../anthropic/v1. Copying that verbatim 404s everything.
+
+    The Anthropic SDK appends /v1/messages to base_url itself. Measured against the
+    installed SDK:
+
+        https://api.minimax.io/anthropic     -> .../anthropic/v1/messages      OK
+        https://api.minimax.io/anthropic/v1  -> .../anthropic/v1/v1/messages   404
+
+    So the string that is right in cline's TS catalogue is wrong here, and the
+    difference is invisible until the first model call. Pinned because "port the
+    catalogue" is exactly the change that would paste the /v1 in.
+    """
+    from better_rlm.describe import PROVIDER_MINIMAX, describe_provider
+
+    url = describe_provider(PROVIDER_MINIMAX).base_url
+    assert url, "MiniMax must carry an explicit endpoint"
+    assert not url.rstrip("/").endswith("/v1"), (
+        f"{url} would make the SDK request /v1/v1/messages"
+    )
+
+
+def test_every_vendor_has_a_model_table_and_role_defaults():
+    """A vendor offered on the first screen with no models behind it is a dead end."""
+    from better_rlm.describe import MODELS, ROLE_DEFAULTS, VENDORS
+
+    for vid in VENDORS:
+        rows = MODELS.get(vid, ())
+        assert rows, f"{vid} is offered but has no models"
+        ids = {m.id for m in rows}
+        assert vid in ROLE_DEFAULTS, f"{vid} has no role defaults"
+        for role, pick in zip(("root", "override", "sub"), ROLE_DEFAULTS[vid]):
+            assert pick in ids, f"{vid} defaults its {role} to {pick}, which it does not serve"
+
+
+def test_model_ids_are_unique_across_vendors():
+    """config.COST_PER_MTOK is derived from these rows and keyed by id alone, so a
+    collision would silently price one vendor's model at the other's rate."""
+    from better_rlm.describe import MODELS
+
+    seen: dict[str, str] = {}
+    for vid, rows in MODELS.items():
+        for m in rows:
+            assert m.id not in seen, f"{m.id} is in both {seen[m.id]} and {vid}"
+            seen[m.id] = vid
+
+
+def test_models_for_a_custom_endpoint_is_empty():
+    """A custom endpoint gets free-text entry, never another vendor's list.
+
+    vendor_of returns "" for it, and offering it the Claude catalogue would be the
+    same defect that had MiniMax installs running claude-sonnet-5.
+    """
+    from better_rlm.describe import PROVIDER_CUSTOM, models_for, role_defaults
+
+    assert models_for(PROVIDER_CUSTOM) == ()
+    assert models_for("nonsense") == ()
+    # Defaults still resolve, so the picker opens on something rather than crashing.
+    assert len(role_defaults(PROVIDER_CUSTOM)) == 3
+
+
+def test_the_cli_and_api_paths_to_claude_share_one_model_list():
+    """claude-cli and anthropic are one vendor reached two ways. Two lists drift."""
+    from better_rlm.describe import PROVIDER_ANTHROPIC, PROVIDER_CLAUDE_CLI, models_for
+
+    assert models_for(PROVIDER_CLAUDE_CLI) == models_for(PROVIDER_ANTHROPIC)
+
+
+def test_every_priced_model_reaches_the_cost_table():
+    """The picker and the price table are the same rows, by construction.
+
+    They used to be two hand-maintained lists, which is how every MiniMax model came
+    to price at $0.00: cost_usd returns 0.0 for an id it does not know.
+    """
+    from better_rlm.config import COST_PER_MTOK
+    from better_rlm.describe import MODELS
+
+    for vid, rows in MODELS.items():
+        for m in rows:
+            if m.price_in is None:
+                assert m.id not in COST_PER_MTOK, f"{m.id} has no rate but is priced"
+                continue
+            assert m.id in COST_PER_MTOK, f"{vid}/{m.id} is offered with no price"
+            assert COST_PER_MTOK[m.id] == (m.price_in, m.price_out)
+
+
+def test_an_unpriced_model_is_reported_as_unpriced_not_free():
+    """claude-fable-5 has no published rate. $0.0000 would read as a free call."""
+    from better_rlm.config import COST_PER_MTOK, cost_usd
+    from better_rlm.describe import describe_model
+
+    fable = describe_model("claude-fable-5")
+    assert fable is not None and fable.price_in is None
+    assert "claude-fable-5" not in COST_PER_MTOK
+    assert cost_usd("claude-fable-5", 1_000_000, 1_000_000) == 0.0
+    assert "no published rate" in fable.detail()
+
+
+def test_the_engine_knows_every_offered_model_context_window():
+    """_sub_ctx asks the engine for the sub-model window and falls back to 128k.
+
+    An id the engine has never heard of is read 8x smaller than it is, so the server
+    chunks far earlier than it needs to -- conservative, but wrong, and silent.
+    """
+    from rlm.utils.token_utils import DEFAULT_CONTEXT_LIMIT, get_context_limit
+
+    from better_rlm.describe import MODELS
+
+    for vid, rows in MODELS.items():
+        for m in rows:
+            got = get_context_limit(m.id)
+            assert got != DEFAULT_CONTEXT_LIMIT or m.context == DEFAULT_CONTEXT_LIMIT, (
+                f"{vid}/{m.id} has a {m.context} window but the engine falls back to "
+                f"{DEFAULT_CONTEXT_LIMIT}"
+            )

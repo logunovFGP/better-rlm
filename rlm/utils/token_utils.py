@@ -37,7 +37,14 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
     # correctly, so _should_compact fired at 8x less context than the model has.
     # Where a limit is not documented in this repo, the CONSERVATIVE 200k is used:
     # under-reading only compacts earlier, over-reading overruns the window.
+    # better_rlm/describe.py::MODELS now documents real windows, and five ids here
+    # (opus-4-7/-4-6, sonnet-4-6, sonnet-4-5 and its dated build) still read 200k
+    # against a documented 1M. Left as-is deliberately: raising them makes the engine
+    # compact LATER, which is a behaviour change to argue on its own evidence, not a
+    # side effect of adding a model picker.
     "claude-sonnet-5": 1_000_000,
+    "claude-opus-5": 1_000_000,
+    "claude-fable-5": 1_000_000,
     "claude-opus-4-8": 1_000_000,
     "claude-opus-4": 200_000,
     "claude-sonnet-4-6": 200_000,
@@ -75,6 +82,13 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
     "glm-4-9b": 1_000_000,
     "glm-4": 128_000,
     "glm": 128_000,
+    # MiniMax, added by better-rlm alongside its model catalogue. Reached over the
+    # Anthropic messages protocol at api.minimax.io/anthropic, so these ids arrive
+    # here like any other. Two entries cover all seven: longest-key-wins substring
+    # matching means "MiniMax-M2" also answers for M2.1/M2.5/M2.7 and the
+    # -highspeed variants, which all share the 204_800 window.
+    "MiniMax-M3": 1_048_576,
+    "MiniMax-M2": 204_800,
 }
 
 
