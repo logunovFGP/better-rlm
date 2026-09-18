@@ -45,11 +45,21 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        # Floor and ceiling of requires-python, not every version between: the
+        # breakages this catches are at the boundaries. Pinned explicitly because
+        # a bare `uv run` picks whatever the runner happens to ship, which is how
+        # "we support 3.14" would go untested while the pin claimed otherwise.
+        python: ["3.11", "3.14"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
+      # UV_PYTHON rather than a --python flag: test_release.py pins this step to
+      # run trunk-based.json's verify command verbatim, so the interpreter has to
+      # be selected without altering the command.
       - run: uv run --extra dev pytest -q
+        env:
+          UV_PYTHON: ${{ matrix.python }}
 
   release:
     needs: verify

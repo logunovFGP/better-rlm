@@ -20,7 +20,10 @@
     names (.venv_windows here, .venv_sh for install.sh) let both OSes coexist in one folder.
 
 .PARAMETER PythonVersion
-    Python version for the venv. The rlms engine requires >=3.11,<3.14. Default: 3.13.
+    Python version for the venv. 3.11-3.14 are all supported and tested in CI;
+    the default stays 3.13. The <3.14 cap was lifted once the suite was run on
+    3.14.7 -- it dated from when the engine was a dependency shipping wheels,
+    and the engine has been vendored source since.
 
 .PARAMETER Sandbox
     Sandbox backend the server expects: 'docker' (default) or 'local'. 'local' skips the image build.
@@ -61,7 +64,7 @@
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
     Justification = 'Interactive installer progress is intentionally written to the host.')]
 param(
-    [ValidatePattern('^3\.(11|12|13)$')]
+    [ValidatePattern('^3\.(11|12|13|14)$')]
     [string] $PythonVersion = '3.13',
 
     [ValidateSet('docker', 'local')]

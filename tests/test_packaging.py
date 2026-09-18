@@ -19,6 +19,33 @@ ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
 
+def test_the_windows_installer_accepts_every_python_the_package_allows():
+    """pyproject and install.ps1 must agree on the supported range.
+
+    They drifted: requires-python said <3.14 and the installer's ValidatePattern said
+    (11|12|13), so both refused 3.14 -- a cap inherited from when the engine was a
+    dependency shipping wheels, long after the engine became vendored source. The
+    suite passes on 3.14.7, so the cap was fiction. The failure this guards is the
+    asymmetric one: widening requires-python while the installer still rejects the
+    version, so `pip install` works and `install.ps1 -PythonVersion 3.14` does not.
+    """
+    import re
+
+    spec = PYPROJECT["project"]["requires-python"]
+    lo, hi = re.search(r">=3\.(\d+)", spec), re.search(r"<3\.(\d+)", spec)
+    assert lo and hi, f"expected a bounded >=3.x,<3.y range, got {spec!r}"
+    allowed = {f"3.{n}" for n in range(int(lo.group(1)), int(hi.group(1)))}
+
+    ps1 = (ROOT / "install.ps1").read_text(encoding="utf-8")
+    pattern = re.search(r"ValidatePattern\('\^3\\\.\(([0-9|]+)\)\$'\)", ps1)
+    assert pattern, "install.ps1 no longer validates -PythonVersion the expected way"
+    accepted = {f"3.{n}" for n in pattern.group(1).split("|")}
+
+    assert accepted == allowed, (
+        f"pyproject allows {sorted(allowed)} but install.ps1 accepts {sorted(accepted)}"
+    )
+
+
 def test_distribution_is_named_for_the_command_it_installs():
     assert PYPROJECT["project"]["name"] == "better-rlm"
     assert list(PYPROJECT["project"]["scripts"]) == ["better-rlm"]

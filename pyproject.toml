@@ -9,7 +9,7 @@ description = "MCP server exposing Recursive Language Models (RLM) for oversized
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11,<3.15"
 authors = [{ name = "Aleksandr Logunov", email = "logunov.alexander.cs@gmail.com" }]
 maintainers = [{ name = "Aleksandr Logunov", email = "logunov.alexander.cs@gmail.com" }]
 keywords = ["mcp", "rlm", "llm", "anthropic", "claude", "long-context", "recursive-language-model"]
