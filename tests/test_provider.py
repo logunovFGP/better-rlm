@@ -868,3 +868,90 @@ def test_a_key_written_by_the_wizard_is_visible_to_this_process(tmp_path, monkey
 
     onboard.run(Console(file=io.StringIO(), quiet=True), p)
     assert os.environ.get("MINIMAX_API_KEY") == "sk-fake-visible-to-this-process"
+
+
+# --- findings from driving the wizard in a real console -------------------------
+
+
+def test_a_credential_written_beside_a_config_is_read_back_next_run(tmp_path, monkeypatch, capsys):
+    """--config elsewhere has to round-trip its own credential.
+
+    config.py runs load_dotenv at IMPORT against the DEFAULT .env and knows nothing
+    about --config, while env_for_config writes beside the config named on the
+    command line. The two disagreed, so the wizard wrote a key, probed it
+    successfully (it exports to os.environ in-process) and reported Ready -- and the
+    very next launch reported that same key MISSING and re-ran the whole wizard.
+    Found by relaunching the TUI against a config it had just finished configuring.
+    """
+    from better_rlm import envfile, tui
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("mode: api" + chr(10) + 'base_url: "' + MINIMAX_URL + '"' + chr(10))
+    envfile.set_var(tmp_path / ".env", "MINIMAX_API_KEY", "sk-fake-sidecar-roundtrip")
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+
+    tui.main(["--config", str(cfg), "--one-shot", "/status"])
+    out = capsys.readouterr().out
+    assert "MINIMAX_API_KEY=set" in out, out
+    assert "MISSING" not in out, out
+
+
+def test_the_default_config_does_not_get_a_second_env_load(tmp_path, monkeypatch):
+    """The fix must be inert on the default path, where both already resolve to one
+    file -- reloading it with override=True would clobber an exported variable for
+    no reason at all."""
+    from better_rlm import tui
+    from better_rlm.config import config_file
+
+    assert tui.load_sidecar_env(config_file()) is None
+
+
+def test_going_back_to_a_model_screen_reopens_on_what_you_picked(tmp_path, monkeypatch):
+    """Escape from the override screen used to drop the root pick and re-open on the
+    catalogue default, so the cursor silently disagreed with the choice already made.
+
+    Seen while driving the live picker: chose MiniMax-M2.7 on step 1, pressed Esc on
+    step 2, and step 1 came back with MiniMax-M3 (current).
+    """
+    import io
+    from rich.console import Console
+    from better_rlm import onboard, tui
+
+    seen: list[str] = []
+
+    def capture(console, title, rows, current, **k):
+        seen.append(current)
+        return tui.ACTION_CANCEL                     # Escape
+
+    monkeypatch.setattr(tui, "_select", capture)
+    console = Console(file=io.StringIO(), quiet=True)
+    w = onboard.Wizard(step=onboard.Step.MODELS, provider=PROVIDER_MINIMAX,
+                       vendor=VENDOR_MINIMAX, role_index=1,
+                       models=(("root_model", "MiniMax-M2.7"),))
+
+    back = onboard.models_screen(console, tmp_path / "config.yaml", w)
+    assert back.role_index == 0
+    assert back.models == (("root_model", "MiniMax-M2.7"),), "the pick was discarded"
+
+    onboard.models_screen(console, tmp_path / "config.yaml", back)
+    assert seen[-1] == "MiniMax-M2.7", f"reopened on {seen[-1]!r}, not the earlier pick"
+
+
+def test_revisiting_a_role_replaces_it_rather_than_adding_a_second_entry(tmp_path, monkeypatch):
+    """Picks are written by slot, so walking back and forward cannot leave two
+    entries for one config key -- dict() would silently keep the last."""
+    import io
+    from rich.console import Console
+    from better_rlm import onboard, tui
+
+    monkeypatch.setattr(tui, "_select", lambda *a, **k: "MiniMax-M2.5")
+    console = Console(file=io.StringIO(), quiet=True)
+    w = onboard.Wizard(step=onboard.Step.MODELS, provider=PROVIDER_MINIMAX,
+                       vendor=VENDOR_MINIMAX, role_index=0,
+                       models=(("root_model", "MiniMax-M2.7"),
+                               ("root_model_override", "MiniMax-M3")))
+
+    out = onboard.models_screen(console, tmp_path / "config.yaml", w)
+    assert out.models == (("root_model", "MiniMax-M2.5"),
+                          ("root_model_override", "MiniMax-M3")), out.models
+    assert [k for k, _ in out.models].count("root_model") == 1

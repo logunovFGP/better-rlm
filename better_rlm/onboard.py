@@ -308,11 +308,16 @@ def models_screen(console: Console, config_path: Path, w: Wizard) -> Wizard:
     The list is the provider's own -- describe.models_for -- which is the whole
     point of the catalogue: a MiniMax endpoint is never offered a Claude id again.
     """
-    from .tui import ACTION_CANCEL, PICKER_CUSTOM, PICKER_KEEP, _select
+    from .tui import ACTION_CANCEL, PICKER_CUSTOM, PICKER_KEEP, _select, warn_unknown_model
 
     key, title, purpose = ROLES[w.role_index]
     rows = [(m.id, m.detail()) for m in describe.models_for(w.provider)]
-    default = describe.role_defaults(w.provider)[w.role_index]
+    # Re-opening a screen you came BACK to shows what you chose, not the catalogue
+    # default. Escaping from the override screen used to drop the root pick and
+    # re-open on the default, so the cursor silently disagreed with the choice you
+    # had already made.
+    default = (dict(w.models).get(key)
+               or describe.role_defaults(w.provider)[w.role_index])
 
     console.print(Panel(purpose, title=f"[bold]{title}[/bold]", border_style="cyan",
                         title_align="left"))
@@ -325,7 +330,9 @@ def models_screen(console: Console, config_path: Path, w: Wizard) -> Wizard:
                      custom_hint="type a model id this endpoint serves")
     if choice == ACTION_CANCEL:
         if w.role_index:
-            return replace(w, role_index=w.role_index - 1, models=w.models[:-1], error="")
+            # Keep the picks. They are replaced by index on the way forward, so
+            # going back and forward again overwrites rather than appends.
+            return replace(w, role_index=w.role_index - 1, error="")
         return back(w)
     if choice == PICKER_CUSTOM:
         res = picker.ask(console, title, [picker.Field(
@@ -335,12 +342,16 @@ def models_screen(console: Console, config_path: Path, w: Wizard) -> Wizard:
         if res.cancelled or not picked:
             return w                      # cline: empty input stays on the screen
         choice = picked
+        warn_unknown_model(console, choice)
     elif choice == PICKER_KEEP:
         choice = default
 
-    models = w.models + ((key, choice),)
-    if w.role_index + 1 < len(ROLES):
-        return replace(w, role_index=w.role_index + 1, models=models, error="")
+    # Replace at this role's slot rather than appending, so walking back and
+    # forward again cannot leave two entries for one config key.
+    i = w.role_index
+    models = w.models[:i] + ((key, choice),) + w.models[i + 1:]
+    if i + 1 < len(ROLES):
+        return replace(w, role_index=i + 1, models=models, error="")
     return goto(w, Step.DONE, models=models)
 
 

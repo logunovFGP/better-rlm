@@ -1127,7 +1127,7 @@ Slash commands exposed by the TUI:
 
 | Command | Effect |
 |---|---|
-| `/setup` | guided configuration: mode, then provider, then credential, then models |
+| `/setup` | guided configuration: provider, transport, credentials, connection test, models |
 | `/help` | list every command |
 | `/status` | show current mode / provider / model / cli login state |
 | `/mode-help` | side-by-side comparison of `auto` vs `claude-cli` vs `api` (host/proxy terminology from cline-2's mode picker) |
@@ -1136,7 +1136,7 @@ Slash commands exposed by the TUI:
 | `/model`, `/override`, `/sub` | open the corresponding model picker (curated list + custom id) |
 | `/test` | run `uv run --extra dev pytest -q` — the same gate the pre-push hook runs |
 | `/test-config` | focused pytest on `tests/test_config.py`, `tests/test_auth.py`, `tests/test_transport.py` |
-| `/auth-probe` | send one tiny sub-model call to verify the auth path is live |
+| `/auth-probe` | check the configured endpoint can be reached (free on the CLI path) |
 | `/quit` (or `/exit`) | exit |
 
 Same "proxy" vs "host" terminology as
