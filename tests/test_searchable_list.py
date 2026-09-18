@@ -453,3 +453,116 @@ def test_every_name_the_windows_map_returns_is_a_registered_key_name():
         "the two platforms no longer name the same arrow set"
     )
 
+
+
+# --- Ctrl+C leaves; Esc goes back ---------------------------------------------
+#
+# These two keys were the same key. Every picker caught KeyboardInterrupt beside
+# EOFError and returned CANCEL, which is what Esc returns, so its caller popped one
+# level and drew the next screen: Ctrl+C read as "go back", and from a nested screen
+# nothing left the program. Reported as "ctrl+c in the main menu opened another
+# menu" -- the menu WAS the response.
+
+
+@pytest.mark.parametrize("call", [
+    lambda c, items: __import__("better_rlm.picker", fromlist=["x"]).choose(c, "t", items),
+    lambda c, items: __import__("better_rlm.picker", fromlist=["x"]).choose_cards(c, "t", "s", items),
+    lambda c, items: __import__("better_rlm.picker", fromlist=["x"]).read_secret(c, "key"),
+])
+def test_no_picker_swallows_ctrl_c(monkeypatch, call):
+    """It must reach the caller. A picker that answers CANCEL cannot be told apart
+    from Esc, and the caller's loop then redraws instead of exiting."""
+    from rich.console import Console
+
+    from better_rlm import picker
+
+    monkeypatch.setattr(picker, "interactive", lambda: True)
+    monkeypatch.setattr(picker, "raw_mode", lambda *a, **k: __import__("contextlib").nullcontext())
+    monkeypatch.setattr(picker, "read_key", lambda: (_ for _ in ()).throw(KeyboardInterrupt))
+
+    items = [SearchableItem(key="a", label="A"), SearchableItem(key="b", label="B")]
+    with pytest.raises(KeyboardInterrupt):
+        call(Console(file=open(os.devnull, "w")), items)
+
+
+@pytest.mark.parametrize("fn", ["choose", "choose_cards"])
+def test_eof_is_still_a_cancel(monkeypatch, fn):
+    """The other half of the split. Headless stdin closing is not an interrupt --
+    CI and --one-shot feed a pipe, and that path must keep answering CANCEL."""
+    from rich.console import Console
+
+    from better_rlm import picker
+
+    monkeypatch.setattr(picker, "interactive", lambda: True)
+    monkeypatch.setattr(picker, "raw_mode", lambda *a, **k: __import__("contextlib").nullcontext())
+    monkeypatch.setattr(picker, "read_key", lambda: (_ for _ in ()).throw(EOFError))
+
+    items = [SearchableItem(key="a", label="A")]
+    args = ("t", "s", items) if fn == "choose_cards" else ("t", items)
+    res = getattr(picker, fn)(Console(file=open(os.devnull, "w")), *args)
+    assert res.key == picker.CANCEL
+
+
+@pytest.mark.skipif(os.name != "posix", reason="pty is POSIX-only")
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
+@pytest.mark.parametrize("descend", [0, 1], ids=["first-screen", "one-level-in"])
+def test_ctrl_c_exits_the_program_not_just_the_screen(tmp_path, descend):
+    """End to end, because the defect lived in the seam between the picker and its
+    caller and no unit could see it: the picker returned, the caller looped, and the
+    process stayed up drawing menus.
+
+    Asserts the exit STATUS, not the screen. A screen assertion passes while the
+    program is merely on its way out; 130 is only reachable by actually leaving.
+    """
+    import pty
+    import select
+    import signal
+    import sys
+    import time
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("mode: api\nprovider: minimax\n", encoding="utf-8")
+
+    pid, fd = pty.fork()
+    if pid == 0:                                   # pragma: no cover - child
+        env = {**os.environ, "TERM": "xterm-256color", "COLUMNS": "100", "LINES": "40"}
+        env.pop("NO_COLOR", None)
+        os.execve(sys.executable,
+                  [sys.executable, "-m", "better_rlm.cli", "--config", str(cfg)], env)
+
+    def settle(seconds: float) -> None:
+        end = time.time() + seconds
+        while time.time() < end:
+            if select.select([fd], [], [], 0.1)[0]:
+                try:
+                    if not os.read(fd, 65536):
+                        return
+                except OSError:
+                    return
+
+    try:
+        settle(3.0)                                # first screen drawn
+        for _ in range(descend):
+            os.write(fd, b"\r")
+            settle(1.5)
+        os.write(fd, b"\x03")
+
+        end, status = time.time() + 15.0, None
+        while time.time() < end:
+            settle(0.2)
+            done, raw = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = os.waitstatus_to_exitcode(raw)
+                break
+        assert status is not None, (
+            "Ctrl+C did not end the program -- it was swallowed as a cancel and the "
+            "caller drew the next screen"
+        )
+        assert status == 130, f"expected 130 (SIGINT), got {status}"
+    finally:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        except (ProcessLookupError, ChildProcessError):
+            pass
+        os.close(fd)

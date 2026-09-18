@@ -1102,7 +1102,7 @@ def run_menu(config_path: Path | None = None, console: Console | None = None) ->
             try:
                 choice = Prompt.ask("[bold green]Pick one[/bold green]", console=console,
                                     default="q").strip()
-            except (EOFError, KeyboardInterrupt):
+            except EOFError:
                 console.print("\n[grey50]bye[/grey50]")
                 return 0
             if choice.lower() in ("q", "quit", "exit"):
@@ -1150,7 +1150,7 @@ def run_repl(
     if setup:
         try:
             run_setup(console, cfg_path)
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
             console.print("\n[grey50]setup cancelled[/grey50]")
         console.print()
     console.print(
@@ -1164,7 +1164,7 @@ def run_repl(
     while True:
         try:
             line = Prompt.ask("[bold green]rlm[/bold green]", console=console, default="").strip()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
             console.print("\n[grey50]bye[/grey50]")
             return 0
         if not _dispatch_guarded(line, console, cfg_path):
@@ -1198,13 +1198,27 @@ def main(argv: list[str] | None = None) -> int:
 
     console = Console()
     cfg_path = config_path or config_file()
-    if one_shot is not None:
-        _dispatch_guarded(one_shot, console, cfg_path)
-        return LAST_EXIT_CODE
-    # The menu is the surface, whether or not --config pointed somewhere else: that
-    # flag only says WHICH config to edit. Only --one-shot means "do this one thing
-    # and exit", and it is handled above.
-    return run_menu(cfg_path, console=console)
+    try:
+        if one_shot is not None:
+            _dispatch_guarded(one_shot, console, cfg_path)
+            return LAST_EXIT_CODE
+        # The menu is the surface, whether or not --config pointed somewhere else:
+        # that flag only says WHICH config to edit. Only --one-shot means "do this
+        # one thing and exit", and it is handled above.
+        return run_menu(cfg_path, console=console)
+    except KeyboardInterrupt:
+        # The single handler, and the reason no picker catches this. Every screen
+        # used to turn Ctrl+C into the CANCEL that Esc returns, so its caller looped
+        # and drew the next menu -- Ctrl+C read as "go back", and from a nested
+        # screen no key left the program at all.
+        #
+        # Here rather than in cli.main because `python -m better_rlm.tui` reaches
+        # this function without passing through cli. The newline is because raw mode
+        # echoes nothing, so the cursor sits wherever the picker left it. 130 is the
+        # conventional status for death by SIGINT.
+        console.print()
+        console.print("[grey50]bye[/grey50]")
+        return 130
 
 
 if __name__ == "__main__":  # pragma: no cover
