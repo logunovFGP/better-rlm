@@ -49,7 +49,6 @@ from rich.table import Table
 from . import config_writer
 from .config import (
     MODEL_OPUS,
-    MODEL_SONNET,
     MODEL_SONNET_5,
     MODEL_HAIKU,
     PKG_ROOT,
@@ -60,24 +59,16 @@ from .config import (
 from . import envfile, picker
 from .searchable_list import SearchableItem
 from .describe import (
-    AUTH_API_KEY,
     AUTH_CLI,
     MODE_API,
     MODE_AUTO,
     MODE_CLI,
-    PROVIDER_ANTHROPIC,
-    PROVIDER_CLAUDE_CLI,
     PROVIDER_CUSTOM,
-    PROVIDER_MINIMAX,
     PROVIDERS,
-    all_vendors,
-    modes_for_vendor,
-    provider_for,
     VALID_MODES,
     all_modes,
     describe_mode,
     describe_provider,
-    describe_vendor,
     models_for,
     provider_for_config,
     providers_for_mode,
@@ -547,7 +538,6 @@ def auth_step(console: Console, provider_id: str, st: Status,
     # password=True routes through getpass, which warns "Password input may be echoed"
     # and falls back to plain input when stdin is not a terminal -- a pipe, CI, a test.
     # Claiming hidden input there would be a lie, so say which one this is.
-    hidden = sys.stdin.isatty()
     console.print(
         f"[grey50]Paste your key for {d.label}. "
         "Shown masked — first and last two characters, so you can tell a good paste "
