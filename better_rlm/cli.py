@@ -170,7 +170,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # Bare invocation, `config`, or any TUI flag (--config / --one-shot).
     if args and args[0] == "config":
-        args = args[1:]
+        # --menu, so tui.main can tell `better-rlm config` from bare `better-rlm`:
+        # the first is the menu by name, the second is setup and may finish and exit.
+        args = ["--menu", *args[1:]]
     # Lazy import: tui pulls rich and the engine's import graph -- seconds of it --
     # which `--help`, `where` and `auth` must not pay for. Note that .config above
     # IS imported at module scope and does read .env: that cost is milliseconds, and

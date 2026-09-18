@@ -1053,7 +1053,8 @@ def run_onboarding(console: Console, config_path: Path) -> bool:
     return ok
 
 
-def run_menu(config_path: Path | None = None, console: Console | None = None) -> int:
+def run_menu(config_path: Path | None = None, console: Console | None = None,
+             menu_only: bool = False) -> int:
     """The default surface: show the configuration, offer what to do about it, repeat.
 
     A bare ``better-rlm`` used to drop straight into the mode picker, which assumes
@@ -1062,20 +1063,32 @@ def run_menu(config_path: Path | None = None, console: Console | None = None) ->
     """
     cfg_path = config_path or config_file()
     console = console or Console()
-    shown_welcome = False
     while True:
         st = load_status(cfg_path)
-        if needs_onboarding(st) and picker.interactive() and not shown_welcome:
+        if not menu_only and needs_onboarding(st) and picker.interactive():
             # Nothing here can make a model call yet, so ask rather than presenting a
             # maintenance menu to someone who has not configured anything.
-            run_onboarding(console, cfg_path)
+            #
+            # cline's root.tsx is the shape being copied, and it does NOT fall through:
+            #
+            #     onComplete -> setAppView("home")
+            #     onExit     -> exitCline()
+            #
+            # Neither branch lands on a list. Falling through did, unconditionally,
+            # which is why every first run ended on the maintenance menu no matter
+            # what the operator chose -- including Esc, where the menu WAS the
+            # response to "I want out". `better-rlm` is the setup surface; the menu
+            # is `better-rlm config`, asked for by name.
+            done = run_onboarding(console, cfg_path)
             st = load_status(cfg_path)
-            # Fall through to the menu whether or not it completed. Exiting here left
-            # an unconfigured install with no way to reach /test, the model pickers,
-            # or the menu row that offers the very credential that is missing -- and
-            # re-running would show the welcome again. `shown_welcome` stops the loop
-            # re-asking on the next pass; `q` is how you leave.
-            shown_welcome = True
+            if not done:
+                console.print("[grey50]setup cancelled[/grey50]")
+                return 0
+            console.print()
+            console.print(Panel(render_status(st), title="[bold]configured[/bold]",
+                                border_style="green"))
+            console.print("[grey50]`better-rlm config` to change any of it[/grey50]")
+            return 0
         console.print()
         console.print(Panel(render_status(st), title="[bold]better-rlm[/bold]",
                             border_style="green"))
@@ -1182,6 +1195,7 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     config_path: Path | None = None
     one_shot: str | None = None
+    menu_only = False
     while args:
         a = args.pop(0)
         if a in ("-h", "--help"):
@@ -1192,6 +1206,12 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if a == "--one-shot" and args:
             one_shot = args.pop(0)
+            continue
+        if a == "--menu":
+            # Set by `better-rlm config`. Bare `better-rlm` is the setup surface and
+            # gates on needs_onboarding; naming `config` asks for the menu itself,
+            # configured or not.
+            menu_only = True
             continue
         print(f"unknown flag: {a}", file=sys.stderr)
         return 2
@@ -1205,7 +1225,7 @@ def main(argv: list[str] | None = None) -> int:
         # The menu is the surface, whether or not --config pointed somewhere else:
         # that flag only says WHICH config to edit. Only --one-shot means "do this
         # one thing and exit", and it is handled above.
-        return run_menu(cfg_path, console=console)
+        return run_menu(cfg_path, console=console, menu_only=menu_only)
     except KeyboardInterrupt:
         # The single handler, and the reason no picker catches this. Every screen
         # used to turn Ctrl+C into the CANCEL that Esc returns, so its caller looped
