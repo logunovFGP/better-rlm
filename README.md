@@ -132,6 +132,29 @@ better-rlm auth      # prints the `claude setup-token` flow
 better-rlm           # the config TUI
 ```
 
+#### Installing from a local folder, for testing the packaged shape
+
+The same package installs straight from a clone, which is how you exercise the
+**wheel** shape without publishing anything:
+
+```bash
+uv pip install .        # or: pip install .   — wheel shape, ~/.rlm paths
+uv pip install -e .     # editable: the console script points back at the clone
+```
+
+The two are not interchangeable for testing. `better_rlm.config.IS_CHECKOUT` asks
+whether a `pyproject.toml` sits next to the package, so a plain (non-editable)
+install into site-packages is the only way to reach the code path a PyPI user gets:
+
+```
+$ better-rlm where
+mode:    installed (pip)
+config:  ~/.rlm/config.yaml   (absent -- baked-in defaults apply)
+```
+
+Run it from **outside** the clone. Inside it, the local `better_rlm/` wins on
+`sys.path` and you are testing the checkout again without noticing.
+
 **What a pip install does not give you**, and why you might still want the checkout:
 
 | | pip install | checkout |
