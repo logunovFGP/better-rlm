@@ -31,10 +31,20 @@ def assert_owner_only(path: Path) -> None:
         assert oct(path.stat().st_mode & 0o777) == "0o600"
         return
     out = subprocess.run(["icacls", str(path)], capture_output=True, text=True).stdout
-    aces = [ln for ln in out.splitlines()
-            if ":" in ln and "Successfully processed" not in ln]
-    assert len(aces) == 1, f"expected exactly one ACE, got:\n{out}"
-    assert (os.environ.get("USERNAME") or "").lower() in aces[0].lower(), out
+    low = out.lower()
+    user = (os.environ.get("USERNAME") or "").lower()
+    assert user and user in low, f"the owner is not granted access:\n{out}"
+    # The signal is that inheritance is gone. Two weaker versions came first and both
+    # were wrong: "exactly one ACE" encoded one developer machine's result and failed
+    # on CI, where SYSTEM, Administrators and OWNER RIGHTS survive as creator ACEs
+    # that cannot be locked out on Windows anyway; and a blocklist of well-known
+    # group names cannot be exhaustive -- the unhardened file on that same machine
+    # carried a local `CodexSandboxUsers` group with Modify, which no blocklist would
+    # have named. An unhardened file marks every ACE (I) and inherits whatever the
+    # parent directory grants; /inheritance:r is exactly what removes that.
+    assert "(i)" not in low, f"inherited ACEs survived, .env is not restricted:\n{out}"
+    for group in ("everyone", "authenticated users"):
+        assert group not in low, f"{group} still has access:\n{out}"
 
 from better_rlm import config as cfgmod
 from better_rlm.config import load_config
