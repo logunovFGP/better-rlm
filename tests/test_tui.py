@@ -288,13 +288,21 @@ def test_render_status_flags_a_provider_the_server_will_refuse() -> None:
 
 def test_dispatch_model_pick_writes_choice(quiet_console, tmp_path, monkeypatch) -> None:
     """``/model`` writes ``root_model`` -- the picker mirrors /mode and
-    /provider in shape."""
+    /provider in shape.
+
+    Answer "3" is a ROW POSITION, so this asserts against the catalogue rather than
+    a hardcoded id: the list used to be four constants and is now the provider own
+    table, and a test naming the id at position 3 silently changes meaning whenever
+    a row is inserted above it.
+    """
+    from better_rlm.describe import models_for
+
     p = tmp_path / "config.yaml"
     p.write_text("root_model: claude-sonnet-5\n")
-    monkeypatch.setattr("better_rlm.tui.Prompt.ask", lambda *a, **kw: "3")  # opus
+    monkeypatch.setattr("better_rlm.tui.Prompt.ask", lambda *a, **kw: "3")
     _dispatch("/model", quiet_console, p)
     from better_rlm.config_writer import read_scalar
-    assert read_scalar(p, "root_model") == "claude-opus-4-8"
+    assert read_scalar(p, "root_model") == models_for("anthropic")[2].id
 
 
 def test_dispatch_model_custom_entry(quiet_console, tmp_path, monkeypatch) -> None:

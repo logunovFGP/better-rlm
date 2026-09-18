@@ -45,7 +45,7 @@ if not hasattr(_dr_probe, "RLM_RESULT_SENTINEL"):
 
 from .auth import patch_engine
 from .sandbox_reap import reap_stale_sandboxes
-from .config import Config, cost_usd
+from .config import COST_PER_MTOK, Config, cost_usd
 from .logsetup import log_event
 from rlm.utils.prompts import RLM_SYSTEM_PROMPT
 
@@ -134,7 +134,9 @@ def usage_breakdown(usage_summary, report_cost: bool = False) -> tuple[list[dict
     summaries = getattr(usage_summary, "model_usage_summaries", {}) or {}
     for model, s in summaries.items():
         # None (not 0.0) when reporting is off: a zero would read as "this was free".
-        c = cost_usd(model, s.total_input_tokens, s.total_output_tokens) if report_cost else None
+        # Also None for a model with no published rate -- same reason.
+        priced = report_cost and model in COST_PER_MTOK
+        c = cost_usd(model, s.total_input_tokens, s.total_output_tokens) if priced else None
         total += c or 0.0
         rows.append({
             "model": model,

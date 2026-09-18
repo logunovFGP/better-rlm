@@ -128,19 +128,56 @@ def _no_test_spends_a_real_model_call(monkeypatch, request):
     bytes a run), which is exactly the combination that earns a permanent guard.
 
     A test that truly wants the network marks itself @pytest.mark.live.
+
+    Guards TWO entry points, because the connectivity probe does not go through
+    subquery: it calls the SDK directly on purpose, so the budget ledger cannot
+    report a session stop as an auth failure. Guarding only subquery would have left
+    every probe test free to make a real billed call and pass for the reason the
+    paragraph above describes.
     """
     if "live" in request.keywords:
         return
+    import better_rlm.probe as pr
     import better_rlm.subquery as sq
 
     def refuse(*_a, **_k):
         raise AssertionError(
             "this test reached the real completion transport, which spends the operator's "
-            "session budget. Stub the sub_query the code under test actually calls (check "
-            "WHICH module imported it), or mark the test @pytest.mark.live."
+            "session budget. Stub the sub_query (or probe._probe_call) the code under test "
+            "actually calls (check WHICH module imported it), or mark the test "
+            "@pytest.mark.live."
         )
 
     monkeypatch.setattr(sq, "_call", refuse)
+    monkeypatch.setattr(pr, "_probe_call", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _a_credential_written_by_one_test_is_not_seen_by_the_next():
+    """Undo os.environ writes made by the credential step.
+
+    auth_step and the setup wizard export the key they just wrote to .env into
+    os.environ, because config.py ran load_dotenv at IMPORT and would otherwise not
+    see it -- the probe would report a good key as rejected and /status would print
+    MISSING. That is right in a process and wrong in a suite: one test writing
+    ANTHROPIC_API_KEY made needs_onboarding answer "already configured" in a later
+    test, which then silently skipped the wizard it was asserting about. Caught as a
+    test that passed alone and failed in the full run.
+    """
+    import os
+
+    from better_rlm.describe import PROVIDERS
+
+    names = {d.key_env for d in PROVIDERS.values() if d.key_env}
+    before = {n: os.environ.get(n) for n in names}
+    try:
+        yield
+    finally:
+        for n, was in before.items():
+            if was is None:
+                os.environ.pop(n, None)
+            else:
+                os.environ[n] = was
 
 
 @pytest.fixture(autouse=True)

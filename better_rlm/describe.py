@@ -360,3 +360,137 @@ def vendor_of(provider: str) -> str:
         if provider in d.modes.values():
             return vid
     return ""
+
+
+# -- Model catalogue ---------------------------------------------------------
+#
+# cline-2 ships a bundled per-provider model table (its generated
+# `catalog.generated.ts`, reached through `getProviderConfig(id).knownModels`)
+# and the model picker renders exactly the rows for the provider in hand. It does
+# NOT ask the endpoint what it serves: for anthropic and minimax the network
+# refresh is a no-op, because neither declares a `modelsSourceUrl`. A static
+# table is the faithful port, not a shortcut.
+#
+# This table is the reason the picker can stop offering Claude ids to a MiniMax
+# endpoint -- the defect that made a MiniMax install run with
+# `root_model: claude-sonnet-5` pointed at api.minimax.io.
+#
+# Keyed by VENDOR, not provider: `claude-cli` and `anthropic` are one vendor
+# reached two ways, and two copies of one list is how they drift.
+
+
+@dataclass(frozen=True)
+class ModelDescription:
+    """One row of a model picker, and the single source of that model's price.
+
+    `price_in`/`price_out` are USD per million tokens, or None when the vendor has
+    published no rate. None is not zero: `config.COST_PER_MTOK` is derived from
+    this table, and a missing entry makes `cost_usd` return 0.0, so a row priced
+    None renders as "unpriced" rather than as a free call.
+    """
+
+    id: str
+    label: str
+    context: int                 # input window, tokens
+    max_tokens: int              # ceiling on output per call
+    price_in: float | None       # USD per Mtok in
+    price_out: float | None      # USD per Mtok out
+    note: str = ""
+
+    def detail(self) -> str:
+        """The picker's right-hand column: window, price, and what it is for."""
+        window = (f"{self.context // 1_000_000}M ctx" if self.context >= 1_000_000
+                  else f"{self.context // 1000}K ctx")
+        rate = ("no published rate" if self.price_in is None
+                else f"{self.price_in:g}/{self.price_out:g} per Mtok")
+        return " - ".join(p for p in (window, rate, self.note) if p)
+
+
+# Rates follow the convention config.py already set for Sonnet 5 ("rates cloned
+# from Sonnet 4.6 pending published pricing"): by family, because Anthropic has
+# priced every generation of a family identically so far. claude-fable-5 gets
+# None -- no published rate and no family precedent to clone from. It stays in the
+# list because models.py already remaps it to claude-opus-4-8 on the OAuth path;
+# it is a remapped row, not a dead one.
+_OPUS = (5.0, 25.0)
+_SONNET = (3.0, 15.0)
+_HAIKU = (1.0, 5.0)
+
+MODELS: dict[str, tuple[ModelDescription, ...]] = {
+    VENDOR_CLAUDE: (
+        ModelDescription("claude-opus-5", "Claude Opus 5", 1_000_000, 128_000,
+                         *_OPUS, note="deepest reasoning"),
+        ModelDescription("claude-sonnet-5", "Claude Sonnet 5", 1_000_000, 128_000,
+                         *_SONNET, note="best all-round; the default root"),
+        ModelDescription("claude-fable-5", "Claude Fable 5", 1_000_000, 128_000,
+                         None, None, note="remapped to Opus 4.8 on the CLI path"),
+        ModelDescription("claude-opus-4-8", "Claude Opus 4.8", 1_000_000, 128_000,
+                         *_OPUS, note="the default hardest-task override"),
+        ModelDescription("claude-opus-4-7", "Claude Opus 4.7", 1_000_000, 128_000, *_OPUS),
+        ModelDescription("claude-sonnet-4-6", "Claude Sonnet 4.6", 1_000_000, 128_000,
+                         *_SONNET, note="prior root, still selectable"),
+        ModelDescription("claude-opus-4-6", "Claude Opus 4.6", 1_000_000, 128_000, *_OPUS),
+        ModelDescription("claude-opus-4-5", "Claude Opus 4.5 (latest)", 200_000, 64_000, *_OPUS),
+        ModelDescription("claude-opus-4-5-20251101", "Claude Opus 4.5", 200_000, 64_000,
+                         *_OPUS, note="pinned build"),
+        ModelDescription("claude-haiku-4-5", "Claude Haiku 4.5 (latest)", 200_000, 64_000,
+                         *_HAIKU, note="cheapest; the default sub-model"),
+        ModelDescription("claude-haiku-4-5-20251001", "Claude Haiku 4.5", 200_000, 64_000,
+                         *_HAIKU, note="pinned build"),
+        ModelDescription("claude-sonnet-4-5", "Claude Sonnet 4.5 (latest)", 1_000_000, 64_000, *_SONNET),
+        ModelDescription("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5", 1_000_000, 64_000,
+                         *_SONNET, note="pinned build"),
+    ),
+    VENDOR_MINIMAX: (
+        ModelDescription("MiniMax-M3", "MiniMax M3", 1_048_576, 512_000,
+                         0.3, 1.2, note="1M window; the default root"),
+        ModelDescription("MiniMax-M2.7", "MiniMax M2.7", 204_800, 131_072,
+                         0.3, 1.2, note="the default sub-model"),
+        ModelDescription("MiniMax-M2.7-highspeed", "MiniMax M2.7 highspeed", 204_800, 131_072,
+                         0.6, 2.4, note="same model, 2x the price for lower latency"),
+        ModelDescription("MiniMax-M2.5", "MiniMax M2.5", 204_800, 131_072, 0.3, 1.2),
+        ModelDescription("MiniMax-M2.5-highspeed", "MiniMax M2.5 highspeed", 204_800, 131_072,
+                         0.6, 2.4, note="same model, 2x the price for lower latency"),
+        ModelDescription("MiniMax-M2.1", "MiniMax M2.1", 204_800, 131_072, 0.3, 1.2),
+        ModelDescription("MiniMax-M2", "MiniMax M2", 204_800, 131_072, 0.3, 1.2),
+    ),
+}
+
+#: Where each model screen puts its cursor: (root, override, sub) per vendor.
+#: The operator still picks -- these only decide what Enter-alone selects.
+#: Claude's row is identical to config._DEFAULTS, so an existing install that
+#: re-runs setup and presses Enter three times keeps exactly what it had.
+#: MiniMax has no cheaper tier (six of seven models are the same 0.3/1.2), so
+#: override = root is the honest answer rather than a fake upgrade.
+ROLE_DEFAULTS: dict[str, tuple[str, str, str]] = {
+    VENDOR_CLAUDE: ("claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5"),
+    VENDOR_MINIMAX: ("MiniMax-M3", "MiniMax-M3", "MiniMax-M2.7"),
+}
+
+
+def models_for(provider: str) -> tuple[ModelDescription, ...]:
+    """The models this provider serves, in picker order.
+
+    Empty for a custom endpoint: we know nothing about what it serves, so the
+    picker offers free-text entry alone rather than a list from another vendor.
+    """
+    return MODELS.get(vendor_of(provider), ())
+
+
+def describe_model(model_id: str) -> ModelDescription | None:
+    """The catalogue row for an id, or None when nothing known serves it."""
+    for rows in MODELS.values():
+        for m in rows:
+            if m.id == model_id:
+                return m
+    return None
+
+
+def role_defaults(provider: str) -> tuple[str, str, str]:
+    """(root, override, sub) cursor positions for a provider.
+
+    Falls back to Claude's row for a provider with no vendor, which is the only
+    safe guess: a custom endpoint is reached over the Anthropic protocol, and the
+    operator overrides all three on the screens anyway.
+    """
+    return ROLE_DEFAULTS.get(vendor_of(provider), ROLE_DEFAULTS[VENDOR_CLAUDE])

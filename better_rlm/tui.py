@@ -55,6 +55,7 @@ from .config import (
     PKG_ROOT,
     config_file,
     env_file,
+    load_config,
 )
 from . import envfile, picker
 from .searchable_list import SearchableItem
@@ -77,6 +78,7 @@ from .describe import (
     describe_mode,
     describe_provider,
     describe_vendor,
+    models_for,
     provider_for_config,
     providers_for_mode,
 )
@@ -279,7 +281,10 @@ def render_status(st: Status) -> str:
 # Constants used as prompt answer values. Kept as module-level so test
 # code can drive the pickers headlessly without spinning up a fake stdin.
 PICKER_KEEP = "__keep__"
-PICKER_CUSTOM = "__custom__"
+#: Not a second literal that happens to match: _select maps picker.CUSTOM onto
+#: this, and a synthetic "custom" row in an options list is keyed with it. Two
+#: independent strings agreeing by coincidence is a bug waiting for an edit.
+PICKER_CUSTOM = picker.CUSTOM
 
 
 def _select(console: Console, title: str, options: list[tuple[str, str]],
@@ -360,12 +365,20 @@ def _prompt_choice(
 
     console.print(table)
     while True:
-        raw = Prompt.ask(
-            "[bold]Pick one[/bold]",
-            default="0",
-            console=console,
-            show_default=False,
-        ).strip()
+        try:
+            raw = Prompt.ask(
+                "[bold]Pick one[/bold]",
+                default="0",
+                console=console,
+                show_default=False,
+            ).strip()
+        except EOFError:
+            # A pipe that has run out is a cancel, not a crash. This never fired
+            # while the wizard was gated on a TTY; dropping that gate made every
+            # screen reachable from a pipe, and the last screen then ended the run
+            # with "command FAILED: EOFError" instead of leaving cleanly.
+            console.print()
+            return ACTION_CANCEL
         if not raw or raw.lower() in ("q", "cancel"):
             return ACTION_CANCEL
         if raw == "0":
@@ -377,6 +390,44 @@ def _prompt_choice(
             if 1 <= n <= len(options):
                 return options[n - 1][0]
         console.print(f"[red]enter a number 0–{len(options) + (1 if allow_custom else 0)}, or q[/red]")
+
+
+def select_cards(console: Console, title: str, subtitle: str,
+                 rows: list[tuple[str, str, str, str]], current: str = "") -> str:
+    """One selection from cline's card screen, on a terminal or off one.
+
+    ``rows`` is (key, label, detail, icon). The card screen had no headless twin,
+    which is why the first-run flow used to be gated on picker.interactive() --
+    in violation of the rule it cites. A pipe gets the numbered prompt instead, and
+    both return the same sentinels, so no caller branches.
+    """
+    if not picker.interactive():
+        choice = _prompt_choice(console, title,
+                                [(key, f"{label} - {detail}") for key, label, detail, _ in rows],
+                                current)
+        # Enter on a screen with nothing chosen yet means the first card, which is
+        # what the live picker does -- it opens on row one.
+        if choice == PICKER_KEEP:
+            return current or (rows[0][0] if rows else ACTION_CANCEL)
+        return choice
+    items = [SearchableItem(key=key, label=label, detail=detail, tag=icon)
+             for key, label, detail, icon in rows]
+    res = picker.choose_cards(console, title, subtitle, items)
+    return ACTION_CANCEL if res.key == picker.CANCEL else res.key
+
+
+def prospective_config(config_path: Path, mode: str, base_url: str):
+    """The Config a set of about-to-be-written settings would produce.
+
+    The probe has to test what the wizard is about to write, not what is on disk.
+    _run_auth_probe used to call load_config() with no argument and so probed the
+    DEFAULT config even under --config other.yaml -- reporting on a file nobody was
+    editing. Unrelated tunables (timeouts, ledger paths) still come from the loaded
+    config, because those are not what is being decided here.
+    """
+    st = load_status(config_path)
+    return dataclasses.replace(load_config(), mode=mode, base_url=base_url,
+                               cli_path=st.cli_path)
 
 
 def pick_mode(console: Console, current: str) -> str:
@@ -507,6 +558,10 @@ def auth_step(console: Console, provider_id: str, st: Status,
         console.print("[grey50]empty, nothing written[/grey50]")
         return False
     fp = envfile.set_var(path, d.key_env, key)
+    # config.py ran load_dotenv at import, so the write above is invisible to this
+    # process: auth.api_key_for reads os.getenv, and without this line /status says
+    # MISSING and the connectivity probe reports a good key as rejected.
+    os.environ[d.key_env] = key
     del key
     console.print(f"[green]wrote {d.key_env}[/green] to {path} ({fp}, mode 0600)")
     return True
@@ -525,85 +580,6 @@ def _warn_if_endpoint_is_dead(console: Console, st: Status) -> None:
             f"[yellow]This endpoint will be ignored: {why}, and the CLI talks to "
             f"Anthropic. Run [bold]/mode[/bold] and pick `api` to use it.[/yellow]"
         )
-
-
-def run_setup(console: Console, config_path: Path) -> bool:
-    """Guided configuration: mode, then provider, then credential, then models.
-
-    The order is cline-2's onboarding machine (``views/onboarding/model.ts``:
-    ``mode_picker -> byo_provider -> {byo_apikey | local_cli_setup} -> model_picker``),
-    because each step narrows the next: the mode decides which providers can be
-    reached, and the provider decides what credential is even asked for.
-
-    Returns True if anything was written. Cancelling any step leaves config.yaml as
-    it was -- each step writes as it completes, so an abort keeps what came before
-    rather than rolling back a mode the operator did choose.
-    """
-    console.print(Panel(render_status(load_status(config_path)),
-                        title="[bold]Current configuration[/bold]", border_style="grey50"))
-
-    st = load_status(config_path)
-    wrote = False
-
-    # 1. mode -- host vs proxy, the two-column compare
-    mode = pick_mode(console, st.mode)
-    if mode in (ACTION_CANCEL,):
-        console.print("[grey50]setup cancelled[/grey50]")
-        return wrote
-    if mode not in (PICKER_KEEP,) and mode in VALID_MODES:
-        wrote |= _save(config_path, {"mode": mode}, console)
-    else:
-        mode = st.mode
-
-    # 2. provider, narrowed to that mode
-    st = load_status(config_path)
-    current_provider = provider_for_config(st.base_url, mode)
-    choice = pick_provider(console, mode, current_provider)
-    if choice == ACTION_CANCEL:
-        console.print("[grey50]setup cancelled; mode kept[/grey50]")
-        return wrote
-    provider_id = current_provider
-    if choice == PICKER_CUSTOM:
-        url = Prompt.ask("[bold]base URL[/bold]", console=console).strip()
-        if url:
-            wrote |= _save(config_path, {"base_url": url}, console)
-            provider_id = PROVIDER_CUSTOM
-    elif choice != PICKER_KEEP:
-        provider_id = choice
-        wrote |= _save(config_path, {"base_url": describe_provider(choice).base_url}, console)
-    _warn_if_endpoint_is_dead(console, load_status(config_path))
-
-    # 3. credential for that provider
-    st = load_status(config_path)
-    ok = auth_step(console, provider_id, st, env_for_config(config_path))
-
-    # 4. models
-    st = load_status(config_path)
-    for label, key, current in (
-        ("root", "root_model", st.root_model),
-        ("sub", "sub_model", st.sub_model),
-    ):
-        pick = pick_model(console, current, kind=label)
-        if pick == ACTION_CANCEL:
-            break
-        if pick == PICKER_CUSTOM:
-            custom = Prompt.ask(f"[bold]{label} model id[/bold]", console=console).strip()
-            if custom:
-                wrote |= _save(config_path, {key: custom}, console)
-        elif pick != PICKER_KEEP and pick:
-            wrote |= _save(config_path, {key: pick}, console)
-
-    console.print()
-    console.print(Panel(render_status(load_status(config_path)),
-                        title="[bold]Configured[/bold]",
-                        border_style="green" if ok else "yellow"))
-    if not ok:
-        console.print("[yellow]The credential step did not complete — model calls will "
-                      "fail until it does.[/yellow]")
-    if wrote:
-        console.print("[grey50]A running server keeps its own copy: "
-                      "`claude mcp restart rlm` to pick this up.[/grey50]")
-    return wrote
 
 
 def render_mode_compare() -> str:
@@ -626,20 +602,21 @@ def render_mode_compare() -> str:
     return "\n".join(parts).rstrip()
 
 
-def pick_model(console: Console, current: str, kind: str = "root") -> str:
-    """Model picker -- curated list of Anthropic models + custom entry.
+def pick_model(console: Console, current: str, kind: str = "root",
+               provider: str = "") -> str:
+    """Model picker -- the rows the CONFIGURED endpoint actually serves.
 
-    Curated list tracks the constants in ``better_rlm/config.py`` so the
-    picker's defaults stay in sync with what the engine accepts. Custom
-    entry covers a model id newer than this checkout's constants.
+    This used to be one hardcoded list of four Anthropic ids whatever the endpoint
+    was, so a MiniMax install was offered claude-sonnet-5 and, taking it, ran with a
+    Claude id pointed at api.minimax.io. The list now comes from describe.MODELS via
+    the provider, which is the reverse lookup of base_url + mode.
+
+    A provider with no catalogue -- a custom endpoint, or an empty argument -- gets
+    the custom entry alone. Offering it another vendor's ids would be the same bug
+    in a different place.
     """
-    curated: list[tuple[str, str]] = [
-        (MODEL_SONNET_5, "current default root (1M ctx)"),
-        (MODEL_SONNET, "prior root (1M ctx)"),
-        (MODEL_OPUS, "override for the hardest tasks (1M ctx)"),
-        (MODEL_HAIKU, "cheap sub-LLM (200K ctx)"),
-    ]
-    return _select(console, f"{kind} model (current: {current})", curated, current,
+    rows = [(m.id, m.detail()) for m in models_for(provider)]
+    return _select(console, f"{kind} model (current: {current})", rows, current,
                    allow_custom=True, custom_hint="type a model id")
 
 
@@ -714,36 +691,30 @@ def _run_pytest(console: Console, args: list[str]) -> int:
         return 127
 
 
-def _run_auth_probe(console: Console) -> None:
-    """Send one tiny sub-model call to verify the auth path.
+def _run_auth_probe(console: Console, config_path: Path | None = None) -> None:
+    """Can this configuration reach its endpoint? The same check the wizard runs.
 
-    Mirrors ``server._auth_probe_line`` -- same payload, same threshold,
-    so /auth-probe and the MCP startup probe are interchangeable. Calls
-    directly into ``subquery.sub_query`` so it doesn't have to start the
-    MCP server.
-
-    Reads the checkout's own config.yaml: ``load_config`` takes no path, so a TUI
-    started with ``--config`` elsewhere probes against THIS checkout's config, not
-    that file. Spends one sub-model call.
+    Was a real sub-model call through subquery against ``load_config()`` -- which
+    takes no path, so a TUI started with ``--config`` elsewhere probed THIS
+    checkout's config rather than the file being edited. It now shares probe.py with
+    the setup wizard, so the menu row and the wizard cannot disagree about whether
+    an endpoint works, and the proxy path costs nothing at all.
     """
-    from . import models
-    from .config import load_config
-    from .subquery import sub_query
+    from . import describe as _d
+    from . import probe
 
-    try:
-        # Inside the guard: models.select resolves the auth mode, which runs
-        # auth.require_anthropic -- that raises NotImplementedError for any provider
-        # but anthropic, the exact value /status flags as UNSUPPORTED.
-        cfg = load_config()
-        target = models.select(cfg, models.Role.SUB)
-        res = sub_query(cfg, "Reply with exactly: ok", target, max_tokens=16)
-    except Exception as exc:                       # noqa: BLE001
-        console.print(f"[red]auth probe FAILED[/red]: {type(exc).__name__}: {exc}")
+    path = config_path or config_file()
+    st = load_status(path)
+    cfg = prospective_config(path, st.mode, st.base_url)
+    pid = _d.provider_for_config(st.base_url, st.mode)
+    res = probe.probe_endpoint(cfg, st.sub_model or _d.role_defaults(pid)[2])
+    if res.ok:
+        console.print(f"[green]auth probe ok[/green]: {res.detail} ({res.where})")
         return
-    if res.error:
-        console.print(f"[red]auth probe FAILED[/red]: {res.error}")
-        return
-    console.print(f"[green]auth probe ok[/green]: sub-model replied {res.answer.strip()[:20]!r}")
+    console.print(f"[red]auth probe FAILED[/red] ({res.code}): {res.detail}")
+    if res.fix:
+        console.print(f"[grey50]{res.fix}[/grey50]")
+    return
 
 
 #: Exit status of the last dispatched command, for ``--one-shot``. The dispatcher's
@@ -794,7 +765,8 @@ def _dispatch(
         return True
 
     if cmd == "/setup":
-        run_setup(console, config_path)
+        from . import onboard
+        onboard.run(console, config_path)
         return True
 
     if cmd == "/provider":
@@ -838,7 +810,8 @@ def _dispatch(
         else:
             current, key = st.sub_model, "sub_model"
             kind = "sub"
-        choice = pick_model(console, current, kind=kind)
+        choice = pick_model(console, current, kind=kind,
+                            provider=provider_for_config(st.base_url, st.mode))
         if choice == PICKER_KEEP or choice == ACTION_CANCEL:
             console.print("[grey50]no change[/grey50]")
         elif choice == PICKER_CUSTOM:
@@ -864,7 +837,7 @@ def _dispatch(
         return True
 
     if cmd == "/auth-probe":
-        _run_auth_probe(console)
+        _run_auth_probe(console, config_path)
         return True
 
     LAST_EXIT_CODE = 2      # a typo'd --one-shot must not look like success either
@@ -936,7 +909,7 @@ def build_menu(st: Status) -> list[MenuItem]:
         ))
 
     items += [
-        MenuItem("", "Run guided setup", "mode, then provider, then credential, then models", "/setup"),
+        MenuItem("", "Run guided setup", "provider, transport, credentials, connection test, models", "/setup"),
         MenuItem("", "Change mode", f"currently {st.mode}", "/mode"),
         MenuItem("", "Change provider",
                  f"currently {describe_provider(provider_for_config(st.base_url, st.mode)).label}",
@@ -1012,63 +985,6 @@ def needs_onboarding(st: Status) -> bool:
     return not (st.mode == MODE_AUTO and st.cli_available and st.cli_logged_in is True)
 
 
-def run_onboarding(console: Console, config_path: Path) -> bool:
-    """First run: which vendor, then how to reach it, then the credential.
-
-    Two screens, not one list of every combination. cline asks the vendor question
-    first (MAIN_MENU: "Sign in with Claude Code", "Bring your own provider") and only
-    shows ModePickerContent when the transport is genuinely open -- ``runProviderChange``
-    branches on the provider kind rather than always asking. Same here: Claude can be
-    reached two ways so it asks; MiniMax is API-only so there is nothing to ask.
-    """
-    vendors = [
-        SearchableItem(key=vid, label=describe_vendor(vid).label,
-                       detail=describe_vendor(vid).summary, tag=describe_vendor(vid).icon)
-        for vid in all_vendors()
-    ]
-    res = picker.choose_cards(console, "Welcome to better-rlm",
-                              "Which provider do you have an account with?", vendors)
-    if res.key == picker.CANCEL:
-        console.print("[grey50]setup cancelled — nothing written[/grey50]")
-        return False
-    vendor = res.key
-
-    modes = modes_for_vendor(vendor)
-    if len(modes) == 1:
-        mode = modes[0]
-        _icon, label, _detail = MODE_CARDS[mode]
-        console.print(f"[grey50]{describe_vendor(vendor).label} is reached one way: "
-                      f"{label}.[/grey50]")
-    else:
-        cards = [
-            SearchableItem(key=m, label=MODE_CARDS[m][1], detail=MODE_CARDS[m][2],
-                           tag=MODE_CARDS[m][0])
-            for m in modes
-        ]
-        res = picker.choose_cards(console, describe_vendor(vendor).label,
-                                  "How should better-rlm reach it?", cards)
-        if res.key == picker.CANCEL:
-            console.print("[grey50]setup cancelled — nothing written[/grey50]")
-            return False
-        mode = res.key
-
-    pid = provider_for(vendor, mode)
-    _save(config_path, {"mode": mode, "base_url": describe_provider(pid).base_url}, console)
-    st = load_status(config_path)
-    ok = auth_step(console, pid, st, env_for_config(config_path))
-
-    console.print()
-    console.print(Panel(render_status(load_status(config_path)),
-                        title="[bold]Ready[/bold]" if ok else "[bold]Not finished[/bold]",
-                        border_style="green" if ok else "yellow"))
-    if ok:
-        console.print("[grey50]Models keep their defaults; change them any time with "
-                      "[bold]better-rlm[/bold] → Change models.[/grey50]")
-        console.print("[grey50]A running server keeps its own copy: "
-                      "`claude mcp restart rlm` to pick this up.[/grey50]")
-    return ok
-
-
 def run_menu(config_path: Path | None = None, console: Console | None = None,
              menu_only: bool = False) -> int:
     """The default surface: show the configuration, offer what to do about it, repeat.
@@ -1081,7 +997,9 @@ def run_menu(config_path: Path | None = None, console: Console | None = None,
     console = console or Console()
     while True:
         st = load_status(cfg_path)
-        if not menu_only and needs_onboarding(st) and picker.interactive():
+        # No picker.interactive() gate any more: every screen in the wizard
+        # has a headless path, so a pipe gets asked the same questions.
+        if not menu_only and needs_onboarding(st):
             # Nothing here can make a model call yet, so ask rather than presenting a
             # maintenance menu to someone who has not configured anything.
             #
@@ -1095,7 +1013,8 @@ def run_menu(config_path: Path | None = None, console: Console | None = None,
             # what the operator chose -- including Esc, where the menu WAS the
             # response to "I want out". `better-rlm` is the setup surface; the menu
             # is `better-rlm config`, asked for by name.
-            done = run_onboarding(console, cfg_path)
+            from . import onboard
+            done = onboard.run(console, cfg_path)
             st = load_status(cfg_path)
             if not done:
                 console.print("[grey50]setup cancelled[/grey50]")
@@ -1178,7 +1097,8 @@ def run_repl(
     console = console or Console()
     if setup:
         try:
-            run_setup(console, cfg_path)
+            from . import onboard
+            onboard.run(console, cfg_path)
         except EOFError:
             console.print("\n[grey50]setup cancelled[/grey50]")
         console.print()

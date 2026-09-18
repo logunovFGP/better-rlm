@@ -24,7 +24,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import results
-from .config import Clock, Config, cost_usd, load_config
+from .config import COST_PER_MTOK, Clock, Config, cost_usd, load_config
 from .context_store import ContextStore
 from .logsetup import LOGGER_NAME, configure_logging
 from .output import bound_output
@@ -94,4 +94,7 @@ class Deps:
         printed figure would be confidently wrong."""
         if not self.cfg.report_cost:
             return ""
+        if model not in COST_PER_MTOK:
+            # No published rate. $0.0000 would read as "this call was free".
+            return f"  |  cost: unpriced ({model})"
         return f"  |  cost: ${cost_usd(model, itok, otok):.4f}"
