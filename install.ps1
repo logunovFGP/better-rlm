@@ -7,10 +7,13 @@
     Setup steps:
       1. (Re)creates the Windows virtual environment (.venv_windows) from scratch.
       2. Installs pinned dependencies (editable install).
-      3. Builds the Docker sandbox image (rlm-sandbox) unless skipped.
-      4. Creates .env from .env.example if missing (optional; mode=auto needs no key).
-      5. Links the rlm-large-context skill into ~/.claude/skills (directory junction).
-      6. Prints - or, with -Register, runs - the `claude mcp add` command.
+      3. Shims `better-rlm` into ~/.local/bin so the bare word resolves.
+      4. Builds the Docker sandbox image (rlm-sandbox) unless skipped.
+      5. Creates .env from .env.example if missing (optional; mode=auto needs no key).
+      6. Links the rlm-large-context skill into ~/.claude/skills (directory junction).
+      7. Points core.hooksPath at the version-controlled verify gate.
+      8. Registers the oversized-read hook, with -Hook.
+      9. Prints - or, with -Register, runs - the `claude mcp add` command.
 
     The venv is rebuilt fresh every run: reusing an existing venv proved unreliable on a
     Windows+WSL shared checkout, whereas a clean create is deterministic. Per-platform
@@ -35,6 +38,11 @@
 
 .PARAMETER Register
     Run `claude mcp add -s user rlm ...` after setup (requires the claude CLI on PATH).
+
+.PARAMETER Hook
+    Register the oversized-read PreToolUse hook in ~/.claude/settings.json, so a Read
+    of a file over 200KB is redirected to rlm_load_file. Mirrors install.sh --hook.
+    Opt-in: it is global state outside this checkout and affects every project.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File install.ps1
@@ -63,6 +71,11 @@ param(
     [switch] $SkipSkill,
     [switch] $Register,
 
+    # Mirrors install.sh --hook: register the oversized-read PreToolUse hook in
+    # ~/.claude/settings.json. Opt-in on both platforms for the same reason -- it is
+    # global state outside this checkout and changes Read behaviour in EVERY project.
+    [switch] $Hook,
+
     # Mirrors install.sh --auth: run `claude setup-token` when the CLI has no login.
     [switch] $Auth,
 
@@ -87,11 +100,21 @@ function Write-RlmToken {
       PowerShell 5.1 (this script's floor), and a BOM would become part of the first
       key python-dotenv parses. Only the byte count is ever printed.
 
-      No ACL tightening here on purpose. .env inherits the repo directory's ACL; the
-      Get-Acl/Set-Acl dance is Windows-only API that cannot be exercised on this
-      project's CI or by its maintainer's machine, and shipping an unverified
-      credential-permissions path is worse than documenting the exposure. To lock it
-      down:  icacls .env /inheritance:r /grant:r "$env:USERNAME:(R,W)"
+      The ACL IS tightened, which reverses the note that used to sit here. That note
+      said the Windows permission path could not be exercised by this project's CI or
+      its maintainer, so documenting the exposure beat shipping something unverified.
+      That is no longer true: better_rlm/envfile.py runs this same icacls call for
+      every API key the setup wizard writes, it is covered by a test, and it was run
+      by hand on this machine -- a freshly created .env carried six inherited ACEs,
+      one of them a local group holding Modify, and one ACE afterwards.
+
+      install.sh chmods the same file 0600 right after writing it. Leaving the
+      PowerShell twin alone meant the token landed readable by every local account on
+      exactly the platform where nobody would think to check.
+
+      Best effort here, unlike envfile: this is an installer step that has already
+      printed the token to the operator's own terminal, so a failed ACL is worth a
+      warning rather than aborting a setup that otherwise succeeded.
     #>
     param([Parameter(Mandatory)][string] $Token)
 
@@ -106,7 +129,15 @@ function Write-RlmToken {
     }
     $text = (($keep + "CLAUDE_CODE_OAUTH_TOKEN=$tok") -join "`n") + "`n"
     [System.IO.File]::WriteAllText($envPath, $text, (New-Object System.Text.UTF8Encoding $false))
-    Write-Note "wrote CLAUDE_CODE_OAUTH_TOKEN to .env ($($tok.Length) bytes)"
+    $locked = 'inherited ACL'
+    try {
+        $out = & icacls $envPath /inheritance:r /grant:r "${env:USERNAME}:F" 2>&1
+        if ($LASTEXITCODE -eq 0) { $locked = "owner-only ($env:USERNAME)" }
+        else { Write-Warning "icacls could not restrict .env: $out" }
+    } catch {
+        Write-Warning "icacls could not restrict .env: $($_.Exception.Message)"
+    }
+    Write-Note "wrote CLAUDE_CODE_OAUTH_TOKEN to .env ($($tok.Length) bytes, $locked)"
 }
 
 function Write-Step { param([Parameter(Mandatory)][string] $Message) Write-Host "==> $Message" -ForegroundColor Cyan }
@@ -322,7 +353,66 @@ try {
         }
     }
 
-    # 2) Docker sandbox image ---------------------------------------------
+    # 2) better-rlm command ------------------------------------------------
+    # install.sh's twin step. The editable install above creates
+    # .venv_windows\Scripts\better-rlm.exe (pyproject [project.scripts]); that
+    # directory is not on PATH, so the one command gets a shim in the user's bin
+    # directory -- same "one global name, many possible checkouts, last installer
+    # wins" rule, and the same refusal to hijack silently.
+    #
+    # A .cmd shim rather than a symlink: New-Item -ItemType SymbolicLink needs
+    # Developer Mode or an elevated shell, and an installer that only works
+    # elevated is worse than one extra file. PATHEXT carries .CMD, so the bare
+    # word resolves from both PowerShell and cmd.
+    Write-Step 'better-rlm command'
+    $binDir = Join-Path $HOME '.local\bin'
+    $shimTarget = Join-Path $venv 'Scripts\better-rlm.exe'
+    $shim = Join-Path $binDir 'better-rlm.cmd'
+    if (-not (Test-Path $shimTarget)) {
+        Write-Warning "$shimTarget was not created - is [project.scripts] still in pyproject.toml?"
+    } else {
+        # Non-fatal for the same reason install.sh's is: an unwritable bin directory
+        # must not abort the installer and skip the sandbox image, .env, the skill
+        # link and the registration line, none of which need this shim.
+        try {
+            $prev = if (Test-Path $shim) { Get-Content -LiteralPath $shim -Raw } else { '' }
+            New-Item -ItemType Directory -Force -Path $binDir -ErrorAction Stop | Out-Null
+            $body = @"
+@echo off
+REM Generated by install.ps1 for this checkout. Re-run install.ps1 in another
+REM checkout to repoint it, or delete this file to drop the global name. The
+REM per-checkout launchers (run_tui.cmd, run_server.cmd) address a SPECIFIC
+REM checkout and are unaffected by whatever this points at.
+"$shimTarget" %*
+"@
+            # An if-block, never `return`: these steps run in the script's top-level
+            # try, so a return here would exit the installer and skip the sandbox
+            # image, .env, the skill link, the verify gate and the registration line.
+            if ($PSCmdlet.ShouldProcess($shim, 'Write the better-rlm shim')) {
+                Set-Content -LiteralPath $shim -Value $body -Encoding ASCII -ErrorAction Stop
+                if ($prev -and ($prev -notlike "*$shimTarget*")) {
+                    Write-Note "NOTE: 'better-rlm' pointed at another checkout and now points here."
+                }
+                Write-Note "shim $shim -> $shimTarget"
+                $onPath = $env:PATH -split ';' |
+                    Where-Object { $_ -and $_.TrimEnd('') -ieq $binDir.TrimEnd('') }
+                if (-not $onPath) {
+                    Write-Warning "$binDir is not on PATH, so the bare word will not resolve yet."
+                    Write-Note 'Add it for this user, then open a new terminal:'
+                    Write-Note ('[Environment]::SetEnvironmentVariable("PATH", "$env:PATH;' +
+                        $binDir + '", "User")')
+                    Write-Note 'Until then, .
+un_tui.cmd addresses this checkout directly.'
+                }
+            }
+        } catch {
+            Write-Warning "Could not write $shim - $($_.Exception.Message)"
+            Write-Note 'Everything else installed fine. Use .
+un_tui.cmd instead.'
+        }
+    }
+
+    # 3) Docker sandbox image ---------------------------------------------
     if ($SkipDocker -or $script:UseLocalSandbox) {
         Write-Step "Skipping Docker image (Sandbox=$Sandbox, SkipDocker=$SkipDocker)"
         Write-Note 'Model-written Python will run on the HOST (see README Security).'
@@ -362,7 +452,7 @@ try {
         }
     }
 
-    # 3) .env (optional) ---------------------------------------------------
+    # 4) .env (optional) ---------------------------------------------------
     Write-Step '.env (optional - mode=auto reuses your Claude Code login)'
     if (Test-Path '.env') {
         Write-Note '.env already present - left unchanged.'
@@ -427,7 +517,7 @@ try {
         }
     }
 
-    # 4) Skill link --------------------------------------------------------
+    # 5) Skill link --------------------------------------------------------
     if ($SkipSkill) {
         Write-Step 'Skipping skill link (-SkipSkill)'
     } else {
@@ -470,7 +560,7 @@ try {
         }
     }
 
-    # 5) Verify gate ------------------------------------------------------
+    # 6) Verify gate ------------------------------------------------------
     Write-Step 'Verify gate (git pre-push hook)'
     # A hook in .git/hooks is untracked and never reaches a clone, which is why the
     # "enforced by .git/hooks/pre-push" claim was false for every fresh checkout.
@@ -484,7 +574,42 @@ try {
         Write-Note 'Not a git checkout - skipped.'
     }
 
-    # 6) Register with Claude Code ----------------------------------------
+    # 7) Oversized-read hook (-Hook) ---------------------------------------
+    # install.sh's --hook step, which had no Windows twin at all. Opt-in for the same
+    # reason registration is, and more so: it writes ~/.claude/settings.json, global
+    # state outside this checkout, and changes Read behaviour in EVERY project.
+    #
+    # The command written into settings.json is literally `python3 <path>`, re-resolved
+    # from PATH on every Read. On Windows that name is often the Microsoft Store App
+    # Execution Alias, which exists even with no Python installed and opens the Store
+    # when run -- so install_hook.py probes the interpreter before registering, and
+    # refuses rather than leaving a hook that traceback-spams every Read on the machine.
+    if ($Hook) {
+        Write-Step 'Oversized-read hook (-Hook)'
+        if (-not (Test-Tool 'python3')) {
+            Write-Warning 'python3 not on PATH - the hook command is `python3 <path>`.'
+            Write-Note 'Skipping. Install a python3 and re-run with -Hook.'
+        } else {
+            $hookScript = Join-Path $PSScriptRoot 'scripts\install_hook.py'
+            # Not Invoke-Native: a refused hook is a warning, not a failed install. The
+            # bash side learned this the hard way -- a bare call under `set -e` aborted
+            # the whole installer when an opt-in extra declined.
+            if ($PSCmdlet.ShouldProcess('~/.claude/settings.json',
+                    'Register the oversized-read hook')) {
+                & python3 $hookScript
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Note 'Read on a file >200KB is redirected to rlm_load_file.'
+                    Write-Note 'Fails open: a normal Read still happens when rlm is not'
+                    Write-Note 'registered, for images/PDFs/archives, and for a bounded read.'
+                    Write-Note 'Restart Claude Code to load it.'
+                } else {
+                    Write-Warning 'Hook NOT registered (see above). Everything else installed fine.'
+                }
+            }
+        }
+    }
+
+    # 8) Register with Claude Code ----------------------------------------
     Write-Step 'Register with Claude Code'
     $launcher = Join-Path $PSScriptRoot 'run_server.cmd'
     # A local sandbox is useless unless the server is told at launch, so carry the choice

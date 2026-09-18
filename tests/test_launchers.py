@@ -78,3 +78,44 @@ def test_the_uv_fallback_command_actually_runs():
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     assert res.returncode == 0, res.stderr[-800:]
     assert "mode:" in res.stdout, res.stdout[:400]
+
+
+# --- the two installers have to offer the same things ------------------------
+#
+# install.ps1 is not a translation of install.sh, but every opt-in one offers and the
+# other does not is a Windows user missing a feature nobody notices is absent. Both
+# gaps below were real: `better-rlm` was linked onto PATH only by the bash installer,
+# so the command the README documents did not exist on Windows; and --hook had no
+# PowerShell twin at all, so the oversized-read hook was unreachable there.
+
+INSTALL_SH = (ROOT / "install.sh").read_text(encoding="utf-8")
+INSTALL_PS1 = (ROOT / "install.ps1").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("bash_flag,ps_switch", [
+    ("--register", "$Register"),
+    ("--auth", "$Auth"),
+    ("--hook", "$Hook"),
+])
+def test_both_installers_offer_the_same_opt_ins(bash_flag, ps_switch):
+    """A flag on one platform and not the other is a silently missing feature."""
+    assert bash_flag in INSTALL_SH, f"{bash_flag} vanished from install.sh"
+    assert f"[switch] {ps_switch}" in INSTALL_PS1, (
+        f"install.sh offers {bash_flag} but install.ps1 has no {ps_switch} switch"
+    )
+
+
+def test_both_installers_put_better_rlm_on_path():
+    """The bare `better-rlm` word is what the README and CLAUDE.md document.
+
+    install.sh symlinks the console script into ~/.local/bin. install.ps1 writes a
+    .cmd shim to the same directory -- a symlink there needs Developer Mode or an
+    elevated shell, and an installer that only works elevated is worse than one extra
+    file. Neither may quietly stop doing it.
+    """
+    assert ".local/bin" in INSTALL_SH and "better-rlm" in INSTALL_SH
+    assert r".local\bin" in INSTALL_PS1
+    assert "better-rlm.cmd" in INSTALL_PS1
+    assert r"Scripts\better-rlm.exe" in INSTALL_PS1, (
+        "the shim must point at the console script pyproject [project.scripts] creates"
+    )
