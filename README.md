@@ -196,7 +196,7 @@ brew install --cask docker         # then LAUNCH Docker Desktop (Apple Silicon f
 claude                             # run once and log in — this is your auth
 ```
 
-Python 3.11–3.13 all work; `install.sh` pins **3.12**. The engine ships no 3.14 wheels.
+Python 3.11–3.14 all work; `install.sh` pins **3.12**.
 No API key, no token, nothing in `.env` — the login above is the whole auth story.
 
 **2. Install**
@@ -317,7 +317,7 @@ sudo usermod -aG docker "$USER"                         # then log out/in so it 
 claude                                                  # run once and log in — this is your auth
 ```
 
-Python 3.11–3.13 all work; `install.sh` pins **3.12**. The engine ships no 3.14 wheels.
+Python 3.11–3.14 all work; `install.sh` pins **3.12**.
 No API key, no token, nothing in `.env` — the login above is the whole auth story.
 
 **2. Install**
@@ -391,7 +391,7 @@ Native — **no WSL required**. Works in both Windows PowerShell 5.1 and PowerSh
 **1. Prerequisites**
 
 ```powershell
-winget install Python.Python.3.13   # 3.11-3.13 all work; no 3.14 wheels exist
+winget install Python.Python.3.13   # 3.11-3.14 all work
 winget install astral-sh.uv         # optional; installer falls back to venv + pip
 winget install Docker.DockerDesktop # then LAUNCH Docker Desktop and wait for "Engine running"
 claude                              # run once and log in — this is your auth
@@ -1160,7 +1160,7 @@ until the server reconnects — `/status` reminds you when this matters.
 | `Failed to start container` / docker errors | Start Docker Desktop; run `./install.sh` to build `rlm-sandbox`; or set `sandbox: local`. |
 | `'.venv_windows' must be rebuilt - but it is in use by: PID ...` | Dependencies changed and a running `rlm` server holds the interpreter. Stop Claude Code (or disconnect `rlm` via `/mcp`) and re-run, or run `.\install.ps1 -Force` to stop those processes automatically. Unchanged dependencies never hit this — the venv is reused. |
 | `Unknown backend: litellm` | You're on the unpatched upstream — this fork uses `anthropic`. |
-| No 3.14 wheels | Create the venv with Python 3.12 or 3.13. |
+| Python too old or too new | better-rlm needs 3.11-3.14. `uv venv --python 3.13` fetches one. |
 | `rlm_query` slow on OAuth | Each engine turn spawns a fresh `claude` CLI (~3–4 s cold start), so multi-turn queries are slower than the SDK path — the deliberate speed-for-stability trade, plus a one-time container start. Use `ANTHROPIC_API_KEY` if latency matters more than reusing your subscription. |
 | `claude: command not found` (OAuth) | The CLI isn't on the server's PATH; install Claude Code, or set `cli_path` in `config.yaml` to its absolute path. `rlm_status` shows whether it's found. |
 
