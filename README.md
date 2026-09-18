@@ -196,7 +196,7 @@ brew install --cask docker         # then LAUNCH Docker Desktop (Apple Silicon f
 claude                             # run once and log in — this is your auth
 ```
 
-Python 3.11–3.14 all work; `install.sh` pins **3.12**.
+Python 3.12–3.14 all work; `install.sh` pins **3.12**.
 No API key, no token, nothing in `.env` — the login above is the whole auth story.
 
 **2. Install**
@@ -317,7 +317,7 @@ sudo usermod -aG docker "$USER"                         # then log out/in so it 
 claude                                                  # run once and log in — this is your auth
 ```
 
-Python 3.11–3.14 all work; `install.sh` pins **3.12**.
+Python 3.12–3.14 all work; `install.sh` pins **3.12**.
 No API key, no token, nothing in `.env` — the login above is the whole auth story.
 
 **2. Install**
@@ -391,7 +391,7 @@ Native — **no WSL required**. Works in both Windows PowerShell 5.1 and PowerSh
 **1. Prerequisites**
 
 ```powershell
-winget install Python.Python.3.13   # 3.11-3.14 all work
+winget install Python.Python.3.13   # 3.12-3.14 all work
 winget install astral-sh.uv         # optional; installer falls back to venv + pip
 winget install Docker.DockerDesktop # then LAUNCH Docker Desktop and wait for "Engine running"
 claude                              # run once and log in — this is your auth

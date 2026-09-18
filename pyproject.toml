@@ -9,7 +9,7 @@ description = "MCP server exposing Recursive Language Models (RLM) for oversized
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
-requires-python = ">=3.11,<3.15"
+requires-python = ">=3.12,<3.15"
 authors = [{ name = "Aleksandr Logunov", email = "logunov.alexander.cs@gmail.com" }]
 maintainers = [{ name = "Aleksandr Logunov", email = "logunov.alexander.cs@gmail.com" }]
 keywords = ["mcp", "rlm", "llm", "anthropic", "claude", "long-context", "recursive-language-model"]
@@ -18,9 +18,9 @@ classifiers = [
   "Intended Audience :: Developers",
   # No "License :: OSI Approved :: ..." classifier: PEP 639 supersedes it with the
   # SPDX `license = "MIT"` above, and setuptools now hard-errors if both are present.
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Software Development :: Libraries :: Python Modules",
   "Typing :: Typed",
 ]

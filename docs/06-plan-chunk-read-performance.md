@@ -130,7 +130,7 @@ of file size. (Chunk *time* still reads the full text once — inherent, out of 
 3. Do not touch `rlm/` (vendored engine) — all changes live in `better_rlm/` and `tests/`.
 4. Do not add caching of decoded text. `load_file` references user files in place
    (`better_rlm/context_store.py:227`); a text cache can go stale. Out of scope.
-5. Python floor is 3.11 (`pyproject.toml`): `Path.read_text` has **no** `newline`
+5. Python floor is 3.12 (`pyproject.toml`): `Path.read_text` has **no** `newline`
    parameter before 3.13 — use `path.open(encoding=..., errors=..., newline="")`.
 6. Behavior contract that every leaf preserves: for any already-stored context,
    `read_chunk(ctx, i)` returns *exactly* `read_text(ctx)[start:end]` for that
