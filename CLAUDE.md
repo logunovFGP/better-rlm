@@ -160,14 +160,49 @@ shows the maintenance menu instead. `tui.needs_onboarding(st)` is the switch, an
 asks whether a model call is possible -- not whether config.yaml has values in it. A
 config that cannot call a model is not configured.
 
-Two screens: **vendor, then transport**. `describe.VENDORS` is the layer above
-providers, because a provider id pairs a vendor with a transport -- `claude-cli` and
-`anthropic` are the same vendor reached two ways. That flattening is right for the
-maintenance picker, where one setting is being changed, and wrong for a first run,
-where the question is whose account you have and the transport follows.
+The flow is `better_rlm/onboard.py`, a port of cline's `views/onboarding/`
+(`model.ts` + `controller.ts` + `keyboard.ts` + `view.tsx` collapsed into one module,
+because our screens draw through `picker.py` and `tui._select` rather than owning
+layout). Its order is cline's:
+
+    vendor -> transport (host/proxy) -> credentials -> connectivity -> models x3
+
+`describe.VENDORS` is the layer above providers, because a provider id pairs a vendor
+with a transport -- `claude-cli` and `anthropic` are the same vendor reached two ways.
+That flattening is right for the maintenance picker, where one setting is being
+changed, and wrong for a first run, where the question is whose account you have and
+the transport follows.
+
+**`back()` pops a pushed history, never a static table.** Two edges are
+path-dependent and a static table gets both wrong: MiniMax skips the transport screen
+going forward, so Escape must skip it coming back or it lands on a question with one
+answer; and the model screens are reached from the credential form or from the CLI
+check depending on a choice made three screens earlier. `vendor_screen` therefore uses
+`replace`, not `goto(Step.MODE)`, when a vendor offers one transport.
+
+**config.yaml is written exactly once, at the end.** Gathering everything before
+writing is why a cancel needs no rollback -- `/provider` had one and first-run
+onboarding did not, so a cancel used to leave a half-configured file. A cancel at any
+screen now leaves the file byte-identical.
 
   * **Claude** -> OAuth (proxy) or API key (host). Two ways, so it asks.
   * **MiniMax** -> API key only. One way, so it says so and moves on.
+
+The credential screen is cline's `byo_apikey` **form** (`picker.ask`), not a bare
+secret prompt: the endpoint is visible and editable beside the key it authenticates.
+Tab cycles forward only -- Shift+Tab reads as `""` on both platforms, and naming a key
+without adding it to `picker.KEY_NAMES` makes `key_text` return the name itself, typing
+it into whatever field has focus, credential included.
+
+The key variable is resolved from the **submitted** base URL, not the vendor picked two
+screens earlier. An edited MiniMax URL reverse-maps to `PROVIDER_CUSTOM`, whose variable
+is `RLM_API_KEY`; writing to `MINIMAX_API_KEY` there would leave the key unreadable with
+every call failing "not set".
+
+`config.py` runs `load_dotenv` at **import**, so a key written to `.env` is invisible to
+the process that wrote it. `auth_step` and the wizard export it to `os.environ` as well;
+without that the connectivity probe reports a good key as rejected and `/status` prints
+MISSING.
 
 cline branches the same way: MAIN_MENU offers vendors, and `runProviderChange` shows
 `ModePickerContent` only when the transport is genuinely open rather than always
@@ -183,6 +218,54 @@ shows them in the clear; hiding them entirely is what we had, and it was worse t
 either, because a silent paste gives no way to tell a good clipboard from an empty
 one until the first model call fails. `mask_secret` never reveals more than four
 characters and preserves length, so a truncated paste is visible.
+
+### The model catalogue, and why it is also the price table
+
+`describe.MODELS` is cline's bundled per-provider model table (its generated
+`catalog.generated.ts`, reached through `getProviderConfig(id).knownModels`). cline does
+not ask the endpoint what it serves either -- for anthropic and minimax the network
+refresh is a no-op, because neither declares a `modelsSourceUrl`. A static table is the
+faithful port, not a shortcut. Keyed by **vendor**, so `claude-cli` and `anthropic` cannot
+hold two copies of one list.
+
+`config.COST_PER_MTOK` is **derived** from it. They were two hand-maintained tables, and
+that is how every MiniMax model came to price at $0.00: `cost_usd` returns 0.0 for an id
+it does not know. Same rows, one source. A row with no published rate carries
+`price_in=None`, stays out of the cost table, and renders as `unpriced` rather than
+claiming a free call.
+
+The picker offers the rows of the **configured endpoint**. `tui.pick_model` used to have
+one hardcoded list of four Anthropic ids whatever `base_url` said, which is how a MiniMax
+install came to run `root_model: claude-sonnet-5` against api.minimax.io.
+
+**Do not "fix" the MiniMax base URL to match cline's.** cline stores
+`https://api.minimax.io/anthropic/v1`; the Anthropic SDK appends `/v1/messages` itself, so
+that string requests `/v1/v1/messages` and 404s every call. Measured, and pinned by
+`test_the_minimax_base_url_does_not_end_in_v1`.
+
+### The connectivity probe is a deliberate divergence
+
+cline has **no** API-path pre-flight -- `controller.ts` says so in a comment, and bad
+credentials surface at the first real call. `better_rlm/probe.py` runs one anyway, on both
+paths, so a wrong URL or a mistyped key is caught on the screen that produced it. It earns
+the divergence twice, because the credential form has no validation (faithful to cline) and
+something has to catch a bad key before the model screens.
+
+  * proxy path -> `transport.cli_auth_status`, free, ~215 ms. One connectivity concept,
+    not two;
+  * host path -> one `messages.create(max_tokens=16)`. Not `models.list()`: a MiniMax
+    `/anthropic` endpoint need not implement it, and a 404 would then be
+    indistinguishable from a wrong URL -- which is the distinction being bought;
+  * it **bypasses `get_transport` on purpose**. The ledger refuses calls past the session
+    stop line, so a probe on an exhausted budget would report a budget stop as an auth
+    failure;
+  * `url_wrong` / `key_rejected` / `network_down` come from disjoint SDK exception
+    branches, not string sniffing. The one exception is a 404, where only the body says
+    whether the model or the URL is wrong;
+  * the key never reaches the result: `_scrub` removes it and clamps to one 200-char line.
+
+A failed probe offers retry / edit / write-anyway. A hard gate would leave someone behind a
+proxy unable to finish setup at all.
 
 ### Credentials are per provider
 

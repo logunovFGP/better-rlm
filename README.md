@@ -1021,10 +1021,10 @@ better-rlm
   └──────────────────────────────────────┘
 
   1  Supply your MiniMax key   MINIMAX_API_KEY is not set - every model-backed tool fails
-  2  Run guided setup          mode, then provider, then credential, then models
+  2  Run guided setup          provider, transport, credentials, connection test, models
   3  Change mode               currently api
   4  Change provider           currently MiniMax
-  5  Change models             root claude-sonnet-5, sub claude-haiku-4-5
+  5  Change models             root MiniMax-M3, sub MiniMax-M2.7
   6  Test the connection       one tiny model call that proves auth works
   7  Run the verify gate       the test suite
   s  Slash commands            type any /command directly
@@ -1074,14 +1074,31 @@ is ignoring, or a signed-out CLI appears as row 1 with the reason spelled out. A
 healthy config shows none of them. Every action returns to the menu, so one session
 fixes several things.
 
-Option 2 runs the guided flow end to end - mode, then provider, then credential, then
-models - each step narrowing the next.
+Option 2 runs the guided flow end to end, each step narrowing the next:
 
-Ported from cline-2's onboarding machine (`apps/cli/src/tui/views/onboarding/`): the
-mode step feeds `modeFilter` into the provider picker, so you are never offered a
-provider the mode you just chose cannot use. The credential step branches the way
-cline's `runProviderChange` does - a local-CLI status screen when the `claude` CLI
-holds the credential, a key form otherwise.
+```
+provider  ->  transport  ->  credentials  ->  connection test  ->  models x3
+```
+
+Ported from cline-2's onboarding machine (`apps/cli/src/tui/views/onboarding/`), in its
+order. The transport screen is skipped when a provider offers one way in - MiniMax is
+API-key only - and it says so rather than showing a question with a single answer. The
+credential step branches the way cline's `runProviderChange` does: a local-CLI status
+screen when the `claude` CLI holds the credential, a form with the endpoint and the key
+side by side otherwise.
+
+Two steps are **not** cline's. It runs a connectivity test before offering models, so a
+wrong URL or a mistyped key is caught on the screen that produced it instead of at the
+first real query; on failure it offers retry, edit, or write-anyway, so being offline
+never traps you in an unconfigurable install. And it asks for all three models - the
+orchestrator, the hardest-task override, and the per-chunk worker - each with what that
+model is actually for, because they are three different jobs with three different bills.
+
+The model list is the **configured endpoint's own**: choose MiniMax and you are offered
+MiniMax ids with their context windows and per-Mtok prices, never Claude ids.
+
+Nothing is written to `config.yaml` until the last step, so cancelling at any screen
+leaves it untouched.
 
 `/setup` re-runs it. The individual steps stay available as `/mode`, `/provider`,
 `/model`, so changing one thing does not mean walking the whole flow.

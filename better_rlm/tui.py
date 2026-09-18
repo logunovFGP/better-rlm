@@ -365,12 +365,20 @@ def _prompt_choice(
 
     console.print(table)
     while True:
-        raw = Prompt.ask(
-            "[bold]Pick one[/bold]",
-            default="0",
-            console=console,
-            show_default=False,
-        ).strip()
+        try:
+            raw = Prompt.ask(
+                "[bold]Pick one[/bold]",
+                default="0",
+                console=console,
+                show_default=False,
+            ).strip()
+        except EOFError:
+            # A pipe that has run out is a cancel, not a crash. This never fired
+            # while the wizard was gated on a TTY; dropping that gate made every
+            # screen reachable from a pipe, and the last screen then ended the run
+            # with "command FAILED: EOFError" instead of leaving cleanly.
+            console.print()
+            return ACTION_CANCEL
         if not raw or raw.lower() in ("q", "cancel"):
             return ACTION_CANCEL
         if raw == "0":
@@ -901,7 +909,7 @@ def build_menu(st: Status) -> list[MenuItem]:
         ))
 
     items += [
-        MenuItem("", "Run guided setup", "mode, then provider, then credential, then models", "/setup"),
+        MenuItem("", "Run guided setup", "provider, transport, credentials, connection test, models", "/setup"),
         MenuItem("", "Change mode", f"currently {st.mode}", "/mode"),
         MenuItem("", "Change provider",
                  f"currently {describe_provider(provider_for_config(st.base_url, st.mode)).label}",

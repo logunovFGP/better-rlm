@@ -695,6 +695,8 @@ def _ask_headless(console: Console, title: str, fields: list[Field],
             else:
                 out[f.key] = Prompt.ask(f.label, default=f.value,
                                         console=console).strip()
-        except (EOFError, KeyboardInterrupt):
-            raise
+        except EOFError:
+            # Same rule as the live path, where EOF is a cancel: a pipe that runs
+            # out mid-form must not half-submit, and must not crash.
+            return FormResult({}, cancelled=True)
     return FormResult(out)
