@@ -1,0 +1,4 @@
+[submodule "vendor/opentui"]
+	path = vendor/opentui
+	url = https://github.com/logunovFGP/opentui.git
+	branch = cline-fixes
