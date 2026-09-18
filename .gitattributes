@@ -24,3 +24,6 @@
 *.gif  binary
 *.ico  binary
 *.pdf  binary
+
+# Wheels are binary: `* text=auto eol=lf` must never touch them.
+*.whl binary
