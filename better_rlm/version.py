@@ -34,7 +34,13 @@ def _read() -> str:
     # setuptools generated FROM that same file at build time.
     from importlib.metadata import PackageNotFoundError, version as pkg_version
     try:
-        return pkg_version("rlm-mcp")
+        # The DISTRIBUTION name from pyproject, not the import name. This said
+        # "rlm-mcp" -- the name before the PyPI repackage -- so every wheel install
+        # took this branch (VERSION is not shipped inside the wheel), failed the
+        # lookup and reported "0+unknown". Measured on an installed 0.6.1, which
+        # advertised exactly that over the MCP handshake: the drift this module's
+        # docstring says it exists to prevent, reintroduced by a rename.
+        return pkg_version("better-rlm")
     except PackageNotFoundError:
         return "0+unknown"
 

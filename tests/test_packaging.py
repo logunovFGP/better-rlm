@@ -202,3 +202,47 @@ def test_user_dir_is_the_existing_rlm_directory():
     contexts, logs, cache and the budget ledger. CLAUDE.md bans a second one."""
     assert cfgmod.USER_DIR.name == ".rlm"
     assert str(cfgmod.USER_DIR).startswith(str(Path.home()))
+
+
+def test_the_wheel_fallback_names_the_distribution_that_is_installed():
+    """VERSION is not shipped inside the wheel, so a pip install ALWAYS takes the
+    metadata fallback -- and it asked for "rlm-mcp", the name from before the PyPI
+    repackage. Every wheel install therefore reported "0+unknown", measured on an
+    installed 0.6.1. Renaming the distribution again without fixing this line brings
+    the same silent drift back.
+    """
+    import re
+
+    src = (ROOT / "better_rlm" / "version.py").read_text(encoding="utf-8")
+    # Anchored on the return, not the bare call: the module docstring quotes
+    # pkg_version("mcp") while explaining the original bug, and an unanchored
+    # search matches that instead -- passing or failing for the wrong reason.
+    asked = re.search(r'return pkg_version\("([^"]+)"\)', src)
+    assert asked, "the metadata fallback is gone; a wheel has no other source"
+    assert asked.group(1) == PYPROJECT["project"]["name"]
+
+
+def test_a_wheel_shaped_install_asks_metadata_for_the_right_distribution(monkeypatch, tmp_path):
+    """The runtime property, captured hermetically.
+
+    With no VERSION beside the package -- which is what site-packages looks like --
+    _read falls through to metadata. This asserts the NAME it asks for rather than
+    the value it gets back: the value version passed on a dev box that still had a
+    stale `rlm-mcp` 0.3.0 editable install lying around, so the wrong lookup
+    succeeded and the test went green for the wrong reason.
+    """
+    import importlib.metadata as md
+
+    from better_rlm import version as vmod
+
+    asked: list[str] = []
+
+    def fake_version(name):
+        asked.append(name)
+        return "9.9.9"
+
+    monkeypatch.setattr(vmod, "VERSION_FILE", tmp_path / "absent")
+    monkeypatch.setattr(md, "version", fake_version)
+
+    assert vmod._read() == "9.9.9"
+    assert asked == [PYPROJECT["project"]["name"]]
