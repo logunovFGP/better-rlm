@@ -46,6 +46,52 @@ def test_the_windows_installer_accepts_every_python_the_package_allows():
     )
 
 
+def test_a_vendored_opentui_wheel_exists_for_every_supported_python():
+    """vendor/wheels must cover the whole requires-python range.
+
+    opentui is supplied as a file rather than a dependency -- upstream 0.1.2 lacks
+    the scrollbox extent fix and ships no cp314 wheel at all, and its sdist cannot
+    self-build (CMakeLists.txt:91 wants the native library downloaded first). A
+    file-based dependency has no resolver to notice a gap, so widening
+    requires-python without building the matching wheel would leave that
+    interpreter silently without a TUI. See vendor/wheels/README.md.
+    """
+    import re
+
+    spec = PYPROJECT["project"]["requires-python"]
+    lo, hi = re.search(r">=3\.(\d+)", spec), re.search(r"<3\.(\d+)", spec)
+    assert lo and hi, f"expected a bounded >=3.x,<3.y range, got {spec!r}"
+    needed = {f"cp3{n}" for n in range(int(lo.group(1)), int(hi.group(1)))}
+
+    built = {
+        w.name.split("-")[2]
+        for w in (ROOT / "vendor" / "wheels").glob("opentui-*.whl")
+    }
+
+    assert needed <= built, (
+        f"requires-python allows {sorted(needed)} but vendor/wheels has "
+        f"{sorted(built)} -- rebuild per vendor/wheels/README.md"
+    )
+
+
+def test_the_vendored_wheels_are_one_version_and_not_plain_upstream():
+    """A patched build must never be mistakable for upstream 0.1.2.
+
+    The fix lives only in our fork, so the local version segment is the single
+    signal that an installed opentui carries it. Mixed versions across the wheel
+    set would mean one interpreter silently gets the unpatched binding.
+    """
+    versions = {
+        w.name.split("-")[1] for w in (ROOT / "vendor" / "wheels").glob("opentui-*.whl")
+    }
+    assert len(versions) == 1, f"vendor/wheels mixes versions: {sorted(versions)}"
+    version = versions.pop()
+    assert "+" in version, (
+        f"{version!r} has no PEP 440 local segment -- it is indistinguishable "
+        "from an unpatched upstream build"
+    )
+
+
 def test_distribution_is_named_for_the_command_it_installs():
     assert PYPROJECT["project"]["name"] == "better-rlm"
     assert list(PYPROJECT["project"]["scripts"]) == ["better-rlm"]
