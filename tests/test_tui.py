@@ -435,3 +435,33 @@ def test_readme_documents_exactly_the_shipped_slash_commands() -> None:
     # "host/proxy terminology", which is not a command.
     for documented in set(re.findall(r"`(/[a-z][a-z-]*)`", table)):
         assert documented in shipped, f"README documents {documented}, which does not exist"
+
+
+def test_a_brand_new_install_runs_setup_even_when_the_claude_cli_is_logged_in(tmp_path, monkeypatch):
+    """The gate cline states as `if (!isProviderConfigured(config))`.
+
+    needs_onboarding asked only whether a model call could succeed. With no
+    config.yaml, `mode` defaults to `auto`, and auto accepts a signed-in `claude`
+    CLI -- so on any machine with Claude Code installed the answer was "already
+    configured" and setup never ran. The operator landed on the maintenance menu
+    showing defaults they had never chosen, which is what was reported.
+
+    Having Claude Code installed is not the same as having configured this tool.
+    """
+    cfg = tmp_path / "config.yaml"
+    monkeypatch.setattr(tui, "_cli_available", lambda _p: True, raising=False)
+
+    st = tui.load_status(cfg)
+    assert not st.config_written, "no file on disk, so nothing has been configured"
+    assert tui.needs_onboarding(st), (
+        "a machine with a logged-in `claude` CLI skipped setup entirely"
+    )
+
+    # Written and reachable: the menu is right, and this is the case that must not
+    # regress into always onboarding.
+    cfg.write_text("mode: claude-cli\nprovider: anthropic\n", encoding="utf-8")
+    assert not tui.needs_onboarding(tui.load_status(cfg))
+
+    # Written but unreachable stays onboarding -- the half this repo adds to cline's.
+    cfg.write_text("mode: api\nprovider: anthropic\n", encoding="utf-8")
+    assert tui.needs_onboarding(tui.load_status(cfg))
