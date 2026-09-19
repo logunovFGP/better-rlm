@@ -10,8 +10,9 @@ Why the file and not importlib.metadata: metadata is written at INSTALL time. Th
 is installed editable, so the version is frozen into ``rlm_mcp-<v>.dist-info`` and
 bumping VERSION leaves the runtime reporting the old number until someone reinstalls --
 exactly the silent drift this module exists to prevent. The file is read first for that
-reason; metadata is the fallback for a wheel install, where VERSION is not on disk
-beside the package.
+reason. A wheel has no VERSION beside the package and uses ``_BAKED`` -- NOT metadata,
+which describes a .dist-info directory rather than the code that is running, and reads
+a stale one when two of them sit side by side. See ``_BAKED``.
 
 pyproject reads the same file via ``[tool.setuptools.dynamic] version = {file =
 "VERSION"}``, so the built distribution and the running server cannot disagree.
@@ -20,29 +21,45 @@ VERSION by scripts/sync_version.py and held to it by tests/test_plugin_manifest.
 """
 from pathlib import Path
 
-VERSION_FILE = Path(__file__).resolve().parent.parent / "VERSION"
+_ROOT = Path(__file__).resolve().parent.parent
+VERSION_FILE = _ROOT / "VERSION"
+
+#: The version, baked in as a literal at release time. Written by
+#: scripts/sync_version.py and held to VERSION by
+#: tests/test_plugin_manifest.py::test_the_baked_version_matches_the_version_file,
+#: so a build whose literal has drifted cannot pass verify, let alone publish.
+#:
+#: This replaced an ``importlib.metadata`` lookup, which is not a fact about the code
+#: that is running -- it is a fact about a .dist-info directory sitting nearby, and
+#: those outlive the code they describe. Measured on an operator's machine:
+#: site-packages held 0.9.2's code beside BOTH `better_rlm-0.9.2.dist-info` and a
+#: `better_rlm-0.7.0.dist-info` left by an install pip never cleaned up.
+#: ``importlib.metadata`` returns the first match in directory order, so 0.7.0 won and
+#: `better-rlm --version` reported a version whose code was long gone. pip's own
+#: "Successfully installed better-rlm-0.7.0" came from the same lookup, on the same run
+#: that had just unpacked the 0.9.2 wheel.
+_BAKED = "0.9.2"
 
 
 def _read() -> str:
-    try:
-        text = VERSION_FILE.read_text(encoding="utf-8").strip()
-    except OSError:
-        text = ""
-    if text:
-        return text
-    # Installed as a wheel: no VERSION beside the package, so fall back to the metadata
-    # setuptools generated FROM that same file at build time.
-    from importlib.metadata import PackageNotFoundError, version as pkg_version
-    try:
-        # The DISTRIBUTION name from pyproject, not the import name. This said
-        # "rlm-mcp" -- the name before the PyPI repackage -- so every wheel install
-        # took this branch (VERSION is not shipped inside the wheel), failed the
-        # lookup and reported "0+unknown". Measured on an installed 0.6.1, which
-        # advertised exactly that over the MCP handshake: the drift this module's
-        # docstring says it exists to prevent, reintroduced by a rename.
-        return pkg_version("better-rlm")
-    except PackageNotFoundError:
-        return "0+unknown"
+    """The running code's version.
+
+    A checkout reads VERSION, so a bump is live immediately rather than at the next
+    reinstall -- this repo installs editable, and metadata freezes at install time.
+    Anywhere else the literal is the answer: nothing outside the package can make it
+    wrong, which is the entire point of it.
+    """
+    # _ROOT is site-packages in a wheel, and a file named VERSION there belongs to
+    # whoever dropped it, not to us. pyproject.toml beside it is the checkout probe
+    # (config.IS_CHECKOUT asks the same question; this module stays import-free).
+    if (_ROOT / "pyproject.toml").is_file():
+        try:
+            text = VERSION_FILE.read_text(encoding="utf-8").strip()
+        except OSError:
+            text = ""
+        if text:
+            return text
+    return _BAKED
 
 
 __version__ = _read()

@@ -269,33 +269,10 @@ def test_status_flags_a_provider_that_mode_ignores():
 # --- the suite must never touch the developer's own config --------------------
 
 
-def test_no_test_writes_the_repo_config_or_env(request):
-    """A test that defaults to config_file() edits the machine it runs on.
-
-    This session wrote `mode: api` and a MiniMax base_url into the repo's own
-    config.yaml while exercising the picker, which would have pointed a live MCP
-    server at an endpoint it had no key for. Nothing detected it; it was noticed by
-    eye in `git status`. This fixture-free check makes the class visible: it records
-    both files' digests at session start and compares at teardown.
-    """
-    import hashlib
-    from better_rlm.config import PKG_ROOT
-
-    watched = [PKG_ROOT / "config.yaml", PKG_ROOT / ".env"]
-
-    def digest(p):
-        return hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else "absent"
-
-    before = {p: digest(p) for p in watched}
-
-    def check():
-        for p in watched:
-            assert digest(p) == before[p], (
-                f"a test modified {p.name} in the checkout. Tests must pass an explicit "
-                f"path (tmp_path) or monkeypatch config_file()/env_file()."
-            )
-
-    request.addfinalizer(check)
+# The checkout-write guard that used to live here is now
+# conftest._no_test_rewrites_a_tracked_file_in_the_checkout. As a plain test it
+# snapshotted and compared inside its own teardown -- microseconds apart, so it could
+# only ever catch itself. Session-scoped, it covers the whole run and three more files.
 
 
 # --- the guided flow ----------------------------------------------------------

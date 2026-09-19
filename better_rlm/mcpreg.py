@@ -80,6 +80,31 @@ def install_identity() -> tuple[str, Path, list[Path]]:
     return __version__, active, sorted(roots)
 
 
+def stale_metadata() -> list[Path]:
+    """.dist-info directories beside this install that describe a version it is not.
+
+    Two of them for one distribution is always broken, and it is not cosmetic: every
+    ``importlib.metadata`` lookup -- pip's own "Successfully installed" line included
+    -- takes the FIRST in directory order. `better_rlm-0.7.0.dist-info` sitting next
+    to `better_rlm-0.9.2.dist-info` made pip announce it had installed 0.7.0 on the
+    run where it unpacked the 0.9.2 wheel. Nothing warned; it simply read as the
+    upgrade having failed.
+
+    Skipped for a checkout, where an editable install's metadata legitimately lags
+    VERSION -- that drift is this repo's normal state, not a fault.
+    """
+    if IS_CHECKOUT:
+        return []
+    from .version import __version__
+
+    active = Path(__file__).resolve().parent.parent
+    try:
+        found = sorted(active.glob("better_rlm-*.dist-info"))
+    except OSError:                            # noqa: BLE001 - a probe must not raise
+        return []
+    return [d for d in found if d.name != f"better_rlm-{__version__}.dist-info"]
+
+
 def server_command() -> list[str]:
     """The argv that starts THIS install's server.
 

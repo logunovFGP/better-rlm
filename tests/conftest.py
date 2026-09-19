@@ -202,6 +202,42 @@ def _no_test_rewrites_the_operators_mcp_registration(monkeypatch):
     monkeypatch.setattr(mcpreg, "claude_cli", lambda: None)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _no_test_rewrites_a_tracked_file_in_the_checkout():
+    """Hash five tracked files at session start; fail the run if any changed.
+
+    This lived in test_provider.py as a plain test using ``request.addfinalizer``,
+    which fires at the end of THAT test -- it snapshotted and compared microseconds
+    apart, so it could only ever catch itself. It read as session-wide protection and
+    was not: a sync-script test missing one monkeypatch rewrote the repo's own
+    better_rlm/version.py to 1.2.3 mid-suite, and `git diff` caught that, not this.
+
+    The original catch: a picker test wrote `mode: api` and a MiniMax base_url into
+    the checkout's config.yaml, which would have pointed a live server at an endpoint
+    it had no key for. VERSION, version.py and plugin.json join the list because
+    scripts/sync_version.py rewrites the last two, and a stale literal shipped from
+    here is a wrong version number on someone else's machine.
+    """
+    import hashlib
+
+    from better_rlm.config import PKG_ROOT
+
+    watched = [PKG_ROOT / "config.yaml", PKG_ROOT / ".env", PKG_ROOT / "VERSION",
+               PKG_ROOT / "better_rlm" / "version.py",
+               PKG_ROOT / ".claude-plugin" / "plugin.json"]
+
+    def digest(p):
+        return hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else "absent"
+
+    before = {p: digest(p) for p in watched}
+    yield
+    for p in watched:
+        assert digest(p) == before[p], (
+            f"a test modified {p.name} in the checkout. Tests must pass an explicit "
+            f"path (tmp_path) or monkeypatch the module constant that names it."
+        )
+
+
 @pytest.fixture(autouse=True)
 def _no_test_writes_to_the_real_log_dir(monkeypatch):
     """Keep pytest out of the operator's ~/.rlm/logs.

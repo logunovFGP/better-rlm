@@ -20,6 +20,30 @@ def manifest() -> dict:
     return json.loads(PLUGIN.read_text(encoding="utf-8"))
 
 
+@pytest.fixture
+def sv(tmp_path, monkeypatch):
+    """scripts.sync_version with ALL THREE of its files redirected into tmp_path.
+
+    Patching them one test at a time is how the checkout's own better_rlm/version.py
+    got rewritten to 1.2.3 mid-suite: ``main`` writes two files, so a test that
+    redirected only plugin.json edited the real one and still passed, because an
+    imported module is not read from disk again. Taking them as a set is the only
+    form a future test cannot half-apply.
+
+    Both are pre-seeded with a version that differs from VERSION, so a test that
+    cares about drift has drift and one that does not still gets a working run.
+    """
+    import scripts.sync_version as module
+
+    monkeypatch.setattr(module, "VERSION", tmp_path / "VERSION")
+    monkeypatch.setattr(module, "PLUGIN", tmp_path / "plugin.json")
+    monkeypatch.setattr(module, "VERSION_PY", tmp_path / "version.py")
+    module.VERSION.write_bytes(b"1.2.3\n")
+    module.VERSION_PY.write_bytes(b'_BAKED = "0.0.1"\n')
+    module.PLUGIN.write_bytes(b'{\n  "name": "x",\n  "version": "0.0.1"\n}\n')
+    return module
+
+
 def test_launch_args_name_a_real_module_and_extra(manifest):
     server = manifest["mcpServers"]["rlm"]
     args = server["args"]
@@ -86,24 +110,67 @@ def test_runtime_version_tracks_the_file_without_a_reinstall(tmp_path, monkeypat
     assert v._read() == "9.9.9"
 
 
-def test_sync_version_detects_drift(tmp_path, monkeypatch):
-    import scripts.sync_version as sv
+def test_the_baked_version_matches_the_version_file():
+    """The literal a wheel reports, held to VERSION.
 
-    plugin = tmp_path / "plugin.json"
-    plugin.write_text('{\n  "name": "x",\n  "version": "0.0.1"\n}\n', encoding="utf-8")
-    ver = tmp_path / "VERSION"
-    ver.write_text("1.2.3\n", encoding="utf-8")
-    monkeypatch.setattr(sv, "PLUGIN", plugin)
-    monkeypatch.setattr(sv, "VERSION", ver)
+    It is the ONLY answer outside a checkout now: metadata described a .dist-info
+    directory rather than the running code, and an operator's site-packages held two
+    of them, so `better-rlm --version` reported 0.7.0 while executing 0.9.2's code.
+    A build whose literal has drifted fails here, which is before it can publish.
+    """
+    import better_rlm.version as v
 
+    assert v._BAKED == (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+
+
+def test_a_wheel_reports_the_baked_literal_and_asks_no_metadata(tmp_path, monkeypatch):
+    """site-packages has no pyproject.toml beside the package.
+
+    Also pins that nothing consults importlib.metadata: that lookup returns whichever
+    .dist-info sorts first, which is how a stale 0.7.0 directory outvoted the 0.9.2
+    one beside it. And a VERSION file in site-packages is somebody else's, so the
+    checkout probe -- not the file's existence -- decides whether to read it.
+    """
+    import importlib.metadata as md
+
+    import better_rlm.version as v
+
+    def explode(_name):                       # pragma: no cover - must never run
+        raise AssertionError("_read consulted importlib.metadata")
+
+    monkeypatch.setattr(md, "version", explode)
+    monkeypatch.setattr(v, "_ROOT", tmp_path)          # no pyproject.toml here
+    monkeypatch.setattr(v, "VERSION_FILE", tmp_path / "VERSION")
+    (tmp_path / "VERSION").write_text("6.6.6\n", encoding="utf-8")   # not ours: ignored
+
+    assert v._read() == v._BAKED
+
+
+def test_sync_version_detects_drift(sv):
     assert sv.main(["--check"]) == 1                       # drift reported
-    assert json.loads(plugin.read_text())["version"] == "0.0.1"   # --check changed nothing
+    assert json.loads(sv.PLUGIN.read_text())["version"] == "0.0.1"  # --check wrote nothing
+    assert '_BAKED = "0.0.1"' in sv.VERSION_PY.read_text()
     assert sv.main([]) == 0                                # and the fix applies it
-    assert json.loads(plugin.read_text())["version"] == "1.2.3"
+    assert json.loads(sv.PLUGIN.read_text())["version"] == "1.2.3"
+    assert '_BAKED = "1.2.3"' in sv.VERSION_PY.read_text()
     assert sv.main(["--check"]) == 0
 
 
-def test_sync_version_keeps_the_files_line_endings(tmp_path, monkeypatch):
+def test_sync_version_reports_drift_in_either_file_alone(sv):
+    """plugin.json already in sync and version.py not must still fail --check.
+
+    The two syncs share one exit status, so an early `return 0` taken because the
+    first file agreed would hide drift in the second -- which is a wrong version
+    number shipping while the check that exists to prevent it reports success.
+    """
+    sv.PLUGIN.write_bytes(b'{\n  "version": "1.2.3"\n}\n')   # this one is fine
+
+    assert sv.main(["--check"]) == 1
+    assert sv.main([]) == 0
+    assert '_BAKED = "1.2.3"' in sv.VERSION_PY.read_text()
+
+
+def test_sync_version_keeps_the_files_line_endings(sv):
     """A bump changes one token, not every line ending.
 
     plugin.json is tracked and .gitattributes pins this repo to ``eol=lf``. Path
@@ -113,22 +180,15 @@ def test_sync_version_keeps_the_files_line_endings(tmp_path, monkeypatch):
     "byte-for-byte otherwise" promise. Asserted on raw bytes, because read_text's
     universal-newline translation would hide the regression.
     """
-    import scripts.sync_version as sv
-
-    plugin = tmp_path / "plugin.json"
-    plugin.write_bytes(b'{\n  "name": "x",\n  "version": "0.0.1"\n}\n')
-    ver = tmp_path / "VERSION"
-    ver.write_bytes(b"1.2.3\n")
-    monkeypatch.setattr(sv, "PLUGIN", plugin)
-    monkeypatch.setattr(sv, "VERSION", ver)
-
     assert sv.main([]) == 0
-    raw = plugin.read_bytes()
+    raw = sv.PLUGIN.read_bytes()
     assert bytes([13]) not in raw, "line endings were rewritten as CRLF"
     assert json.loads(raw.decode("utf-8"))["version"] == "1.2.3"
+    # version.py is tracked and eol=lf too, and it is the file a release ships.
+    assert bytes([13]) not in sv.VERSION_PY.read_bytes()
 
 
-def test_sync_version_refuses_to_rewrite_a_nested_version_key(tmp_path, monkeypatch):
+def test_sync_version_refuses_to_rewrite_a_nested_version_key(sv):
     """count=1 hits the first match in the file, top-level or not.
 
     The old comment claimed the pattern was anchored to the top-level key; it was not.
@@ -136,20 +196,13 @@ def test_sync_version_refuses_to_rewrite_a_nested_version_key(tmp_path, monkeypa
     reading the real one, so --check would report drift forever. Now the result is
     re-parsed and the mismatch is loud.
     """
-    import scripts.sync_version as sv
-
-    plugin = tmp_path / "plugin.json"
-    plugin.write_bytes(
+    sv.PLUGIN.write_bytes(
         b'{\n  "mcpServers": {"rlm": {"version": "nested"}},\n'
         b'  "version": "0.0.1"\n}\n'
     )
-    ver = tmp_path / "VERSION"
-    ver.write_bytes(b"1.2.3\n")
-    monkeypatch.setattr(sv, "PLUGIN", plugin)
-    monkeypatch.setattr(sv, "VERSION", ver)
 
     assert sv.main([]) == 1, "rewriting the nested key must fail, not pass silently"
-    assert json.loads(plugin.read_text(encoding="utf-8"))["version"] == "0.0.1"
+    assert json.loads(sv.PLUGIN.read_text(encoding="utf-8"))["version"] == "0.0.1"
 
 
 def test_server_advertises_its_own_version_not_the_sdks():

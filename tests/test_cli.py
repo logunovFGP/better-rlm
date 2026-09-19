@@ -197,6 +197,59 @@ def test_a_second_copy_is_named_by_the_commands_that_report_identity(argv, capsy
     assert "do NOT run `pip uninstall`" in err
 
 
+def test_leftover_metadata_is_named_by_the_identity_commands(capsys):
+    """The failure that made a correct upgrade read as a failed one.
+
+    site-packages held `better_rlm-0.7.0.dist-info` beside `better_rlm-0.9.2.dist-info`;
+    importlib.metadata takes the first by directory order, so pip announced
+    "Successfully installed better-rlm-0.7.0" on the run that unpacked the 0.9.2 wheel.
+    The code was right and every number on screen was wrong.
+    """
+    stale = Path("/site-packages/better_rlm-0.7.0.dist-info")
+    with patch("better_rlm.mcpreg.stale_metadata", return_value=[stale]):
+        assert cli.main(["--version"]) == 0
+    err = capsys.readouterr().err.replace("\\", "/")
+    assert "better_rlm-0.7.0.dist-info" in err
+    # Naming it is not enough: the fix is deleting a directory, and an operator who
+    # reaches for `pip uninstall` instead removes the package that works.
+    assert "delete the" in err and "uninstall" not in err
+
+
+def test_a_checkout_is_never_accused_of_leftover_metadata(tmp_path, monkeypatch):
+    """An editable install's metadata legitimately lags VERSION -- version.py's own
+    docstring says so. Warning there would fire on every developer, every day.
+
+    The stale directory has to EXIST for this to mean anything: asserting [] against
+    a tree with no .dist-info at all passes whether the exemption is there or not,
+    which is how the first version of this test survived deleting the guard.
+    """
+    from better_rlm import mcpreg
+
+    (tmp_path / "better_rlm").mkdir()
+    (tmp_path / "better_rlm-0.7.0.dist-info").mkdir()
+    monkeypatch.setattr(mcpreg, "__file__", str(tmp_path / "better_rlm" / "mcpreg.py"))
+
+    monkeypatch.setattr(mcpreg, "IS_CHECKOUT", False)
+    assert mcpreg.stale_metadata(), "the fixture must be findable, or this proves nothing"
+    monkeypatch.setattr(mcpreg, "IS_CHECKOUT", True)
+    assert mcpreg.stale_metadata() == []
+
+
+def test_stale_metadata_is_the_dist_infos_that_are_not_this_version(tmp_path, monkeypatch):
+    from better_rlm import mcpreg, version
+
+    monkeypatch.setattr(mcpreg, "IS_CHECKOUT", False)
+    monkeypatch.setattr(mcpreg, "__file__", str(tmp_path / "better_rlm" / "mcpreg.py"))
+    (tmp_path / "better_rlm").mkdir()
+    (tmp_path / "better_rlm-0.7.0.dist-info").mkdir()
+    mine = tmp_path / f"better_rlm-{version.__version__}.dist-info"
+    mine.mkdir()
+
+    found = mcpreg.stale_metadata()
+    assert [d.name for d in found] == ["better_rlm-0.7.0.dist-info"]
+    assert mine not in found, "the install's own metadata is not leftover"
+
+
 def test_one_copy_warns_about_nothing(capsys):
     """The warning must not fire on an ordinary single install, or it becomes noise
     nobody reads on the day it matters."""

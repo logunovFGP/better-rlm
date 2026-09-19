@@ -204,45 +204,25 @@ def test_user_dir_is_the_existing_rlm_directory():
     assert str(cfgmod.USER_DIR).startswith(str(Path.home()))
 
 
-def test_the_wheel_fallback_names_the_distribution_that_is_installed():
-    """VERSION is not shipped inside the wheel, so a pip install ALWAYS takes the
-    metadata fallback -- and it asked for "rlm-mcp", the name from before the PyPI
-    repackage. Every wheel install therefore reported "0+unknown", measured on an
-    installed 0.6.1. Renaming the distribution again without fixing this line brings
-    the same silent drift back.
+def test_a_wheel_never_asks_metadata_for_its_own_version():
+    """The source property behind the runtime one, so the mechanism cannot return.
+
+    This test used to assert the OPPOSITE -- that the metadata lookup existed and
+    named the right distribution. Both readings pass on a machine with one
+    .dist-info, which is the only machine where that question has a single answer.
+    `importlib.metadata.version` returns whichever directory sorts first, and an
+    operator's site-packages held `better_rlm-0.7.0.dist-info` beside
+    `better_rlm-0.9.2.dist-info`: it answered 0.7.0 for code that was 0.9.2, and pip
+    printed the same wrong number on the run that unpacked the newer wheel.
     """
-    import re
+    import ast
 
     src = (ROOT / "better_rlm" / "version.py").read_text(encoding="utf-8")
-    # Anchored on the return, not the bare call: the module docstring quotes
-    # pkg_version("mcp") while explaining the original bug, and an unanchored
-    # search matches that instead -- passing or failing for the wrong reason.
-    asked = re.search(r'return pkg_version\("([^"]+)"\)', src)
-    assert asked, "the metadata fallback is gone; a wheel has no other source"
-    assert asked.group(1) == PYPROJECT["project"]["name"]
-
-
-def test_a_wheel_shaped_install_asks_metadata_for_the_right_distribution(monkeypatch, tmp_path):
-    """The runtime property, captured hermetically.
-
-    With no VERSION beside the package -- which is what site-packages looks like --
-    _read falls through to metadata. This asserts the NAME it asks for rather than
-    the value it gets back: the value version passed on a dev box that still had a
-    stale `rlm-mcp` 0.3.0 editable install lying around, so the wrong lookup
-    succeeded and the test went green for the wrong reason.
-    """
-    import importlib.metadata as md
-
-    from better_rlm import version as vmod
-
-    asked: list[str] = []
-
-    def fake_version(name):
-        asked.append(name)
-        return "9.9.9"
-
-    monkeypatch.setattr(vmod, "VERSION_FILE", tmp_path / "absent")
-    monkeypatch.setattr(md, "version", fake_version)
-
-    assert vmod._read() == "9.9.9"
-    assert asked == [PYPROJECT["project"]["name"]]
+    # Parsed, not grepped: the module explains the bug in prose, so a substring search
+    # matches its own docstring and fails for the wrong reason.
+    tree = ast.parse(src)
+    imported = {n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+    imported |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import)
+                 for a in n.names}
+    assert not [m for m in imported if m.startswith("importlib")], (
+        f"the stale-dist-info lookup is back: {sorted(imported)}")
