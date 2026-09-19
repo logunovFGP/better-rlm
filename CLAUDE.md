@@ -322,6 +322,58 @@ upgrade reads as a failed one.
 add` exiting 0 is not proof the entry landed as asked, and a quoting slip once
 registered `C:Python314Scripts...` with a zero exit.
 
+### One classifier, because a fix must reach both routes
+
+`failures.py` answers "what kind of failure is this?" for both transports. It was
+answered in four places -- string markers in `transport`, exception types in
+`ratelimit`, a fuller taxonomy in `probe`, an inline OR in `_note_if_limit` -- each
+extended on the route whose bug prompted it, so they disagreed. Measured:
+
+  * **403 fanned out.** `PermissionDeniedError` is not an `AuthenticationError`
+    subclass, so `is_fatal_auth` was False and an org without access to the endpoint
+    spent one doomed call per chunk on the API path while OAuth stopped after the first;
+  * **529 retried on OAuth only** -- `"overloaded"` is a CLI marker, and the SDK side had
+    no 5xx branch;
+  * **a bare `"429"` substring** decided whether a limit was recorded as evidence about
+    the account ceiling, so `5,429,000 tokens` raised a floor nobody hit.
+
+**Resolution order is the design**: duck-typed flags first (so a CLI error classifies
+without the SDK), then SDK exception types, then string markers. `tests/test_failures.py`
+expresses each condition twice -- as the SDK exception and as the CLI error -- and
+asserts the same ACTION. It asserts the same code only where both routes can know it:
+the CLI reports no status and raises one `CliRateLimitError` for 429 and 529 alike, so
+demanding one name there would demand a distinction its evidence does not carry.
+
+Two more fixes that had reached one route only:
+
+  * an SDK auth failure now carries `is_fatal_subcall`, the duck-typed contract
+    `rlm/utils/exceptions.py::aborts_batch` already honours, so the ENGINE's fan-out
+    aborts on a dead API key the way it always did for `CliAuthError`. Set on the
+    instance, never the SDK's class, which would leak to every other user of the library;
+  * `auth.patch_engine`'s shim returned `res.text` and dropped `res.truncated`, so an
+    `rlm_query` over MiniMax got silently empty chunk answers for a release after
+    `sub_query` stopped doing that. `transport.truncation_note` is shared by both.
+
+**Every model call is logged from `_LedgeredTransport`, not from a transport.** All four
+`log_event` calls used to sit inside `CliTransport`, so the SDK path produced no
+transport-level record at all -- which is why a truncation billing 4,096 output tokens
+for an empty answer could only be found by driving the tool by hand.
+
+### One atomic writer, one sweep claim
+
+`fsutil.atomic_write` serves all six writers; `secret=True` restricts the one that holds
+a key. Only `config_writer` and `envfile` had mkstemp + fsync + cleanup; `budget` (twice),
+`results` and `engine` used a predictable `<name>.<pid>.tmp` with none of it, and a
+failure left a temp nothing collects. `engine`'s had no pid at all and its path is
+derived from the question, so two processes resuming the same query shared one temp.
+
+`fsutil.claim_sweep` holds the `.sweep` cooldown `logsetup` and `results` each copied.
+**The sweep CAPS deliberately stay with their callers** -- the three genuinely disagree
+(a file-count cap only the log sweep wants, no age cap on the cache by design, one byte
+budget across two globs in the store), and a parameter list expressing all three would be
+a worse abstraction than three loops. `budget._prune` is not a file sweeper at all and is
+left alone.
+
 ### A missing sandbox is a routing instruction, not an error
 
 Only `rlm_exec` and `rlm_query` need the Docker REPL; the other thirteen tools do

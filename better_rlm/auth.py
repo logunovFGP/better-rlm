@@ -205,7 +205,7 @@ def patch_engine() -> None:
     if getattr(ant_mod, "_rlmmcp_patched", False):
         return
     from .ratelimit import aretry_and_queue_retries, retry_and_queue_retries
-    from .transport import get_transport, split_prompt
+    from .transport import get_transport, split_prompt, truncation_note
 
     base = ant_mod.AnthropicClient
 
@@ -235,19 +235,31 @@ def patch_engine() -> None:
             self.last_prompt_tokens = input_tokens
             self.last_completion_tokens = output_tokens
 
+        def _text(self, res):
+            """The answer, plus a marker when the model ran out of room mid-thought.
+
+            This was a bare ``res.text``. A reasoning model emits its thinking first and
+            bills it as output, so a call that hits the cap returns no text block at all
+            -- and the engine received "" as if the chunk had held nothing. ``sub_query``
+            had been reporting that for a release already; this path had not, which is
+            one fix reaching one of two routes.
+            """
+            self._record(res.model, res.input_tokens, res.output_tokens)
+            if not getattr(res, "truncated", False):
+                return res.text
+            return res.text + truncation_note(res.text, self.max_tokens)
+
         @retry_and_queue_retries
         def completion(self, prompt, model=None):
             messages, system, model = self._resolve(prompt, model)
-            res = self._transport.complete(messages, system, model, self.max_tokens)
-            self._record(res.model, res.input_tokens, res.output_tokens)
-            return res.text
+            return self._text(
+                self._transport.complete(messages, system, model, self.max_tokens))
 
         @aretry_and_queue_retries
         async def acompletion(self, prompt, model=None):
             messages, system, model = self._resolve(prompt, model)
-            res = await self._transport.acomplete(messages, system, model, self.max_tokens)
-            self._record(res.model, res.input_tokens, res.output_tokens)
-            return res.text
+            return self._text(
+                await self._transport.acomplete(messages, system, model, self.max_tokens))
 
     ant_mod.AnthropicClient = _ClaudeCodeAnthropicClient
     ant_mod._rlmmcp_patched = True

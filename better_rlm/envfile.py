@@ -6,7 +6,7 @@ from the prompt to the file and nowhere else, and the only things reported about
 are its length and a short hash.
 
 Deliberately not YAML: ``.env`` is read by python-dotenv, holds secrets, and must stay
-owner-only -- 0600 on POSIX, a single-ACE ACL on Windows, both through ``_harden``.
+owner-only -- 0600 on POSIX, a single-ACE ACL on Windows, both via ``fsutil.harden``.
 ``config_writer`` owns config.yaml and has different rules -- its file is meant to be
 diffed and committed, this one must never be.
 """
@@ -14,46 +14,12 @@ diffed and committed, this one must never be.
 from __future__ import annotations
 
 import hashlib
-import os
-import subprocess
-import tempfile
 from pathlib import Path
 
-_MODE = 0o600
+from . import fsutil
 
-
-def _harden(path: Path) -> None:
-    """Restrict ``path`` to its owner, on either platform.
-
-    On Windows ``os.chmod`` is not merely a weaker control, it is close to no control
-    at all: it toggles the read-only bit and nothing else, so a ``.env`` holding an
-    API key keeps whatever ACL it inherited from its directory while this module's
-    docstring promises 0600. Measured on a freshly created file here: six inherited
-    ACEs, one of them a local group holding Modify.
-
-    ``icacls`` is the platform equivalent -- drop inheritance, grant the current user
-    alone -- and after it the same file carries exactly one ACE. It has shipped with
-    Windows since Vista.
-
-    Failure raises, and that is deliberate. The POSIX ``os.chmod`` this replaces
-    raised too, and a credential written to a file we could not protect is precisely
-    the thing a caller must not be left believing succeeded.
-    """
-    if os.name != "nt":
-        os.chmod(path, _MODE)
-        return
-    user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
-    if not user:
-        raise OSError(f"cannot restrict {path}: no USERNAME in the environment")
-    proc = subprocess.run(
-        ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
-        capture_output=True, text=True, timeout=30,
-    )
-    if proc.returncode != 0:
-        raise OSError(
-            f"cannot restrict {path} to {user}: icacls exited {proc.returncode}: "
-            f"{(proc.stderr or proc.stdout).strip()[:200]}"
-        )
+# Owner-only mode and the platform-correct way to apply it both live in fsutil now:
+# envfile, config_writer and four other writers were each doing their own version.
 
 
 def fingerprint(value: str) -> str:
@@ -80,21 +46,10 @@ def set_var(path: Path, key: str, value: str) -> str:
     kept = [ln for ln in body.splitlines() if not ln.startswith(f"{key}=")]
     new_body = "\n".join(kept + [f"{key}={value}"]) + "\n"
 
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(new_body)
-            fh.flush()
-            os.fsync(fh.fileno())
-        _harden(Path(tmp))
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    _harden(path)
+    fsutil.atomic_write(path, new_body, secret=True)
+    # And on the FINAL file, every write: an operator who once made it group-readable
+    # should not keep that after a key is written into it.
+    fsutil.harden(path)
     return fingerprint(value)
 
 

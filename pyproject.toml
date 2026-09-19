@@ -25,19 +25,20 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  # The RLM engine is vendored at ./rlm (see rlm/UPSTREAM.md) — no longer a
-  # dependency. These are the deps it used to pull in transitively, restated so
-  # the vendored copy still resolves. Backends other than anthropic are imported
-  # lazily in rlm/clients/__init__.py. They stay declared because the vendored engine
-  # still SHIPS those client modules (rlm/clients/azure_openai.py imports openai at
-  # module scope), and rlm/UPSTREAM.md keeps it usable standalone -- NOT because this
-  # server accepts those providers: auth.require_anthropic refuses every one of them,
-  # and config.yaml says so on its provider line. Do not prune these on the strength
-  # of that guard; the engine, not the config surface, is what needs them.
+  # The RLM engine is vendored at ./rlm (see rlm/UPSTREAM.md) -- no longer a
+  # dependency. These are the deps it pulled in transitively, restated so the
+  # vendored copy resolves.
+  #
+  # The three non-anthropic BACKENDS moved to the `engine-backends` extra below.
+  # An earlier comment here said not to prune them, on the grounds that the
+  # vendored engine stays usable standalone. What that reasoning missed is that
+  # nothing on any reachable path imports them: rlm/clients/__init__.py imports
+  # each backend INSIDE its own branch, rlm/core/types.py names them only as
+  # string literals in a Literal type, and auth.require_anthropic refuses every
+  # provider that would select one. Measured: importing better_rlm.server loads
+  # none of openai, google or portkey_ai. They cost ~21 MB on every install to
+  # support a code path this server will not enter.
   "anthropic>=0.75.0",
-  "google-genai>=1.56.0",
-  "openai>=2.14.0",
-  "portkey-ai>=2.1.0",
   "requests>=2.32.5",
   "rich>=13.0.0",
   "mcp==1.28.1",
@@ -59,6 +60,10 @@ better-rlm = "better_rlm.cli:main"
 
 [project.optional-dependencies]
 pdf = ["pypdf>=4.0"]
+# The vendored engine's other backends. Not needed to RUN this server -- see the
+# dependencies note above -- but installing them keeps ./rlm usable standalone,
+# which is what rlm/UPSTREAM.md's merge recipe assumes.
+engine-backends = ["google-genai>=1.56.0", "openai>=2.14.0", "portkey-ai>=2.1.0"]
 dev = ["pytest>=8.0"]
 
 [tool.setuptools.dynamic]

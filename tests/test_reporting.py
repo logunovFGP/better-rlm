@@ -127,8 +127,8 @@ def test_the_truncation_note_reaches_the_caller(answer, expect_empty_wording):
 
     note = batch._cut_note(SubResult(0, answer, 10, 4096, truncated=True))
     assert "TRUNCATED at max_tokens" in note
-    assert ("used the whole output budget on reasoning" in note) is expect_empty_wording
-    assert str(batch.SUB_MAX_TOKENS) in note.replace(",", ""), "name the knob to raise"
+    assert ("spent the whole output budget on reasoning" in note) is expect_empty_wording
+    assert str(batch.SUB_MAX_TOKENS) in note.replace(",", ""), "name the cap that was hit"
     assert batch._cut_note(SubResult(0, answer, 10, 20)) == "", "silent when complete"
 
 

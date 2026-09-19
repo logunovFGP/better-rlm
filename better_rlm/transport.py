@@ -25,6 +25,7 @@ role-delimited transcript fed over stdin (argv has length limits).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -34,16 +35,11 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from . import budget
+from . import budget, failures
 from .config import Config, estimate_tokens
 from .logsetup import log_event
 
 _LOG = logging.getLogger("rlm-mcp")
-
-_RATE_LIMIT_MARKERS = (
-    "rate limit", "rate_limit", "429", "overloaded", "usage limit",
-    "too many requests", "please run /upgrade", "quota",
-)
 
 
 @dataclass(frozen=True)
@@ -62,6 +58,20 @@ class CompletionResult:
     #: a cheerful header with a token receipt attached. A paid call that produced
     #: nothing must not look like one that had nothing to say.
     truncated: bool = False
+
+
+def truncation_note(text: str, cap: int) -> str:
+    """What to append to a truncated answer, or "" when it is whole.
+
+    Here rather than in a caller because BOTH consumers of a CompletionResult need it and
+    only one had it: ``batch.one`` reported truncation while ``auth.patch_engine``'s
+    engine shim returned ``res.text`` and dropped the flag, so an ``rlm_query`` over a
+    MiniMax endpoint got silently empty chunk answers long after the sub-query stopped.
+    """
+    if not text.strip():
+        return (f"[TRUNCATED at max_tokens ({cap:,}) with no answer emitted -- the model "
+                "spent the whole output budget on reasoning. Use a smaller chunk.]")
+    return f"\n\n[TRUNCATED at max_tokens ({cap:,}) -- the answer above is incomplete.]"
 
 
 class CliCompletionError(RuntimeError):
@@ -148,29 +158,6 @@ def flatten_messages(messages: list[dict]) -> str:
         parts.append("")
     parts.append("## ASSISTANT")
     return "\n".join(parts)
-
-
-def _looks_rate_limited(text: str | None) -> bool:
-    low = (text or "").lower()
-    return any(marker in low for marker in _RATE_LIMIT_MARKERS)
-
-
-# ponytail: substring match on the CLI's own message — the only signal it gives.
-# If these ever stop matching we degrade to the previous behaviour (one doomed
-# call per chunk), never to something worse, so this stays best-effort by design.
-_AUTH_FAIL_MARKERS = (
-    "failed to authenticate",
-    "oauth session expired",
-    "oauth token has expired",
-    "invalid api key",
-    "authentication_error",
-    "please run /login",
-)
-
-
-def _looks_auth_failed(text: str | None) -> bool:
-    low = (text or "").lower()
-    return any(marker in low for marker in _AUTH_FAIL_MARKERS)
 
 
 #: What to actually DO about a dead CLI login. Static text, so building it costs
@@ -315,26 +302,60 @@ def _result_from_sdk_response(resp, model: str) -> CompletionResult:
     )
 
 
+@contextlib.contextmanager
+def _tag_fatal_auth():
+    """Mark an SDK auth failure with the attribute the engine's fan-out honours.
+
+    ``rlm.utils.exceptions.aborts_batch`` is duck-typed on ``is_fatal_subcall`` alone --
+    correct layering, since the engine must not import a backend to know a call is
+    hopeless. But the SDK's ``AuthenticationError`` carries no such attribute, so the
+    contract only ever worked for the CLI path, whose ``CliAuthError`` sets it.
+
+    Measured before this: ``aborts_batch(anthropic.AuthenticationError) is False`` while
+    ``aborts_batch(CliAuthError) is True``. A dead API key therefore stopped OUR batch
+    (subquery checks the exception type too) and not the engine's, so an ``rlm_query``
+    fan-out issued one doomed call per prompt -- exactly what the attribute exists to
+    prevent, on the one path that never got it.
+
+    Set on the instance rather than the class: it says something about this failure
+    reaching this caller, and mutating the SDK's class would leak into every other user
+    of the library in the process.
+    """
+    try:
+        yield
+    except Exception as exc:
+        if failures.is_auth_dead(exc):
+            exc.is_fatal_subcall = True
+        raise
+
+
 class ApiTransport(CompletionTransport):
     """API-key auth: call the Anthropic SDK directly. Clients are built lazily so
     constructing this transport never requires credentials."""
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self._client = None
-        self._aclient = None
+        self._clients: dict[bool, object | None] = {False: None, True: None}
 
-    def _sync_client(self):
-        if self._client is None:
+    def _client(self, async_: bool):
+        """The SDK client for one of the two shapes, built on first use.
+
+        Lazily, so constructing this transport never requires a credential -- and once,
+        because an Anthropic client owns a connection pool worth reusing.
+        """
+        if self._clients.get(async_) is None:
             from .auth import make_client
-            self._client = make_client(async_=False, base_url=self.cfg.base_url, cfg=self.cfg)
-        return self._client
+            self._clients[async_] = make_client(
+                async_=async_, base_url=self.cfg.base_url, cfg=self.cfg)
+        return self._clients[async_]
+
+    # Kept as named methods: tests and the two call sites read better for it, and both
+    # are one line over the dict above rather than a second copy of the lazy init.
+    def _sync_client(self):
+        return self._client(False)
 
     def _async_client(self):
-        if self._aclient is None:
-            from .auth import make_client
-            self._aclient = make_client(async_=True, base_url=self.cfg.base_url, cfg=self.cfg)
-        return self._aclient
+        return self._client(True)
 
     @staticmethod
     def _kwargs(messages, system, model, max_tokens) -> dict:
@@ -344,13 +365,15 @@ class ApiTransport(CompletionTransport):
         return kwargs
 
     def complete(self, messages, system, model, max_tokens) -> CompletionResult:
-        resp = self._sync_client().messages.create(
-            **self._kwargs(messages, system, model, max_tokens))
+        with _tag_fatal_auth():
+            resp = self._sync_client().messages.create(
+                **self._kwargs(messages, system, model, max_tokens))
         return _result_from_sdk_response(resp, model)
 
     async def acomplete(self, messages, system, model, max_tokens) -> CompletionResult:
-        resp = await self._async_client().messages.create(
-            **self._kwargs(messages, system, model, max_tokens))
+        with _tag_fatal_auth():
+            resp = await self._async_client().messages.create(
+                **self._kwargs(messages, system, model, max_tokens))
         return _result_from_sdk_response(resp, model)
 
 
@@ -429,30 +452,44 @@ class CliTransport(CompletionTransport):
         system_text = _content_to_text(system) if system else None
         return self._argv(model, system_text), flatten_messages(messages)
 
+    def _timeout(self, model: str, start: float, exc: BaseException) -> CliCompletionError:
+        """Both halves time out the same way; only the exception they catch differs."""
+        log_event(_LOG, "cli_spawn", model=model,
+                  dur_ms=round((time.monotonic() - start) * 1000),
+                  outcome="timeout", limit_s=self.cfg.cli_timeout_s)
+        return CliCompletionError(
+            f"claude CLI timed out after {self.cfg.cli_timeout_s}s")
+
+    def _finish(self, model: str, start: float, rc: int, out: str,
+                err: str) -> CompletionResult:
+        """Record the spawn and parse it. Identical on both halves, so it lives once."""
+        log_event(_LOG, "cli_spawn", model=model,
+                  dur_ms=round((time.monotonic() - start) * 1000), exit=rc,
+                  err=_spawn_err(err, out) if rc != 0 else None)
+        return _parse_cli_output(rc, out, err, model)
+
     def complete(self, messages, system, model, max_tokens) -> CompletionResult:
         argv, prompt = self._prepare(messages, system, model)
         start = time.monotonic()
         try:
+            # subprocess.run bundles spawn, stdin, wait, timeout and decode into one
+            # call, and kills+reaps the child itself on timeout.
             proc = subprocess.run(
                 argv, input=prompt, capture_output=True, text=True,
                 cwd=self._neutral_cwd(), env=self._subprocess_env(),
                 timeout=self.cfg.cli_timeout_s,
             )
         except subprocess.TimeoutExpired as exc:
-            log_event(_LOG, "cli_spawn", model=model,
-                      dur_ms=round((time.monotonic() - start) * 1000),
-                      outcome="timeout", limit_s=self.cfg.cli_timeout_s)
-            raise CliCompletionError(
-                f"claude CLI timed out after {self.cfg.cli_timeout_s}s") from exc
-        rc = proc.returncode
-        log_event(_LOG, "cli_spawn", model=model,
-                  dur_ms=round((time.monotonic() - start) * 1000), exit=rc,
-                  err=_spawn_err(proc.stderr, proc.stdout) if rc != 0 else None)
-        return _parse_cli_output(rc, proc.stdout, proc.stderr, model)
+            raise self._timeout(model, start, exc) from exc
+        return self._finish(model, start, proc.returncode, proc.stdout, proc.stderr)
 
     async def acomplete(self, messages, system, model, max_tokens) -> CompletionResult:
         argv, prompt = self._prepare(messages, system, model)
         start = time.monotonic()
+        # Four things genuinely differ from the sync half: the pipes must be named
+        # (asyncio inherits them otherwise), the wait is separate from the spawn, the
+        # child survives a cancelled wait so it needs killing, and there is no text=
+        # so the streams are decoded by hand.
         proc = await asyncio.create_subprocess_exec(
             *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, cwd=self._neutral_cwd(),
@@ -463,18 +500,32 @@ class CliTransport(CompletionTransport):
                 proc.communicate(prompt.encode()), timeout=self.cfg.cli_timeout_s)
         except asyncio.TimeoutError as exc:
             proc.kill()
-            log_event(_LOG, "cli_spawn", model=model,
-                      dur_ms=round((time.monotonic() - start) * 1000),
-                      outcome="timeout", limit_s=self.cfg.cli_timeout_s)
-            raise CliCompletionError(
-                f"claude CLI timed out after {self.cfg.cli_timeout_s}s") from exc
-        rc = proc.returncode
-        out_s = out.decode(errors="replace")
-        err_s = err.decode(errors="replace")
-        log_event(_LOG, "cli_spawn", model=model,
-                  dur_ms=round((time.monotonic() - start) * 1000), exit=rc,
-                  err=_spawn_err(err_s, out_s) if rc != 0 else None)
-        return _parse_cli_output(rc, out_s, err_s, model)
+            raise self._timeout(model, start, exc) from exc
+        return self._finish(model, start, proc.returncode,
+                            out.decode(errors="replace"), err.decode(errors="replace"))
+
+
+def _raise_cli_failure(msg: str, fallback: str, *, reported: str = "") -> None:
+    """Turn the CLI's own message into the right exception type.
+
+    The classification is ``failures.classify`` -- the same call the SDK path makes,
+    reaching the same answer from the only evidence this path has, the CLI's text.
+
+    ``reported`` is what the operator sees when it should differ from what was
+    classified: the error envelope carries the limit in ``subtype`` often enough to be
+    worth reading, but quoting that back adds noise to the message.
+
+    Rate limit is still tested before auth, unchanged: a message matching both markers
+    stays retryable. Reversing it would abort a whole fan-out on a transient limit that
+    merely mentioned logging in, which is the worse failure of the two.
+    """
+    shown = reported or msg
+    code = failures.classify(RuntimeError(msg))
+    if code in (failures.CODE_RATE_LIMITED, failures.CODE_SERVER_ERROR):
+        raise CliRateLimitError(f"claude CLI rate limited: {shown}")
+    if code == failures.CODE_KEY_REJECTED:
+        raise CliAuthError(f"claude CLI auth failed: {shown}\n{AUTH_REMEDIATION}")
+    raise CliCompletionError(fallback)
 
 
 def _parse_cli_output(returncode: int, stdout: str, stderr: str,
@@ -494,21 +545,16 @@ def _parse_cli_output(returncode: int, stdout: str, stderr: str,
 
     if not isinstance(data, dict):
         msg = (stderr or stdout or "no output").strip()[:500]
-        if _looks_rate_limited(msg):
-            raise CliRateLimitError(f"claude CLI rate limited: {msg}")
-        if _looks_auth_failed(msg):
-            raise CliAuthError(f"claude CLI auth failed: {msg}\n{AUTH_REMEDIATION}")
-        raise CliCompletionError(f"claude CLI failed (exit {returncode}): {msg}")
+        _raise_cli_failure(msg, f"claude CLI failed (exit {returncode}): {msg}")
 
     is_error = bool(data.get("is_error")) or data.get("subtype") not in (None, "success")
     if is_error:
         msg = str(data.get("result") or data.get("error") or stderr or "error").strip()[:500]
-        if _looks_rate_limited(msg) or _looks_rate_limited(str(data.get("subtype"))):
-            raise CliRateLimitError(f"claude CLI rate limited: {msg}")
-        if _looks_auth_failed(msg):
-            raise CliAuthError(f"claude CLI auth failed: {msg}\n{AUTH_REMEDIATION}")
-        raise CliCompletionError(
-            f"claude CLI error (subtype={data.get('subtype')}): {msg}")
+        # The subtype rides along for classification only: a limit sometimes arrives
+        # there with a generic `result` beside it. The reported message stays `msg`.
+        _raise_cli_failure(f"{msg} {data.get('subtype') or ''}".strip(),
+                           f"claude CLI error (subtype={data.get('subtype')}): {msg}",
+                           reported=msg)
 
     usage = data.get("usage") or {}
     # The CLI also reports total_cost_usd. Deliberately dropped: on a subscription it
@@ -578,40 +624,59 @@ class _LedgeredTransport(CompletionTransport):
                 + budget.input_overhead(self._cfg)
                 + budget.expected_output(self._cfg, max_tokens))
 
-    def complete(self, messages, system, model, max_tokens) -> CompletionResult:
-        est_in = self._est_in(messages, system)
-        # The hard floor, for EVERY caller. The batch's Gate stops politely one layer
-        # up; this is what stops rlm_query's recursive fan-out, which had nothing. It
-        # raises BEFORE the call, so a refused call costs zero tokens.
+    def _before(self, messages, system, max_tokens) -> tuple[int, float]:
+        """The floor, for EVERY caller. Raises BEFORE the call, so a refused one costs
+        nothing. The batch's Gate stops politely one layer up; this is what stops
+        rlm_query's recursive fan-out, which had nothing."""
         budget.check_or_raise(self._cfg, self._reserve(messages, system, max_tokens))
+        return self._est_in(messages, system), time.monotonic()
+
+    def _after(self, res, model, est_in, start, mode) -> CompletionResult:
+        """Ledger the spend, then record the call. Both transports, one shape.
+
+        The transport's own input total when it has one (cache included -- see
+        _total_input), the estimate otherwise. max() needs no knowledge of which
+        transport is in play and can only move the recorded figure UP, toward the truth;
+        est_in rides along so input_overhead can learn the gap between them.
+
+        THE LOG RECORD IS THE POINT OF PUTTING THIS HERE. Every log_event in this module
+        used to sit inside CliTransport, so the SDK path produced no transport-level
+        record at all -- no call, no duration, no outcome. That is why a MiniMax
+        truncation that billed 4,096 output tokens for an empty answer could only be
+        found by driving the tool by hand. Emitted from the wrapper both transports pass
+        through, it is written once and cannot drift between them.
+        """
+        budget.record(self._cfg, res.model or model,
+                      max(est_in, res.input_tokens), res.output_tokens, est=est_in)
+        log_event(_LOG, "model_call", model=res.model or model, mode=mode,
+                  dur_ms=round((time.monotonic() - start) * 1000),
+                  in_tok=res.input_tokens, out_tok=res.output_tokens,
+                  truncated=res.truncated or None)
+        return res
+
+    def _failed(self, exc, model, start, mode) -> None:
+        self._note_if_limit(exc)
+        log_event(_LOG, "model_call", model=model, mode=mode,
+                  dur_ms=round((time.monotonic() - start) * 1000),
+                  outcome=failures.classify(exc))
+
+    def complete(self, messages, system, model, max_tokens) -> CompletionResult:
+        est_in, start = self._before(messages, system, max_tokens)
         try:
             res = self._inner.complete(messages, system, model, max_tokens)
         except Exception as exc:
-            self._note_if_limit(exc)
+            self._failed(exc, model, start, "sync")
             raise
-        # The transport's total when it has one (cache included -- see _total_input),
-        # the estimate otherwise. max() needs no knowledge of which transport is in
-        # play and can only ever move the recorded figure UP, toward the truth; est_in
-        # rides along so input_overhead can learn the gap between them.
-        budget.record(self._cfg, res.model or model,
-                      max(est_in, res.input_tokens), res.output_tokens, est=est_in)
-        return res
+        return self._after(res, model, est_in, start, "sync")
 
     async def acomplete(self, messages, system, model, max_tokens) -> CompletionResult:
-        est_in = self._est_in(messages, system)
-        budget.check_or_raise(self._cfg, self._reserve(messages, system, max_tokens))
+        est_in, start = self._before(messages, system, max_tokens)
         try:
             res = await self._inner.acomplete(messages, system, model, max_tokens)
         except Exception as exc:
-            self._note_if_limit(exc)
+            self._failed(exc, model, start, "async")
             raise
-        # The transport's total when it has one (cache included -- see _total_input),
-        # the estimate otherwise. max() needs no knowledge of which transport is in
-        # play and can only ever move the recorded figure UP, toward the truth; est_in
-        # rides along so input_overhead can learn the gap between them.
-        budget.record(self._cfg, res.model or model,
-                      max(est_in, res.input_tokens), res.output_tokens, est=est_in)
-        return res
+        return self._after(res, model, est_in, start, "async")
 
     def _note_if_limit(self, exc: BaseException) -> None:
         """Record a rate/usage limit as EVIDENCE about the account's real ceiling.
@@ -630,7 +695,7 @@ class _LedgeredTransport(CompletionTransport):
         module global, which is exactly what wrote test spend into the operator's real
         budget state. This wrapper already holds the cfg whose ledger is being measured.
         """
-        if _looks_rate_limited(str(exc)) or getattr(exc, "is_rate_limit", False)                 or getattr(exc, "status_code", None) == 429:
+        if failures.is_rate_limit(exc):
             budget.note_limit_hit(self._cfg)
 
 

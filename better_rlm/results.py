@@ -45,6 +45,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import fsutil
 from .config import Clock, Config
 
 _LOCK = threading.Lock()
@@ -124,10 +125,7 @@ def cache_put(cfg: Config, key: str, saved: Saved, *, now: Clock = time.time) ->
     rec = {"answer": saved.answer, "itok": saved.itok, "otok": saved.otok,
            "model": saved.model, "ts": now()}
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(rec), encoding="utf-8")
-        os.replace(tmp, p)
+        fsutil.atomic_write(p, json.dumps(rec))
     except OSError:
         pass
 
@@ -145,36 +143,6 @@ def cache_delete(cfg: Config, key: str) -> bool:
 # --------------------------------------------------------------------------- #
 # LRU byte-cap sweep
 # --------------------------------------------------------------------------- #
-def _claim_sweep(root: Path, cooldown_s: float, t: float) -> bool:
-    """True if this process should sweep ``root`` now, having claimed the window.
-
-    Claude Code runs many server processes (a pool of pre-warmed spares), so a full
-    directory walk on every start is real cost, and the ``.sweep`` sentinel makes only one
-    of them do it per ``cooldown_s``. Advisory, not a lock — correctness never depends on
-    it, and the worst case of losing the race is a walk that finds nothing to do.
-
-    Split out of ``sweep`` when the store's own artifacts became a third caller, which is
-    the condition the note here used to name. Only the sentinel dance is shared; the caps
-    are not, because the three callers genuinely disagree about them —
-    ``logsetup._run_retention_sweep`` keeps its own copy rather than grow an ``own_path``
-    and a file-count cap that nothing else wants.
-    """
-    if not root.exists():
-        return False
-    sentinel = root / ".sweep"
-    with contextlib.suppress(FileNotFoundError):
-        if t - sentinel.stat().st_mtime < cooldown_s:
-            return False
-    tmp = root / f".sweep.{os.getpid()}.tmp"
-    try:
-        tmp.write_text(str(t), encoding="utf-8")
-        os.replace(tmp, sentinel)
-    except OSError:
-        with contextlib.suppress(OSError):
-            tmp.unlink(missing_ok=True)
-    return True
-
-
 def _prune(root: Path, *patterns: str, t: float, max_bytes: int,
            max_age_s: float = 0.0) -> None:
     """Delete matches of ``patterns`` past ``max_age_s``, then past ``max_bytes``, newest
@@ -221,7 +189,7 @@ def sweep(cfg: Config, *, now: Clock = time.time) -> None:
     first. No age cap: see ``_prune``."""
     try:
         t = now()
-        if _claim_sweep(cfg.cache_dir, cfg.cache_sweep_cooldown_s, t):
+        if fsutil.claim_sweep(cfg.cache_dir, cfg.cache_sweep_cooldown_s, t):
             _prune(cfg.cache_dir, "*/*.json", t=t, max_bytes=cfg.cache_max_bytes)
     except Exception:  # noqa: BLE001 - a cache sweep must never take down the server
         pass
@@ -246,7 +214,7 @@ def sweep_store(cfg: Config, *, now: Clock = time.time) -> None:
     """
     try:
         t = now()
-        if not _claim_sweep(cfg.store_dir, cfg.cache_sweep_cooldown_s, t):
+        if not fsutil.claim_sweep(cfg.store_dir, cfg.cache_sweep_cooldown_s, t):
             return
         _prune(cfg.store_dir, "*/results/*.jsonl", "*/query/*",
                t=t, max_bytes=cfg.results_max_bytes,

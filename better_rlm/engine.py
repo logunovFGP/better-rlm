@@ -45,10 +45,11 @@ if not hasattr(_dr_probe, "RLM_RESULT_SENTINEL"):
         "Remove it:  uv pip uninstall rlms   (or: pip uninstall rlms)"
     )
 
+from . import fsutil
 from .auth import patch_engine
-from .sandbox_reap import reap_stale_sandboxes
 from .config import Config
 from .logsetup import log_event
+from .sandbox_reap import reap_stale_sandboxes
 from rlm.utils.prompts import RLM_SYSTEM_PROMPT
 
 _LOG = logging.getLogger("rlm-mcp")
@@ -196,14 +197,15 @@ def _save_checkpoint(checkpoint: Path, exc: BaseException, *, question: str,
               "history": history, "next_iteration": int(getattr(exc, "next_iteration", 0)),
               "partial_answer": str(getattr(exc, "partial_answer", "") or ""),
               "stopped_on": type(exc).__name__}
-        tmp = checkpoint.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(ck), encoding="utf-8")
-        tmp.replace(checkpoint)
+        # fsutil, not a temp named after the target: this path is derived from the
+        # question, so two processes resuming the same query shared one `.json.tmp` --
+        # the name carried no pid, unlike the other writers of this shape. mkstemp
+        # removes the collision by construction, and brings the fsync this file wants
+        # most: a checkpoint exists precisely to survive the process that wrote it.
+        fsutil.atomic_write(checkpoint, json.dumps(ck))
         blob = getattr(exc, "state_dill", None)
         if blob:
-            stmp = _state_path(checkpoint).with_suffix(".dill.tmp")
-            stmp.write_bytes(blob)
-            stmp.replace(_state_path(checkpoint))
+            fsutil.atomic_write(_state_path(checkpoint), blob)
         return True
     except OSError:
         return False

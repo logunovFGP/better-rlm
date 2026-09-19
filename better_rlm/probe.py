@@ -15,6 +15,7 @@ from __future__ import annotations
 import shutil
 from dataclasses import dataclass
 
+from . import failures
 from .transport import AUTH_REMEDIATION, cli_auth_status
 
 # --------------------------------------------------------------------------- #
@@ -32,19 +33,22 @@ from .transport import AUTH_REMEDIATION, cli_auth_status
 # deviation twice, because the credential form has no validation (faithful to
 # cline) and something has to catch a bad key before the model screens.
 
-PROBE_OK = "ok"
-PROBE_RATE_LIMITED = "rate_limited"
-PROBE_KEY_REJECTED = "key_rejected"
-PROBE_URL_WRONG = "url_wrong"
-PROBE_MODEL_UNKNOWN = "model_unknown"
-PROBE_BAD_REQUEST = "bad_request"
-PROBE_NETWORK_DOWN = "network_down"
-PROBE_SERVER_ERROR = "server_error"
-PROBE_NO_CREDENTIAL = "no_credential"
+# The shared vocabulary, re-exported under the names the wizard and the TUI already
+# import. One spelling of "key_rejected" for the probe panel, the retry decision and the
+# fan-out abort -- see failures.py for what they used to disagree about.
+PROBE_OK = failures.CODE_OK
+PROBE_RATE_LIMITED = failures.CODE_RATE_LIMITED
+PROBE_KEY_REJECTED = failures.CODE_KEY_REJECTED
+PROBE_URL_WRONG = failures.CODE_URL_WRONG
+PROBE_MODEL_UNKNOWN = failures.CODE_MODEL_UNKNOWN
+PROBE_BAD_REQUEST = failures.CODE_BAD_REQUEST
+PROBE_NETWORK_DOWN = failures.CODE_NETWORK_DOWN
+PROBE_SERVER_ERROR = failures.CODE_SERVER_ERROR
+PROBE_NO_CREDENTIAL = failures.CODE_NO_CREDENTIAL
 PROBE_CLI_MISSING = "cli_missing"
 PROBE_CLI_LOGGED_OUT = "cli_logged_out"
 PROBE_CLI_UNKNOWN = "cli_unknown"
-PROBE_UNEXPECTED = "unexpected"
+PROBE_UNEXPECTED = failures.CODE_UNEXPECTED
 
 #: Codes meaning the credential and the endpoint are both fine. A rate limit is a
 #: pass: the endpoint had to accept the credential in order to throttle it.
@@ -118,62 +122,51 @@ def _probe_cli(cfg) -> ProbeResult:
 
 
 def _classify(exc: Exception, model: str, where: str, key: str) -> ProbeResult:
-    """Map one SDK exception onto the taxonomy.
+    """Turn one SDK exception into a ProbeResult: shared code, local prose.
 
-    Disjoint exception branches, not string sniffing -- except in the one place the
-    protocol genuinely needs it: a 404 means either "nothing here speaks this
-    protocol" or "this endpoint does not serve that model", and only the body tells
-    them apart.
+    The code comes from failures.classify -- disjoint exception branches, not string
+    sniffing, except in the one place the protocol needs it: a 404 means either
+    "nothing here speaks this protocol" or "this endpoint does not serve that model",
+    and only the body tells them apart, which is why ``model`` is passed through.
+
+    What stays here is the fix text. A taxonomy answers "what happened"; this module
+    exists to answer "what do I do now", on a screen an operator is looking at.
     """
     import anthropic
 
     detail = _scrub(str(exc), key)
-    names_model = bool(model) and model.lower() in detail.lower()
+    code = failures.classify(exc, model=model)
 
+    # What to DO about it -- the half that is genuinely this module's. The classification
+    # is shared with the transports (failures.py), because the 403 the wizard calls "key
+    # rejected" has to be the same 403 that aborts a fan-out instead of being retried
+    # once per chunk. It was not, until these were one function.
+    fix = {
+        PROBE_KEY_REJECTED:
+            f"{where} refused the credential. Re-paste the key, or check that the "
+            "account has access to this endpoint.",
+        PROBE_RATE_LIMITED:
+            "The credential was accepted; the endpoint is busy. Nothing to fix.",
+        PROBE_MODEL_UNKNOWN:
+            f"{where} does not serve {model}. Pick another model.",
+        PROBE_URL_WRONG:
+            f"Nothing speaking the Anthropic messages format at {where}. Note the SDK "
+            "appends /v1/messages itself, so a base URL ending in /v1 asks for "
+            "/v1/v1/messages.",
+        PROBE_BAD_REQUEST: f"{where} rejected the request shape.",
+        PROBE_SERVER_ERROR: f"{where} is reachable but failing. Vendor-side; retry.",
+        PROBE_NETWORK_DOWN:
+            f"Could not reach {where} -- DNS, TLS, proxy or firewall. "
+            "The credential was never sent.",
+    }.get(code, "")
+
+    # Two details the taxonomy cannot carry, because they are presentation: a timeout's
+    # exception text says nothing useful, and an unexpected error is worth naming.
     if isinstance(exc, anthropic.APITimeoutError):
-        return ProbeResult(PROBE_NETWORK_DOWN, f"timed out contacting {where}", where,
-                           "Check the URL, the network and any proxy. "
-                           "The credential was never sent.")
-    if isinstance(exc, anthropic.APIConnectionError):
-        return ProbeResult(PROBE_NETWORK_DOWN, detail, where,
-                           f"Could not reach {where} -- DNS, TLS, proxy or firewall. "
-                           "The credential was never sent.")
-    if isinstance(exc, anthropic.APIResponseValidationError):
-        return ProbeResult(PROBE_URL_WRONG, detail, where,
-                           f"{where} answered, but not in the Anthropic messages "
-                           "format. Check the base URL.")
-    if isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
-        return ProbeResult(PROBE_KEY_REJECTED, detail, where,
-                           f"{where} refused the credential. Re-paste the key, or check "
-                           "that the account has access to this endpoint.")
-    if isinstance(exc, anthropic.RateLimitError):
-        return ProbeResult(PROBE_RATE_LIMITED, detail, where,
-                           "The credential was accepted; the endpoint is busy. "
-                           "Nothing to fix.")
-    if isinstance(exc, anthropic.NotFoundError):
-        if names_model:
-            return ProbeResult(PROBE_MODEL_UNKNOWN, detail, where,
-                               f"{where} does not serve {model}. Pick another model.")
-        return ProbeResult(PROBE_URL_WRONG, detail, where,
-                           f"Nothing speaking the Anthropic messages format at {where}. "
-                           "Note the SDK appends /v1/messages itself, so a base URL "
-                           "ending in /v1 asks for /v1/v1/messages.")
-    if isinstance(exc, (anthropic.BadRequestError, anthropic.UnprocessableEntityError)):
-        if names_model:
-            return ProbeResult(PROBE_MODEL_UNKNOWN, detail, where,
-                               f"{where} rejected the model id {model}. Pick another.")
-        return ProbeResult(PROBE_BAD_REQUEST, detail, where,
-                           f"{where} rejected the request shape.")
-    if isinstance(exc, anthropic.InternalServerError):
-        return ProbeResult(PROBE_SERVER_ERROR, detail, where,
-                           f"{where} is reachable but failing. Vendor-side; retry.")
-    if isinstance(exc, anthropic.APIStatusError):
-        status = getattr(exc, "status_code", 0) or 0
-        if status >= 500:
-            return ProbeResult(PROBE_SERVER_ERROR, detail, where,
-                               f"{where} returned {status}. Vendor-side; retry.")
-        return ProbeResult(PROBE_UNEXPECTED, detail, where, "")
-    return ProbeResult(PROBE_UNEXPECTED, f"{type(exc).__name__}: {detail}", where, "")
+        detail = f"timed out contacting {where}"
+    elif code == PROBE_UNEXPECTED:
+        detail = f"{type(exc).__name__}: {detail}"
+    return ProbeResult(code, detail, where, fix)
 
 
 def probe_endpoint(cfg, model: str, *, timeout_s: float = 20.0) -> ProbeResult:
