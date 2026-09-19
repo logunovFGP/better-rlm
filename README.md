@@ -13,7 +13,7 @@ with **what the answer needs**, not with the size of the file.
 ```
 You:     "Which service caused the 03:14 cascade?"  →  2.3 GB of logs
 Claude:  grep, chunk, sub-query, correlate  (inside the sandbox)
-You get: the answer + a per-model token/cost table
+You get: the answer + a per-model token table
 ```
 
 > **This is engineering, not research.** Recursive Language Models are the work of
@@ -617,7 +617,7 @@ only findings come back.
 **Lifecycle** — `rlm_list_contexts` · `rlm_drop_context`
 **Model-backed** — `rlm_query` (full recursive: Sonnet root + Haiku sub, model-written Python in the sandbox) · `rlm_sub_query` · `rlm_sub_query_batch` (Haiku map-reduce)
 **Sandbox & status** — `rlm_exec` (Python in the sandbox) · `rlm_status`
-**Cost & forecast** — `rlm_estimate` (forecast a `rlm_sub_query_batch` before running it) · `rlm_budget` (what this server has spent inside the session window)
+**Budget** — `rlm_budget` (what this server has spent inside the rolling session window, and the ceiling it gates against)
 
 Only `rlm_exec` and `rlm_query` execute *model-written* code, so only those two depend on the
 sandbox — the other fifteen behave identically whether it is Docker or `local`. Both tools state
@@ -904,11 +904,9 @@ endpoint reads `RLM_API_KEY`. Two consequences worth knowing:
 to Anthropic whatever `base_url` says. `/status` flags that combination as `IGNORED`
 rather than letting it look configured.
 
-Two things are wrong on a non-Anthropic endpoint, both by omission rather than
+One thing is weaker on a non-Anthropic endpoint, by omission rather than
 breakage:
 
-- **Cost reporting.** `COST_PER_MTOK` carries Anthropic rates only. `report_cost`
-  defaults to `false`; leave it off.
 - **Context derivation.** The engine's model table does not know these ids and returns
   its 128000 default, which under-uses a larger window rather than overflowing it. Set
   `sub_context_tokens` explicitly, as above.
@@ -945,9 +943,10 @@ turns, `max_iter_hit`, tokens, cost, answer bytes, truncated), `cli_spawn` (mode
 **Graceful shutdown.** SIGTERM/SIGINT — and a clean stdin EOF — tear down the sandbox container and
 log a `shutdown` record before exiting.
 
-**Cost visibility, off by default.** `rlm_query`/`rlm_sub_query*` can return a per-model usage table
-so you see exactly what ran on Haiku versus Sonnet. It's opt-in (`report_cost: false`) because a
-figure you can't fully trust is worse than no figure.
+**Token visibility.** `rlm_query`/`rlm_sub_query*` return a per-model usage table, so you see
+exactly what ran on which model. Tokens only: those come back from the API. There is no price
+table and no cost line, because a rate this tool cannot check against your invoice is a quote
+wearing the clothes of a measurement.
 
 ---
 
@@ -988,7 +987,7 @@ figure you can't fully trust is worse than no figure.
   `ANTHROPIC_API_KEY` (for `mode: api`). Credentials stay host-side.
 - `config.yaml` — `mode`, `provider`, models, `max_depth`/`max_iterations`, `sandbox`
   (`docker`|`local`), `sandbox_image`, `sandbox_timeout_s`, concurrency, `output_cap_bytes` (raw) /
-  `answer_cap_bytes` (synthesis), `report_cost`, `cli_*` knobs, chunk defaults, dirs, and the
+  `answer_cap_bytes` (synthesis), `cli_*` knobs, chunk defaults, dirs, and the
   logging/throttle keys named above.
 
 Registering with Claude Code, in JSON (`~/.claude.json` → `mcpServers`):
