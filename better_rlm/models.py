@@ -45,10 +45,19 @@ def configured(cfg: Config, role: Role) -> str:
     }[role]
 
 
-def map_for_mode(auth_mode: str, model_id: str) -> str:
+def map_for_mode(auth_mode: str, model_id: str, base_url: str = "") -> str:
     """Apply an auth mode's policy to one model id: OAuth remaps to the closest
-    subscription-supported sibling, the API-key path passes through."""
-    return OAUTH_SIBLING.get(model_id, model_id) if auth_mode == "oauth" else model_id
+    subscription-supported sibling, the API-key path passes through.
+
+    ``base_url`` switches the remap off entirely. OAUTH_SIBLING encodes what
+    ANTHROPIC's subscription serves -- knowledge about exactly one endpoint. Applied
+    to a third-party one it answers a question nobody asked: substituting a Claude id
+    for the operator's configured model, against a host that has never heard of it.
+    The configured model is the one that runs.
+    """
+    if auth_mode != "oauth" or base_url.strip():
+        return model_id
+    return OAUTH_SIBLING.get(model_id, model_id)
 
 
 def policy_name(auth_mode: str) -> str:
@@ -63,9 +72,9 @@ def _mode(cfg: Config) -> str:
 
 def select(cfg: Config, role: Role) -> str:
     """Resolve the model for a role under the active auth mode."""
-    return map_for_mode(_mode(cfg), configured(cfg, role))
+    return map_for_mode(_mode(cfg), configured(cfg, role), cfg.base_url)
 
 
 def map_model(cfg: Config, model_id: str) -> str:
     """Resolve an explicit user-supplied model id under the active auth mode."""
-    return map_for_mode(_mode(cfg), model_id)
+    return map_for_mode(_mode(cfg), model_id, cfg.base_url)

@@ -13,7 +13,7 @@
       6. Links the rlm-large-context skill into ~/.claude/skills (directory junction).
       7. Points core.hooksPath at the version-controlled verify gate.
       8. Registers the oversized-read hook, with -Hook.
-      9. Prints - or, with -Register, runs - the `claude mcp add` command.
+      9. Points at the pip install, which is the only one that gets registered.
 
     The venv is rebuilt fresh every run: reusing an existing venv proved unreliable on a
     Windows+WSL shared checkout, whereas a clean create is deterministic. Per-platform
@@ -41,7 +41,8 @@
     CLAUDE_CODE_OAUTH_TOKEN=<token>. Being signed in to Claude Code does NOT sign in the CLI.
 
 .PARAMETER Register
-    Run `claude mcp add -s user rlm ...` after setup (requires the claude CLI on PATH).
+    Kept for compatibility. A checkout is no longer registered; `pip install better-rlm`
+    and then `better-rlm` is what mounts the server.
 
 .PARAMETER Hook
     Register the oversized-read PreToolUse hook in ~/.claude/settings.json, so a Read
@@ -614,76 +615,17 @@ un_tui.cmd instead.'
     }
 
     # 8) Register with Claude Code ----------------------------------------
+    # This checkout is NOT registered any more, and -Register no longer registers it.
+    # One machine serving two rlms is the whole family of failures
+    # better_rlm/mcpreg.py exists to prevent: each reads a different config.yaml, and
+    # from inside a Claude session there is no way to see which one answered. The
+    # served install is the pip one, and `better-rlm` mounts itself.
     Write-Step 'Register with Claude Code'
-    $launcher = Join-Path $PSScriptRoot 'run_server.cmd'
-    # A local sandbox is useless unless the server is told at launch, so carry the choice
-    # made above (or -Sandbox local) into the registration itself.
-    $envArgs = if ($script:UseLocalSandbox) { @('-e', 'RLM_SANDBOX=local') } else { @() }
-    $registerCmd = 'claude mcp add -s user rlm ' +
-        (($envArgs -join ' ') + ' ').TrimStart() + "-- cmd /c `"$launcher`""
-    $addArgs = @('mcp', 'add', '-s', 'user', 'rlm') + $envArgs + @('--', 'cmd', '/c', $launcher)
+    Write-Note ("A checkout is not registered. The served install is the pip one:`n" +
+        "  pip install --upgrade better-rlm`n" +
+        "  better-rlm          # run it from OUTSIDE this directory; it mounts itself`n" +
+        "This checkout stays usable for development and for the test suite.")
 
-    $hasClaude = Test-Tool 'claude'
-    $reg = if ($hasClaude) { Get-McpRegistration 'rlm' } else { $null }
-
-    if (-not $hasClaude) {
-        Write-Warning "claude CLI not found on PATH. Once installed, run:`n  $registerCmd"
-    } elseif ($reg -like "*$launcher*") {
-        # Right checkout - but matching the launcher says nothing about the env, and the
-        # sandbox choice only takes effect if the registration carries it. Both directions
-        # matter: a missing RLM_SANDBOX=local silently makes the "local sandbox" choice a
-        # no-op, and a STALE one keeps executing model-written Python on the host long
-        # after Docker works again.
-        $hasLocal = [bool]($reg -match 'RLM_SANDBOX')
-        if ($hasLocal -ne $script:UseLocalSandbox) {
-            $what = if ($script:UseLocalSandbox) { 'add RLM_SANDBOX=local to' } else { 'drop the stale RLM_SANDBOX=local from' }
-            $why = if ($script:UseLocalSandbox) { 'Without it the server still tries to reach Docker.' }
-                   else { 'Until it is dropped, model-written Python keeps running on this host instead of the sandbox.' }
-            # Default is Update: the operator just expressed a sandbox choice, and leaving
-            # the registration contradicting it is the broken outcome.
-            if (0 -eq (Get-Choice -Title "Registration does not match the sandbox choice" `
-                    -Message "Need to $what the 'rlm' registration. $why" `
-                    -Options '&Update registration', '&Leave it' -DefaultChoice 0)) {
-                if ($PSCmdlet.ShouldProcess('rlm', 'claude mcp remove + add')) {
-                    Invoke-Native { & 'claude' 'mcp' 'remove' '-s' 'user' 'rlm' } 'claude mcp remove'
-                    Invoke-Native { & 'claude' @addArgs } 'claude mcp add'
-                    Write-Note "Registration updated ($registerCmd)."
-                }
-            } else {
-                Write-Warning "Registration left as-is - it does not match the sandbox choice."
-            }
-        } else {
-            Write-Note "'rlm' already registered to THIS checkout - nothing to do."
-        }
-    } elseif (-not $reg) {
-        # Nothing registered: the server cannot load however often Claude Code restarts.
-        # -Register pre-answers; default No keeps scripted runs from touching global state.
-        if ($Register -or 0 -eq (Get-Choice -Title "'rlm' is not registered" `
-                -Message "Without it the server never loads. Register this checkout now?`n  $registerCmd" `
-                -Options '&Register now', '&Not now' -DefaultChoice 1)) {
-            if ($PSCmdlet.ShouldProcess('rlm', 'claude mcp add')) {
-                Invoke-Native { & 'claude' @addArgs } 'claude mcp add'
-                Write-Note 'Registered.'
-            }
-        } else {
-            Write-Warning "'rlm' is NOT registered - the server will not load. Run:`n  $registerCmd"
-        }
-    } else {
-        # Registered, but to another checkout - this one will not be used. Default Leave,
-        # so a scripted run never hijacks a registration it does not own.
-        if (0 -eq (Get-Choice -Title "'rlm' points at a different checkout" `
-                -Message "This checkout will not be used. Re-point 'rlm' here?" `
-                -Options '&Re-point here', '&Leave it' -DefaultChoice 1)) {
-            if ($PSCmdlet.ShouldProcess('rlm', 'claude mcp remove + add')) {
-                Invoke-Native { & 'claude' 'mcp' 'remove' '-s' 'user' 'rlm' } 'claude mcp remove'
-                Invoke-Native { & 'claude' @addArgs } 'claude mcp add'
-                Write-Note 'Re-pointed to this checkout.'
-            }
-        } else {
-            Write-Warning ("'rlm' stays registered to a DIFFERENT checkout - this one will not " +
-                "be used. To switch:`n  claude mcp remove -s user rlm`n  $registerCmd")
-        }
-    }
     Write-Note "Restart Claude Code so the 'rlm' server and 'rlm-large-context' skill load."
 
     Write-Host ''

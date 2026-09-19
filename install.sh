@@ -242,20 +242,15 @@ if [ "$HOOK" -eq 1 ]; then
 fi
 
 if [ "$REGISTER" -eq 1 ]; then
+  # --register no longer registers THIS checkout. The flag is kept so an existing
+  # script does not break. One machine serving two rlms is the whole family of
+  # failures better_rlm/mcpreg.py exists to prevent: each reads a different
+  # config.yaml, and from inside a session there is no way to see which answered.
   echo "==> Register with Claude Code (--register)"
-  if ! command -v claude >/dev/null 2>&1; then
-    echo "  WARNING: claude CLI not on PATH — cannot auto-register. Run manually:"
-    echo "    claude mcp add -s user rlm -- bash \"$DIR/run_server.sh\""
-  elif claude mcp get rlm >/dev/null 2>&1; then
-    # Keep --register re-runnable: an existing 'rlm' may point at a DIFFERENT checkout,
-    # so report it instead of failing (`claude mcp add` would exit 1) or hijacking it.
-    echo "  'rlm' is already registered — left as-is. To point it at THIS checkout:"
-    echo "    claude mcp remove -s user rlm"
-    echo "    claude mcp add -s user rlm -- bash \"$DIR/run_server.sh\""
-  else
-    claude mcp add -s user rlm -- bash "$DIR/run_server.sh"
-    echo "  Registered. Restart Claude Code to load the server and skill."
-  fi
+  echo "  A checkout is not registered any more. The served install is the pip one:"
+  echo "    pip install --upgrade better-rlm"
+  echo "    better-rlm          # run it from OUTSIDE this directory; it mounts itself"
+  echo "  This checkout stays usable for development and for the test suite."
 fi
 
 echo "==> Verify gate (git pre-push hook)"
