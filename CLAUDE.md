@@ -247,6 +247,45 @@ leaving it. Outcomes are reported, not silent: `ok` / `added` / `repointed` /
   * Claude Code only. cline is a separate target with its own config file and is
     deliberately not attempted.
 
+### One servable install, and it is the pip one
+
+`mcpreg.server_command()` has no checkout branch, and `ensure_registered()` refuses
+outright from a checkout rather than guessing at another interpreter's path.
+`install.sh --register` and `install.ps1` step 8 print the pip path instead of running
+`claude mcp add`. Two rlms on one machine read two `config.yaml`s and from inside a
+session there is no way to see which one answered -- setup written to `~/.rlm` was
+correct for days while the agent talked to a checkout serving Claude ids at a MiniMax
+endpoint.
+
+**`-P` is load-bearing on that registration.** `-m` puts the CURRENT DIRECTORY first on
+sys.path and Claude Code starts an MCP server with cwd = the project directory. Working
+inside a checkout of this repo, that directory holds `better_rlm/`, so the wheel's own
+interpreter imported the checkout -- a correct command serving the wrong install.
+Measured from the repo root: `where` said `mode: checkout` without `-P`,
+`installed (pip)` with it. Not `-I`, which would also hide a `pip install --user`.
+
+The checkout stays fully usable for development and for the suite. It is simply never
+registered.
+
+### The configured model is the one that runs
+
+`models.OAUTH_SIBLING` encodes what ANTHROPIC's subscription serves, which is knowledge
+about exactly one endpoint. `map_for_mode` therefore takes `base_url` and skips the
+remap entirely when one is set -- against a third-party endpoint the substitution would
+swap the operator's configured model for a Claude id the host has never heard of.
+`select()` and `map_model()` pass it through, because a guard the call sites forget to
+apply is not a guard.
+
+### Settings survive an upgrade
+
+`pip install --upgrade` replaces the package directory wholesale, so `config.yaml` and
+`.env` must resolve OUTSIDE it -- `~/.rlm`, the directory the tool already owns.
+`test_an_upgrade_cannot_delete_the_operators_settings` asserts `PKG_ROOT` is not a
+parent of either path in the wheel shape, and
+`test_a_configured_install_does_not_ask_for_setup_again` asserts a surviving config
+does not re-trigger the wizard. An install that demands the whole wizard after every
+upgrade is one people stop upgrading.
+
 ### Setup says which build it is, and what else is installed
 
 Two setup runs were completed against a stale install whose output was
@@ -290,7 +329,7 @@ not. So when it cannot start, `engine.sandbox_diagnosis` separates the three cau
 that have three different fixes -- Docker absent, daemon down, image never built
 (the normal state of a pip install, which ships none) -- and both tools **return**
 `engine.sandbox_guidance` rather than raising it. The message names `rlm_grep`,
-`rlm_sub_query`, `rlm_sub_query_batch` and `rlm_estimate` as substitutes and says
+`rlm_sub_query`, `rlm_sub_query_batch` and `rlm_read_chunk` as substitutes and says
 not to retry. Raising instead produced `ERROR in rlm_exec: failed to connect to the
 docker API at npipe:////./pipe/...` -- true, and useless: an agent reading it
 retries the same call.
@@ -300,7 +339,7 @@ on the host with no isolation; dropping isolation because a daemon happens to be
 down turns an outage into a privilege escalation. It is offered in the message as
 an explicit, labelled opt-in and is never taken automatically.
 
-### The model catalogue, and why it is also the price table
+### The model catalogue, and why it carries no prices
 
 `describe.MODELS` is cline's bundled per-provider model table (its generated
 `catalog.generated.ts`, reached through `getProviderConfig(id).knownModels`). cline does
@@ -309,11 +348,16 @@ refresh is a no-op, because neither declares a `modelsSourceUrl`. A static table
 faithful port, not a shortcut. Keyed by **vendor**, so `claude-cli` and `anthropic` cannot
 hold two copies of one list.
 
-`config.COST_PER_MTOK` is **derived** from it. They were two hand-maintained tables, and
-that is how every MiniMax model came to price at $0.00: `cost_usd` returns 0.0 for an id
-it does not know. Same rows, one source. A row with no published rate carries
-`price_in=None`, stays out of the cost table, and renders as `unpriced` rather than
-claiming a free call.
+**There are no price columns, and there must not be any again.** There was a
+`COST_PER_MTOK` beside this table, then derived from it; both shapes printed money.
+The first priced every MiniMax model at $0.00 -- `cost_usd` returned 0.0 for an id it
+did not know -- and deriving one from the other fixed the inconsistency while leaving
+the tool quoting rates it cannot check against anyone's invoice. Tokens come back FROM
+the API and are reported; money is a quote and is not.
+`tests/test_describe.py::test_no_module_quotes_a_price` parses every module and fails
+if `COST_PER_MTOK`, `cost_usd`, `price_in`, `price_out` or `report_cost` reappears as
+an identifier. There is no `rlm_estimate` tool either: it forecast chunks, calls,
+tokens and money, and the budget ledger already reports what was actually counted.
 
 The picker offers the rows of the **configured endpoint**. `tui.pick_model` used to have
 one hardcoded list of four Anthropic ids whatever `base_url` said, which is how a MiniMax
