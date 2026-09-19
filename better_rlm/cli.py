@@ -10,6 +10,7 @@ server (``server``).
     better-rlm install      re-run the full installer          (checkout only)
     better-rlm server       run the MCP server on stdio
     better-rlm where        print the paths in use, and which mode you are in
+    better-rlm --version    print the version, and warn about a second copy
     better-rlm --help       this text
 
 **Two ways this package gets used, and they are not the same.**
@@ -115,14 +116,54 @@ def _auth_without_a_checkout() -> int:
     return 0
 
 
+def _other_copies_warning(others: list[Path]) -> str:
+    """The `pip uninstall` footgun, or "" when this machine has one copy.
+
+    A version number on its own can be a lie about what runs next: which copy
+    Python loads is decided by sys.path order, not by which was installed last.
+    Setup already says this (onboard._mount), but an operator checking whether an
+    upgrade landed types `--version` or `where` -- and both used to answer without
+    mentioning the second install that may be the one actually serving.
+    """
+    if not others:
+        return ""
+    return (f"warning: another copy of better_rlm is installed at {others[0]}.\n"
+            "         Whichever one Python finds first wins. Use `pip install\n"
+            "         --upgrade better-rlm`; do NOT run `pip uninstall`, which\n"
+            "         removes the newer copy first.")
+
+
+def _version() -> int:
+    """``better-rlm --version``.
+
+    It answered `unknown flag: --version` and exited 2, because the flag fell
+    through to the TUI's parser. Reported by an operator running two installs,
+    for whom this number is the only way to tell which one an upgrade landed on.
+    """
+    from .mcpreg import install_identity
+
+    version, active, others = install_identity()
+    print(f"better-rlm {version}")
+    print(f"root: {active}")
+    if warning := _other_copies_warning(others):
+        print(warning, file=sys.stderr)
+    return 0
+
+
 def _where() -> int:
     """Answer 'which config is this thing actually reading?' without a guess."""
+    from .mcpreg import install_identity
+
+    version, _active, others = install_identity()
     cfg = config_file()
+    print(f"version: {version}")
     print(f"mode:    {'checkout' if IS_CHECKOUT else 'installed (pip)'}")
     print(f"root:    {PKG_ROOT}")
     print(f"config:  {cfg}{'' if cfg.is_file() else '   (absent -- baked-in defaults apply)'}")
     env = env_file()
     print(f"env:     {env}{'' if env.is_file() else '   (absent)'}")
+    if warning := _other_copies_warning(others):
+        print(warning, file=sys.stderr)
     return 0
 
 
@@ -132,6 +173,9 @@ def main(argv: list[str] | None = None) -> int:
     if args and args[0] in ("-h", "--help", "help"):
         print(__doc__ or "")
         return 0
+
+    if args and args[0] in ("-V", "--version", "version"):
+        return _version()
 
     if args and args[0] == "where":
         return _where()
