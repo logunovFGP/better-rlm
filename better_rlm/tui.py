@@ -521,12 +521,9 @@ def warn_unknown_model(console: Console, model_id: str) -> None:
     A custom id is deliberately accepted without checking it against a list -- the
     endpoint is the authority, not us. But accepting it silently hides two
     consequences the operator cannot see: an id the engine has no window for is
-    assumed to be the default (8x smaller than a 1M model, so it chunks far
-    earlier), and an id with no published rate makes every cost line read unpriced.
+    assumed to be the default -- 8x smaller than a 1M model, so it chunks far earlier.
     """
     from rlm.utils.token_utils import DEFAULT_CONTEXT_LIMIT, get_context_limit
-
-    from .config import COST_PER_MTOK
 
     if describe_model(model_id) is not None:
         return
@@ -534,8 +531,6 @@ def warn_unknown_model(console: Console, model_id: str) -> None:
     if get_context_limit(model_id) == DEFAULT_CONTEXT_LIMIT:
         notes.append(f"its context window is unknown, so {DEFAULT_CONTEXT_LIMIT:,} "
                      "tokens is assumed")
-    if model_id not in COST_PER_MTOK:
-        notes.append("it has no published rate here, so cost reports as unpriced")
     if notes:
         console.print(f"[yellow]{model_id} is not in the catalogue: "
                       + "; ".join(notes) + ".[/yellow]")

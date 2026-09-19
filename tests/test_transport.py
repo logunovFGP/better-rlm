@@ -139,7 +139,10 @@ def test_parse_success():
     res = tp._parse_cli_output(0, out, "", "claude-sonnet-4-6")
     assert res.text == "ANSWER"
     assert res.input_tokens == 11 and res.output_tokens == 7
-    assert res.cost_usd == 0.001 and res.model == "claude-sonnet-4-6"
+    assert res.model == "claude-sonnet-4-6"
+    # total_cost_usd is in the payload and deliberately dropped: on a subscription it
+    # is a notional price for a call nobody was separately billed for.
+    assert not hasattr(res, "cost_usd")
 
 
 def test_parse_rate_limit_error_raises_retryable():

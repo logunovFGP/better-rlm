@@ -26,21 +26,21 @@ Reach for these tools instead of reading a huge file.
 
 Size decides *whether* to load. The question's complexity decides *which* tool.
 
-| Question shape | Tool | Cost |
+| Question shape | Tool | Calls |
 |---|---|---|
-| **"What will this cost me?" — before any batch or query** | **`rlm_estimate(ctx_id, prompt)`** | **free, no model call** |
 | "Where is X / does X appear" — one lookup | `rlm_grep(ctx_id, pattern)` | free, no model call |
 | Exact counts, sums, buckets, parsing | `rlm_exec(code, ctx_id)` | free, no model call |
 | "Label / classify / judge **every** entry"; aggregate over the whole input | `rlm_chunk_context` → `rlm_sub_query_batch` | one cheap call per chunk; re-runs over unchanged chunks are **free** |
 | One targeted semantic question, input under ~200K tokens | `rlm_sub_query(ctx_id, prompt)` | one cheap call |
-| Cross-referencing, contradicting pairs, multi-hop over a corpus | `rlm_query(ctx_id, question)` | recursive loop; not forecastable, but **gated at the budget line and resumable** — see `rlm_estimate` for its ceiling |
+| Cross-referencing, contradicting pairs, multi-hop over a corpus | `rlm_query(ctx_id, question)` | recursive loop; not forecastable, but **gated at the budget line and resumable** |
 | Hardest reasoning | `rlm_query(..., model_override="opus")` | most expensive |
 
 Start at the top. `rlm_grep` and `rlm_exec` answer more questions than expected and spend
 no tokens on the content.
 
-**Anything below the free rows: call `rlm_estimate` first.** See *Budget* below — this is
-the one step that separates a run you can afford from a run that eats the session.
+**Anything below the free rows spends model calls.** They are gated at the budget line
+and resumable, so an oversized run stops itself and continues next window rather than
+failing — see *Budget* below. `rlm_budget` reports where that line currently sits.
 
 ## What this is uniquely good at
 
@@ -153,23 +153,24 @@ big context is the one operation that can drain it. A real incident: one
 ~60% of a 4-hour window, was interrupted, and returned **nothing** — the entire spend
 bought no answer, and re-running it would have spent the same again.
 
-Three tools exist so that cannot repeat. Use them in this order.
+The batch is built so that cannot repeat: it stops itself rather than being stopped.
 
 ```
-1. rlm_estimate(ctx_id, prompt)      # free: chunks, calls, tokens, wall time, verdict
-2. rlm_budget()                      # free: what is left in the rolling window
-3. rlm_sub_query_batch(...)          # stops itself at 95%; resumes on the next call
+1. rlm_budget()                      # free: what is left in the rolling window
+2. rlm_sub_query_batch(...)          # stops itself at 95%; resumes on the next call
 ```
 
-**`rlm_estimate` is not optional for a batch over an unfamiliar context.** It costs
-nothing and it is the only thing that tells you, in advance, that a run needs three
-sittings rather than one. Its verdict is one of:
+**An oversized run is not a dead end.** Start it. It stops cleanly at the budget line,
+keeps every answer it already bought (cached by chunk CONTENT, so a re-loaded file
+counts too), and continues from there when you call the same batch again next window.
+Tell the user it will take more than one sitting rather than trying to avoid starting.
 
-| Verdict | What to do |
-|---|---|
-| **Fits** | Run it. |
-| **Does not fit this window** — needs ~N windows | Still run it. It stops cleanly at the budget line, keeps every answer it bought, and resumes from there on the next call. Tell the user it will take N sittings. |
-| **Window budget: unknown** | No `session_budget_tokens` is configured, so spend is measured and reported but nothing is gated. Set it in `config.yaml` to gate. If the server has already hit a real usage limit it prints the local spend it saw at that moment — a floor under your true ceiling, and the number to start from. |
+There is no forecast tool, deliberately. The one that existed quoted chunks, calls,
+tokens and money from a rate table it could not check against an invoice.
+`rlm_budget()` reports what is actually counted: spend inside the rolling window, the
+ceiling being gated against, and when headroom next grows. If it says the ceiling is
+unknown, no `session_budget_tokens` is configured — spend is measured but nothing is
+gated, and setting it in `config.yaml` turns the gate on.
 
 **Answers are cached by CONTENT, not by context.** Every chunk answer is stored under a
 hash of `(chunk bytes, prompt, model, output contract)`. Call `rlm_sub_query_batch` again with the same
@@ -203,9 +204,9 @@ CLI's default assistant persona and emitted **328,453 output tokens against a 2,
 cap** — pages of reasoning wrapped around a two-word answer. The envelope exists to stop that.
 
 **`rlm_query` cannot be estimated, only bounded — but it is bounded on both sides.** The
-root model decides at run time how many sub-calls to make, so `rlm_estimate` prints a
-*ceiling* for it, not a forecast: the worst case config permits (normally several times a
-whole window) and the tighter bound the timeout imposes in practice. What it now shares
+root model decides at run time how many sub-calls to make, so only a *ceiling* exists,
+not a forecast: the worst case config permits (normally several times a whole window)
+and the tighter bound the timeout imposes in practice. What it now shares
 with the batch: **every model call passes the session-budget floor**, so the run stops
 itself before the wall instead of being killed at it; and **any stop checkpoints the
 transcript and the sandbox's REPL variables**, so calling `rlm_query` again with the same
@@ -250,9 +251,8 @@ prevent.
    whole directory, or `rlm_load_source(name, params)` for a live system (see above; list
    them first with `rlm_list_sources`). Returns a `ctx_id`; the content stays on disk.
 2. **Sanity-check** (optional) — `rlm_inspect_context(ctx_id)` for metadata plus a head preview.
-3. **Estimate** — `rlm_estimate(ctx_id, prompt)` before any batch or `rlm_query` over a
-   context you have not sized before. Free, and it is what turns "this might be expensive"
-   into a number. See *Budget* above.
+3. **Check headroom** (optional) — `rlm_budget()` before a batch over a context you have
+   not run before. Free. See *Budget* above; the run stops itself at the line either way.
 4. **Route** — pick from the table above.
 5. **Housekeeping** — `rlm_list_contexts` to see what is loaded, `rlm_drop_context(ctx_id)`
    to evict one, `rlm_read_chunk(ctx_id, i)` to read exactly what a flagged chunk holds,
@@ -263,7 +263,7 @@ prevent.
 - *"Most frequent error and its peak hour in this 800 MB log."*
   → `rlm_load_file(path)` → `rlm_exec` to bucket by hour — free, no model needed.
 - *"Label every one of these 40k support tickets by root cause, then total them."*
-  → `rlm_load_file(path)` → `rlm_chunk_context` → **`rlm_estimate(ctx_id, "label each…")`**
+  → `rlm_load_file(path)` → `rlm_chunk_context`
   → `rlm_sub_query_batch(ctx_id, "label each…")` — and if it stops at the budget line,
   call the same batch again next window to resume.
 - *"Which of these 900 config entries contradict each other?"*

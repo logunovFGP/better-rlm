@@ -106,13 +106,19 @@ def stale_metadata() -> list[Path]:
 
 
 def server_command() -> list[str]:
-    """The argv that starts THIS install's server.
+    """The argv that starts the served install. Always the pip one.
 
-    A checkout uses its launcher script, which knows about the venv. A wheel is
-    started through its own interpreter rather than the ``better-rlm`` console
-    script on PATH: install.ps1 writes a ``better-rlm.cmd`` shim that repoints the
-    bare word at a checkout, so a name-based registration can silently flip to a
-    different install. ``sys.executable -m`` cannot.
+    There is exactly one servable shape now. A checkout is for development and for
+    the test suite; it is never registered, because two installs of the same server
+    on one machine is the whole family of failures this module exists to prevent --
+    each reads a different config.yaml, and which one an agent is talking to is
+    invisible from inside the session. ``ensure_registered`` refuses from a checkout
+    rather than guessing at another interpreter's path.
+
+    Started through its own interpreter rather than the ``better-rlm`` console script
+    on PATH: install.ps1 writes a ``better-rlm.cmd`` shim that repoints the bare word
+    at a checkout, so a name-based registration can silently flip install.
+    ``sys.executable -m`` cannot.
 
     **-P is load-bearing, not hygiene.** ``-m`` puts the CURRENT DIRECTORY first on
     sys.path, and Claude Code launches an MCP server with cwd set to the project
@@ -124,10 +130,6 @@ def server_command() -> list[str]:
     ``mode: checkout``, with it ``installed (pip)``. -P and not -I, because -I also
     drops user site-packages, which is where a ``pip install --user`` lives.
     """
-    if IS_CHECKOUT:
-        if sys.platform == "win32":
-            return ["cmd", "/c", str(PKG_ROOT / "run_server.cmd")]
-        return ["bash", str(PKG_ROOT / "run_server.sh")]
     return [sys.executable, "-P", "-m", "better_rlm.cli", "server"]
 
 
@@ -179,6 +181,15 @@ def ensure_registered(*, force: bool = False) -> tuple[str, str]:
     (no claude CLI), ``failed``. Never raises -- a setup run must not die because
     an unrelated CLI is missing or slow.
     """
+    if IS_CHECKOUT:
+        # Registering a checkout is how a machine ends up serving two rlms that read
+        # two config.yamls, with nothing on screen saying which one answered. The pip
+        # install is the only servable one; this one is for development and tests.
+        return "skipped", ("this is a checkout, and only a pip install is served.\n  "
+                           "pip install --upgrade better-rlm\n  "
+                           "then run `better-rlm` from outside this directory -- it "
+                           "mounts itself.")
+
     claude = claude_cli()
     if not claude:
         return "skipped", ("the `claude` CLI is not on PATH, so nothing was mounted. "

@@ -10,6 +10,8 @@ from __future__ import annotations
 import dataclasses
 from pathlib import Path
 
+import pytest
+
 from better_rlm import engine, mcpreg
 from better_rlm.config import load_config
 
@@ -24,6 +26,13 @@ class _Proc:
 
 
 # --- mounting -----------------------------------------------------------------
+
+
+@pytest.fixture
+def installed(monkeypatch):
+    """Run as a pip install. These exercise the registration flow, which a checkout
+    now refuses outright -- without this they all report "skipped" and assert nothing."""
+    monkeypatch.setattr(mcpreg, "IS_CHECKOUT", False)
 
 
 def test_a_wheel_registers_its_own_interpreter_not_the_bare_name(monkeypatch):
@@ -63,15 +72,25 @@ def test_a_wheel_registration_cannot_be_shadowed_by_the_servers_working_director
     assert "-I" not in cmd, "-I would hide a --user install"
 
 
-def test_a_checkout_registers_its_own_launcher(monkeypatch, tmp_path):
-    """A checkout has a venv its launcher knows about; a bare interpreter does not."""
+def test_a_checkout_is_never_registered(monkeypatch):
+    """One servable install, and it is the pip one.
+
+    This used to register the checkout's launcher, which is how a machine ends up
+    serving two rlms that read two different config.yamls -- and from inside a
+    session there is no way to tell which one answered. Measured here: setup written
+    to ~/.rlm was correct for days while the agent talked to a checkout serving
+    Claude model ids at a MiniMax endpoint.
+    """
     monkeypatch.setattr(mcpreg, "IS_CHECKOUT", True)
-    monkeypatch.setattr(mcpreg, "PKG_ROOT", tmp_path)
-    joined = " ".join(mcpreg.server_command())
-    assert str(tmp_path) in joined and "run_server" in joined
+    monkeypatch.setattr(mcpreg, "claude_cli",
+                        lambda: pytest.fail("a checkout must not touch the registration"))
+    outcome, msg = mcpreg.ensure_registered()
+    assert outcome == "skipped"
+    assert "pip install" in msg
+    assert "run_server" not in msg, "the launcher is not a registration target any more"
 
 
-def test_no_claude_cli_is_skipped_with_the_command_to_paste(monkeypatch):
+def test_no_claude_cli_is_skipped_with_the_command_to_paste(monkeypatch, installed):
     """Setup must not die because an unrelated CLI is missing -- and must not
     claim to have mounted anything either."""
     monkeypatch.setattr(mcpreg, "claude_cli", lambda: None)
@@ -80,7 +99,7 @@ def test_no_claude_cli_is_skipped_with_the_command_to_paste(monkeypatch):
     assert "claude mcp add" in msg and "-s user" in msg
 
 
-def test_an_identical_registration_is_left_alone(monkeypatch):
+def test_an_identical_registration_is_left_alone(monkeypatch, installed):
     """Re-running setup must not churn a registration that is already correct."""
     calls: list[list[str]] = []
     monkeypatch.setattr(mcpreg, "claude_cli", lambda: "claude")
@@ -92,7 +111,7 @@ def test_an_identical_registration_is_left_alone(monkeypatch):
     assert calls == [], "it rewrote a registration that already matched"
 
 
-def test_a_registration_pointing_elsewhere_is_repointed_and_reported(monkeypatch):
+def test_a_registration_pointing_elsewhere_is_repointed_and_reported(monkeypatch, installed):
     """The reported bug: a checkout registration kept serving stale models long
     after the wizard wrote good ones to ~/.rlm, and nothing on screen said so.
     Leaving a foreign command in place IS the failure, so it is replaced and named.
@@ -115,7 +134,7 @@ def test_a_registration_pointing_elsewhere_is_repointed_and_reported(monkeypatch
     assert ["mcp", "add"] in verbs
 
 
-def test_a_failed_add_is_reported_not_swallowed(monkeypatch):
+def test_a_failed_add_is_reported_not_swallowed(monkeypatch, installed):
     monkeypatch.setattr(mcpreg, "claude_cli", lambda: "claude")
     monkeypatch.setattr(mcpreg, "registered_command", lambda c: None)
     monkeypatch.setattr(mcpreg, "_run", lambda a: (1, "boom"))
@@ -203,7 +222,7 @@ def test_the_guidance_names_the_tools_that_still_work():
     """The whole point: an agent handed a docker socket path retries the same call;
     one handed this reroutes to the tools that need no sandbox."""
     msg = engine.sandbox_guidance(_cfg(), "the daemon is not running")
-    for alt in ("rlm_grep", "rlm_sub_query", "rlm_sub_query_batch", "rlm_estimate"):
+    for alt in ("rlm_grep", "rlm_sub_query", "rlm_sub_query_batch", "rlm_read_chunk"):
         assert alt in msg, f"{alt} is not offered as an alternative"
     assert "do not retry" in msg.lower()
     assert "has not enabled" in msg
@@ -350,7 +369,7 @@ def test_install_identity_never_lists_the_active_root_as_a_duplicate():
     assert active not in others
 
 
-def test_a_registration_that_reads_back_wrong_is_reported_as_failed(monkeypatch):
+def test_a_registration_that_reads_back_wrong_is_reported_as_failed(monkeypatch, installed):
     """`claude mcp add` exiting 0 is not proof the entry landed as asked. A quoting
     slip once registered `C:Python314Scripts...` with a zero exit, and only reading
     it back afterwards showed it."""

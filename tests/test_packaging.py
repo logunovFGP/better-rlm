@@ -204,6 +204,39 @@ def test_user_dir_is_the_existing_rlm_directory():
     assert str(cfgmod.USER_DIR).startswith(str(Path.home()))
 
 
+def test_an_upgrade_cannot_delete_the_operators_settings(monkeypatch):
+    """config.yaml and .env must live OUTSIDE the package directory.
+
+    `pip install --upgrade` replaces the package directory wholesale. Anything the
+    operator configured that lives inside it is gone with it -- and an install that
+    demands the whole wizard again after every upgrade is one people stop upgrading.
+    ~/.rlm is not a new store: contexts, logs, cache, the ledger and the source
+    registry were already there.
+    """
+    import better_rlm.config as cfgmod
+
+    monkeypatch.setattr(cfgmod, "IS_CHECKOUT", False)     # the shape pip installs
+    for path in (cfgmod.config_file(), cfgmod.env_file()):
+        assert cfgmod.PKG_ROOT not in path.parents, (
+            f"{path.name} lives inside the package; an upgrade would delete it")
+        assert cfgmod.USER_DIR in path.parents
+
+
+def test_a_configured_install_does_not_ask_for_setup_again(tmp_path, monkeypatch):
+    """needs_onboarding asks whether a model call is POSSIBLE, so a config that
+    survived an upgrade must not re-trigger the wizard."""
+    from better_rlm import tui
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("mode: api\nbase_url: https://api.minimax.io/anthropic\n"
+                   "root_model: MiniMax-M3\nsub_model: MiniMax-M2.7\n", encoding="utf-8")
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-key-not-used-for-a-call")
+
+    st = tui.load_status(cfg)
+    assert st.config_written
+    assert not tui.needs_onboarding(st), "a working config still demanded setup"
+
+
 def test_a_wheel_never_asks_metadata_for_its_own_version():
     """The source property behind the runtime one, so the mechanism cannot return.
 

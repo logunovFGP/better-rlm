@@ -934,13 +934,6 @@ def test_the_query_ceiling_says_what_it_is_and_is_not(bcfg):
     assert "x the whole window" in text, "worst case should be stated relative to the window"
 
 
-def test_the_estimate_tool_appends_the_query_ceiling(monkeypatch, batch_ctx):
-    d, _ = batch_ctx(3)
-    out = bt.estimate(d, "ctx_1", "audit", reduce=False)
-    assert "## Estimate" in out
-    assert "rlm_query on this context" in out
-
-
 # --------------------------- the hard floor under every caller ----------------------- #
 def test_the_floor_refuses_exactly_past_the_stop_line_and_not_before(bcfg):
     """`>` not `>=`: a call that lands exactly on the line is allowed. The margin above

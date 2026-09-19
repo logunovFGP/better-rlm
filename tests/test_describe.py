@@ -157,8 +157,9 @@ def test_every_vendor_has_a_model_table_and_role_defaults():
 
 
 def test_model_ids_are_unique_across_vendors():
-    """config.COST_PER_MTOK is derived from these rows and keyed by id alone, so a
-    collision would silently price one vendor's model at the other's rate."""
+    """describe_model() looks an id up across every vendor, so a collision hands one
+    vendor's row to the other's model -- the wrong window and output ceiling,
+    silently."""
     from better_rlm.describe import MODELS
 
     seen: dict[str, str] = {}
@@ -189,34 +190,29 @@ def test_the_cli_and_api_paths_to_claude_share_one_model_list():
     assert models_for(PROVIDER_CLAUDE_CLI) == models_for(PROVIDER_ANTHROPIC)
 
 
-def test_every_priced_model_reaches_the_cost_table():
-    """The picker and the price table are the same rows, by construction.
+def test_no_module_quotes_a_price():
+    """There is no rate table, and there must not be one again.
 
-    They used to be two hand-maintained lists, which is how every MiniMax model came
-    to price at $0.00: cost_usd returns 0.0 for an id it does not know.
+    One hand-maintained table priced all seven MiniMax models at $0.00 -- cost_usd
+    returned 0.0 for an id it did not know -- while the picker offered them. Deriving
+    one table from the other fixed the inconsistency and still left the tool quoting
+    numbers it could not check against an invoice. Token counts come back FROM the
+    API and stay; money does not.
     """
-    from better_rlm.config import COST_PER_MTOK
-    from better_rlm.describe import MODELS
+    import ast
+    from pathlib import Path
 
-    for vid, rows in MODELS.items():
-        for m in rows:
-            if m.price_in is None:
-                assert m.id not in COST_PER_MTOK, f"{m.id} has no rate but is priced"
-                continue
-            assert m.id in COST_PER_MTOK, f"{vid}/{m.id} is offered with no price"
-            assert COST_PER_MTOK[m.id] == (m.price_in, m.price_out)
-
-
-def test_an_unpriced_model_is_reported_as_unpriced_not_free():
-    """claude-fable-5 has no published rate. $0.0000 would read as a free call."""
-    from better_rlm.config import COST_PER_MTOK, cost_usd
-    from better_rlm.describe import describe_model
-
-    fable = describe_model("claude-fable-5")
-    assert fable is not None and fable.price_in is None
-    assert "claude-fable-5" not in COST_PER_MTOK
-    assert cost_usd("claude-fable-5", 1_000_000, 1_000_000) == 0.0
-    assert "no published rate" in fable.detail()
+    banned = {"COST_PER_MTOK", "cost_usd", "price_in", "price_out", "report_cost"}
+    offenders: list[str] = []
+    for path in sorted(Path(__file__).resolve().parent.parent.glob("better_rlm/*.py")):
+        # Identifiers, not raw text: several modules explain in prose WHY there is no
+        # price table, and a substring search would fail on that documentation.
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            for name in (getattr(node, "id", None), getattr(node, "attr", None),
+                         getattr(node, "arg", None)):
+                if name in banned:
+                    offenders.append(f"{path.name}: {name}")
+    assert not offenders, offenders
 
 
 def test_the_engine_knows_every_offered_model_context_window():

@@ -410,26 +410,6 @@ def rlm_drop_context(ctx_id: str) -> str:
 # ============================================================================
 @mcp.tool()
 @logged_tool
-def rlm_estimate(ctx_id: str, prompt: str = "", max_chunks: int = 0, reduce: bool = True) -> str:
-    """ESTIMATE BEFORE YOU EXECUTE. Forecast what rlm_sub_query_batch over this context
-    would cost — chunks, model calls, tokens, wall time — and judge it against what is
-    left in the current session window. Costs nothing: no model call is made.
-
-    Call this BEFORE any batch over a large context. A 103-chunk run silently consumed
-    ~60% of a 4-hour window and returned nothing when it was interrupted; this is the
-    tool that would have said so in advance.
-
-    Reports how many chunks are ALREADY ANSWERED on disk -- cached by chunk CONTENT, so a
-    re-loaded file counts too -- and the forecast covers only the work that remains. A run
-    that does not fit this window is not a dead end: start it, let it stop at the budget
-    line, and call the batch again next window. Also prints the ceiling for rlm_query on
-    this context, which cannot be estimated, only bounded.
-    """
-    return batch.estimate(DEPS, ctx_id, prompt, max_chunks, reduce)
-
-
-@mcp.tool()
-@logged_tool
 def rlm_budget() -> str:
     """Show the session-window token budget: what this server has spent inside the
     rolling window, the ceiling it is gating against (configured, learned, or unknown),
@@ -453,9 +433,9 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "", fresh: bool 
     model_override: '' (Sonnet) | 'opus' (Opus 4.8, hardest tasks) | explicit model id.
     Models are resolved by the selection strategy (closest OAuth sibling when on OAuth).
 
-    COST CANNOT BE ESTIMATED, ONLY BOUNDED. The root model decides at run time how many
-    sub-calls to make. rlm_estimate prints the ceiling: what config permits (usually
-    several times a whole session window) and what query_timeout_s allows in practice.
+    SIZE CANNOT BE FORECAST, ONLY BOUNDED. The root model decides at run time how many
+    sub-calls to make; what config permits is usually several times a whole session
+    window, and query_timeout_s is what bounds it in practice.
 
     GATED AND RESUMABLE. Every model call passes a hard floor at `budget_stop_fraction`
     of the session window, so the run stops itself before the wall. Any stop -- budget,
@@ -499,15 +479,12 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "", fresh: bool 
     rows = "\n".join(
         f"  - {r['model']}: {r['calls']} calls, "
         f"{r['input_tokens']:,} in / {r['output_tokens']:,} out"
-        + (f", ${r['cost_usd']:.4f}" if r["cost_usd"] is not None else "")
         for r in res["usage"]
     )
-    total = res["cost_usd"]
     return DEPS.answer(
         f"## RLM answer (root: {res['root_model']}, sub: {res['sub_model']}"
         f" · auth: {transport.auth_label(DEPS.cfg)}{resumed})\n\n{res['answer']}\n\n"
         f"---\n**Model routing / usage:**\n{rows}\n"
-        + (f"**Total cost:** ${total:.4f}  |  " if total is not None else "")
         + f"**Time:** {res['execution_time']}s"
     )
 
@@ -536,7 +513,7 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
     answered and pays only for the rest — after a crash, after a budget stop, or in a new
     session tomorrow. The run also stops ITSELF at `budget_stop_fraction` of the session
     window instead of being killed at the wall, reporting the remaining chunks as
-    deferred. Call rlm_estimate first to see size, cost and headroom before starting.
+    deferred, so an oversized run is resumable work rather than a dead end.
 
     fresh=True: discard the cached answers for this exact prompt+chunking and re-ask.
 

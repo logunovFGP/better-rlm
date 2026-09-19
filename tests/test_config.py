@@ -2,9 +2,7 @@ import pytest
 
 from better_rlm.config import (
     MODEL_HAIKU,
-    MODEL_SONNET,
     MODEL_SONNET_5,
-    cost_usd,
     estimate_tokens,
     load_config,
 )
@@ -32,11 +30,6 @@ def test_rlm_sandbox_rejects_unknown_value(monkeypatch):
     monkeypatch.setenv("RLM_SANDBOX", "dcoker")
     with pytest.raises(ValueError, match="docker.*local"):
         load_config()
-
-
-def test_cost_usd_sonnet():
-    # 1M in + 1M out at $3/$15
-    assert cost_usd(MODEL_SONNET, 1_000_000, 1_000_000) == 18.0
 
 
 def test_estimate_tokens():

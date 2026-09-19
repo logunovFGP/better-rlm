@@ -54,7 +54,6 @@ class CompletionResult:
     input_tokens: int
     output_tokens: int
     model: str
-    cost_usd: float | None = None
     #: The model stopped because it hit ``max_tokens``, so ``text`` is a fragment --
     #: or, for a reasoning model, EMPTY. Measured on MiniMax-M2.7 over one 12.9k-token
     #: log chunk: 13,015 output tokens, of which 99% was the thinking block and 286
@@ -512,13 +511,14 @@ def _parse_cli_output(returncode: int, stdout: str, stderr: str,
             f"claude CLI error (subtype={data.get('subtype')}): {msg}")
 
     usage = data.get("usage") or {}
-    cost = data.get("total_cost_usd")
+    # The CLI also reports total_cost_usd. Deliberately dropped: on a subscription it
+    # is a notional price for a call nobody was separately billed for, and printing it
+    # beside real token counts makes a quote look like a measurement.
     return CompletionResult(
         text=data.get("result") or "",
         input_tokens=_total_input(usage),
         output_tokens=int(usage.get("output_tokens") or 0),
         model=model,
-        cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
     )
 
 
@@ -533,8 +533,8 @@ class _LedgeredTransport(CompletionTransport):
     own map-reduce goes through subquery.py, but rlm_query's recursive fan-out goes
     through the engine's client, which better_rlm/auth.py rebinds onto this same factory. With
     the recording in subquery.py only, an rlm_query run — the most expensive tool here —
-    spent its entire window budget invisibly, and rlm_estimate would then report
-    headroom that had already been consumed.
+    spent its entire window budget invisibly, and the next run's pre-flight would
+    then admit calls against headroom that had already been consumed.
 
     Input tokens are the LOCAL estimate of the prompt, never the transport's report:
     the CLI path reported 1,027 input tokens for a batch whose real input was ~3M.
