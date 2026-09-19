@@ -30,7 +30,8 @@ from mcp.server.fastmcp import FastMCP
 from . import auth, batch, budget, models, sources, transport
 from .chunking import STRATEGIES, chunk_text
 from .deps import Deps
-from .engine import ReplSession, query_checkpoint_path, run_query
+from .engine import (ReplSession, SandboxUnavailable, query_checkpoint_path,
+                     run_query)
 from .subquery import sub_query
 from .logsetup import log_event, logged_tool, note_startup
 # meta_block keeps its old private name: tests reach for srv._meta_block. It and
@@ -468,8 +469,12 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "", fresh: bool 
     sub_model = models.select(DEPS.cfg, models.Role.SUB)
     text = DEPS.store.read_text(ctx_id)
     ckpt = query_checkpoint_path(DEPS.cfg, ctx_id, question, root_model, sub_model)
-    res = run_query(DEPS.cfg, text, question, root_model, sub_model,
-                    checkpoint=ckpt, fresh=fresh)
+    try:
+        res = run_query(DEPS.cfg, text, question, root_model, sub_model,
+                        checkpoint=ckpt, fresh=fresh)
+    except SandboxUnavailable as exc:
+        # The recursive loop writes Python into the sandbox, so it needs one too.
+        return str(exc)
     resumed = (f" · resumed from iteration {res['resumed_from']}"
                if res.get("resumed_from") else "")
     if res.get("limit"):
@@ -557,9 +562,15 @@ def rlm_exec(code: str, ctx_id: str = "") -> str:
     Docker by default; under `sandbox: local` / RLM_SANDBOX=local this code runs ON
     THE HOST with no isolation. rlm_status reports which is live."""
     repl = _get_repl()
-    if ctx_id and repl.loaded_ctx != ctx_id:
-        repl.load_context(STORE.read_text(ctx_id), ctx_id)
-    out, err = repl.execute(code)
+    try:
+        if ctx_id and repl.loaded_ctx != ctx_id:
+            repl.load_context(STORE.read_text(ctx_id), ctx_id)
+        out, err = repl.execute(code)
+    except SandboxUnavailable as exc:
+        # Returned, not raised: this is not a failure of the call, it is a fact
+        # about the machine, and the message names the tools that still work. An
+        # agent that gets a traceback here retries; one that gets this reroutes.
+        return str(exc)
     body = f"### stdout\n```\n{out}\n```"
     if err.strip():
         body += f"\n### stderr\n```\n{err}\n```"
