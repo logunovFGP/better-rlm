@@ -119,6 +119,8 @@ a preference. The TUI configures the transport mode and the three models.
 
 ```bash
 pip install better-rlm          # or: uv tool install better-rlm
+# The vendored engine's other backends (openai / gemini / portkey) are an optional
+# extra -- this server never constructs them: pip install 'better-rlm[engine-backends]'
 claude mcp add -s user rlm -- better-rlm server
 ```
 
@@ -937,7 +939,7 @@ across all processes, so many short-lived session servers can't fill your disk. 
 is 2 MB × 3 backups.
 
 Events: `startup`, `tool_call` (rid, args summary, duration, outcome), `rlm_query` (root/sub model,
-turns, `max_iter_hit`, tokens, cost, answer bytes, truncated), `cli_spawn` (model, duration, exit),
+turns, `max_iter_hit`, tokens, cost, answer bytes, truncated), `cli_spawn` (model, duration, exit, err), `model_call` (every call on either transport: model, duration, tokens, outcome),
 `retry`, `shutdown`.
 
 **Graceful shutdown.** SIGTERM/SIGINT — and a clean stdin EOF — tear down the sandbox container and
