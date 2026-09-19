@@ -27,7 +27,7 @@ from .config import estimate_tokens
 from .deps import Deps
 from .logsetup import log_event
 from .output import encoded_len
-from .subquery import SubResult, sub_query, sub_query_batch
+from .subquery import SUB_MAX_TOKENS, SubResult, sub_query, sub_query_batch
 
 #: Per-chunk output ceiling for a batch map call. Named because the pre-flight estimate
 #: and the call that spends the tokens MUST use the same number — an estimate computed
@@ -240,6 +240,24 @@ def budget_report(d: Deps) -> str:
 # --------------------------------------------------------------------------- #
 # Single sub-query
 # --------------------------------------------------------------------------- #
+def _cut_note(res: SubResult) -> str:
+    """Say so when the model ran out of output budget. "" when it did not.
+
+    A truncated call SUCCEEDED and was billed, so it is not an error -- but the answer
+    beside it is a fragment, or nothing at all when a reasoning model spends the whole
+    budget on its thinking block before emitting a single text token. That is what
+    shipped: a blank answer under a confident header with a token receipt attached,
+    and no way to tell it from a model that had nothing to say.
+    """
+    if not res.truncated:
+        return ""
+    empty = "" if res.answer.strip() else \
+        " (empty -- the model used the whole output budget on reasoning)"
+    return (f"\n\n**TRUNCATED at max_tokens**{empty} — the answer above is incomplete. "
+            f"Re-run over a smaller chunk, or raise subquery.SUB_MAX_TOKENS "
+            f"(currently {SUB_MAX_TOKENS:,}).")
+
+
 def one(d: Deps, ctx_id: str, prompt: str, chunk_index: int = -1) -> str:
     """One cheap sub-model query over a context, or over one chunk of it."""
     meta = d.store.get(ctx_id)
@@ -260,7 +278,7 @@ def one(d: Deps, ctx_id: str, prompt: str, chunk_index: int = -1) -> str:
         return d.bound(f"ERROR ({sub_model}): {res.error}")
     return d.answer(
         f"## Sub-query answer ({res.model or sub_model}"
-        f" · auth: {transport.auth_label(d.cfg)})\n\n{res.answer}\n\n---\n"
+        f" · auth: {transport.auth_label(d.cfg)})\n\n{res.answer}{_cut_note(res)}\n\n---\n"
         f"tokens: {res.input_tokens:,} in / {res.output_tokens:,} out"
     )
 

@@ -113,12 +113,22 @@ def server_command() -> list[str]:
     script on PATH: install.ps1 writes a ``better-rlm.cmd`` shim that repoints the
     bare word at a checkout, so a name-based registration can silently flip to a
     different install. ``sys.executable -m`` cannot.
+
+    **-P is load-bearing, not hygiene.** ``-m`` puts the CURRENT DIRECTORY first on
+    sys.path, and Claude Code launches an MCP server with cwd set to the project
+    directory. In a checkout of this repo that directory contains ``better_rlm/``,
+    so the wheel's own interpreter imported the CHECKOUT and read the checkout's
+    config.yaml -- Claude model ids at a MiniMax endpoint, exactly the stale-pointer
+    failure this module exists to prevent, reached through a correct command.
+    Measured from the repo root: without -P ``better-rlm where`` says
+    ``mode: checkout``, with it ``installed (pip)``. -P and not -I, because -I also
+    drops user site-packages, which is where a ``pip install --user`` lives.
     """
     if IS_CHECKOUT:
         if sys.platform == "win32":
             return ["cmd", "/c", str(PKG_ROOT / "run_server.cmd")]
         return ["bash", str(PKG_ROOT / "run_server.sh")]
-    return [sys.executable, "-m", "better_rlm.cli", "server"]
+    return [sys.executable, "-P", "-m", "better_rlm.cli", "server"]
 
 
 def claude_cli() -> str | None:

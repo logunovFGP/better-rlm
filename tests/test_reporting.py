@@ -84,10 +84,60 @@ def test_auth_label_on_the_sdk_path_never_shells_out(monkeypatch):
 
 # --- the model that actually answered ----------------------------------------
 def test_sub_result_carries_the_model_the_transport_reported(monkeypatch, cfg):
-    monkeypatch.setattr(sq, "_call", lambda *a, **k: ("hi", 1, 2, "claude-haiku-4-5"))
+    monkeypatch.setattr(sq, "_call", lambda *a, **k: ("hi", 1, 2, "claude-haiku-4-5", False))
     assert sq.sub_query(cfg, "p", "asked-for-id").model == "claude-haiku-4-5"
     assert sq.sub_query_batch(cfg, ["a", "b"], "asked-for-id", concurrency=1)[0].model == \
         "claude-haiku-4-5"
+
+
+# --- a paid call that produced nothing --------------------------------------
+def _sdk_response(blocks, stop_reason):
+    """The shape the Anthropic SDK returns: typed content blocks plus a stop_reason."""
+    content = [types.SimpleNamespace(type=t, text=v, thinking=v) for t, v in blocks]
+    return types.SimpleNamespace(
+        content=content, stop_reason=stop_reason,
+        usage=types.SimpleNamespace(output_tokens=4096, input_tokens=10))
+
+
+def test_a_reasoning_model_that_ran_out_of_budget_is_reported_truncated():
+    """MiniMax-M2.7 emits `thinking` FIRST and it is billed as output. Measured over a
+    12.9k-token log chunk: 13,015 output tokens, 99% thinking, 286 chars of answer. At
+    the old 4096 cap the budget ran out mid-thought, so NO text block was ever emitted
+    and the tool returned a blank answer under a confident header with a token receipt.
+    stop_reason is the only thing separating that from having nothing to say."""
+    res = tp._result_from_sdk_response(_sdk_response([("thinking", "x" * 900)], "max_tokens"),
+                                       "MiniMax-M2.7")
+    assert res.text == ""
+    assert res.truncated
+
+
+def test_a_complete_answer_is_not_flagged_and_thinking_is_never_the_answer():
+    res = tp._result_from_sdk_response(
+        _sdk_response([("thinking", "scratch"), ("text", "the answer")], "end_turn"),
+        "MiniMax-M2.7")
+    assert res.text == "the answer", "thinking is a scratchpad, not output"
+    assert not res.truncated
+
+
+@pytest.mark.parametrize("answer,expect_empty_wording", [("", True), ("partial list", False)])
+def test_the_truncation_note_reaches_the_caller(answer, expect_empty_wording):
+    """Rendered, not merely recorded. The defect was visible only at this surface."""
+    import better_rlm.batch as batch
+    from better_rlm.subquery import SubResult
+
+    note = batch._cut_note(SubResult(0, answer, 10, 4096, truncated=True))
+    assert "TRUNCATED at max_tokens" in note
+    assert ("used the whole output budget on reasoning" in note) is expect_empty_wording
+    assert str(batch.SUB_MAX_TOKENS) in note.replace(",", ""), "name the knob to raise"
+    assert batch._cut_note(SubResult(0, answer, 10, 20)) == "", "silent when complete"
+
+
+def test_the_sub_model_budget_clears_a_measured_reasoning_call():
+    """13,015 output tokens on one real log chunk. A default below that truncates every
+    sub-query over a real log, which is precisely what 4096 did."""
+    from better_rlm.subquery import SUB_MAX_TOKENS
+
+    assert SUB_MAX_TOKENS > 13_015
 
 
 def test_rlm_status_does_not_shadow_the_transport_module(monkeypatch):
