@@ -266,6 +266,19 @@ landed, and re-running setup to find out is not an answer. `--version` did not
 exist at all -- it fell past every subcommand into the TUI's flag parser and came
 back `unknown flag: --version`, exit 2.
 
+**A wheel's version is a literal in `version.py`, never `importlib.metadata`.**
+That lookup does not describe the running code; it describes a `.dist-info`
+directory beside it, and those outlive what they were written for. Measured:
+site-packages held 0.9.2's code next to BOTH `better_rlm-0.9.2.dist-info` and a
+`better_rlm-0.7.0.dist-info` pip had never removed. `importlib.metadata` returns
+the first in directory order, so `--version` said 0.7.0 -- and pip printed
+`Successfully installed better-rlm-0.7.0` on the run that unpacked the 0.9.2
+wheel, from the same lookup. `scripts/sync_version.py` writes the literal from
+VERSION the way it already writes plugin.json, and two tests hold both to it, so
+a build whose literal drifted fails verify before it can publish.
+`mcpreg.stale_metadata()` names such a leftover, because otherwise a correct
+upgrade reads as a failed one.
+
 `ensure_registered` reads the registration back after writing it: `claude mcp
 add` exiting 0 is not proof the entry landed as asked, and a quoting slip once
 registered `C:Python314Scripts...` with a zero exit.
