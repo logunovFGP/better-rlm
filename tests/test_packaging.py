@@ -259,3 +259,40 @@ def test_a_wheel_never_asks_metadata_for_its_own_version():
                  for a in n.names}
     assert not [m for m in imported if m.startswith("importlib")], (
         f"the stale-dist-info lookup is back: {sorted(imported)}")
+
+
+def test_the_engine_only_backends_are_not_forced_on_every_install():
+    """~21 MB of clients for providers auth.require_anthropic refuses to construct.
+
+    Safe because nothing on a reachable path imports them: rlm/clients/__init__.py
+    imports each backend inside its own branch, and rlm/core/types.py names them only as
+    string literals in a Literal type. The runtime half of that claim is the next test.
+    """
+    hard = set(PYPROJECT["project"]["dependencies"])
+    extra = set(PYPROJECT["project"]["optional-dependencies"]["engine-backends"])
+
+    for name in ("google-genai", "openai", "portkey-ai"):
+        assert not any(d.startswith(name) for d in hard), f"{name} is a hard dep again"
+        assert any(d.startswith(name) for d in extra), f"{name} left the extra"
+    assert any(d.startswith("anthropic") for d in hard), "anthropic IS required"
+
+
+def test_importing_the_server_loads_none_of_them():
+    """The property that makes the extra safe, asserted rather than reasoned about.
+
+    A module-scope import appearing in any engine client we happen to touch would pull
+    one of these back in, and a plain `pip install better-rlm` would start failing at
+    import time on somebody else's machine -- not here, where they are all installed.
+    """
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys, better_rlm.server;"
+        "print(sorted({m.split('.')[0] for m in sys.modules}"
+        " & {'openai', 'google', 'portkey_ai'}))"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                         cwd=str(ROOT), timeout=180)
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.strip() == "[]", f"the server imported {out.stdout.strip()}"
