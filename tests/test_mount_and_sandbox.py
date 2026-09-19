@@ -342,3 +342,38 @@ def test_a_registration_that_reads_back_wrong_is_reported_as_failed(monkeypatch)
     outcome, msg = mcpreg.ensure_registered()
     assert outcome == "failed", outcome
     assert "reads back as" in msg
+
+
+def test_the_suite_never_shells_out_to_the_claude_cli(monkeypatch, tmp_path):
+    """The guard, asserted rather than assumed.
+
+    Seven tests in test_provider.py drive onboard.run() end to end, and setup
+    mounts itself as its last step -- so without a guard every pytest run issued a
+    real `claude mcp remove` + `claude mcp add` and repointed the operator's `rlm`
+    server at the checkout. Two rounds of "fixed" / "broken again" went by before
+    the suite turned out to be the thing undoing the fix.
+
+    Asserts the effect (nothing is spawned), not the mechanism, so a different
+    neutralisation still passes.
+    """
+    import io
+
+    from rich.console import Console
+
+    from better_rlm import onboard, tui
+
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(mcpreg.subprocess, "run",
+                        lambda *a, **k: spawned.append(list(a[0]) if a else []))
+    monkeypatch.setattr(tui, "_save", lambda *a, **k: None)
+    monkeypatch.setattr(tui, "render_status", lambda st: "")
+
+    onboard.commit(Console(file=io.StringIO(), quiet=True), tmp_path / "config.yaml",
+                   onboard.Wizard(mode="api", models=(("root_model", "x"),)))
+
+    # Only the MUTATING calls matter. load_status separately runs
+    # `claude auth status --json`, which is read-only and fine; an assertion of
+    # "no subprocess at all" flagged that and would have sent the next reader
+    # chasing a non-problem.
+    mutating = [c for c in spawned if "mcp" in c and ("add" in c or "remove" in c)]
+    assert mutating == [], f"the suite rewrote a real registration: {mutating}"
