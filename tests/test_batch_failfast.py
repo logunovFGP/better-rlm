@@ -111,7 +111,7 @@ def _counting_builder(build_counts: list[int], i: int):
 def test_batch_builds_prompts_lazily_one_per_worker(monkeypatch, cfg, batch_ctx):
     calls: list[str] = []
     monkeypatch.setattr(sq, "_call", lambda cfg, model, prompt, max_tokens, system: (
-        calls.append(prompt), ("ok", 1, 1, "m"))[1])
+        calls.append(prompt), ("ok", 1, 1, "m", False))[1])
 
     build_counts: list[int] = []
     builders = [_counting_builder(build_counts, i) for i in range(5)]
@@ -126,7 +126,7 @@ def test_batch_builds_prompts_lazily_one_per_worker(monkeypatch, cfg, batch_ctx)
 def test_batch_reports_prompt_build_failure_without_aborting(monkeypatch, cfg, batch_ctx):
     calls: list[str] = []
     monkeypatch.setattr(sq, "_call", lambda cfg, model, prompt, max_tokens, system: (
-        calls.append(prompt), ("ok", 1, 1, "m"))[1])
+        calls.append(prompt), ("ok", 1, 1, "m", False))[1])
 
     def boom() -> str:
         raise ValueError("cannot build")
@@ -789,7 +789,7 @@ def test_the_gate_reserves_what_a_call_emits_not_the_cap_the_cli_discards(monkey
 
     def fake_call(cfg_, model, prompt, max_tokens, system):
         calls.append(prompt)
-        return "ok", 1, 1, "m"
+        return "ok", 1, 1, "m", False
 
     monkeypatch.setattr(sq, "_call", fake_call)
     # Spend 80,000 against an 85,500 line. Reserving the cap projects 82,048 and admits;

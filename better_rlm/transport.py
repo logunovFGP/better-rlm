@@ -55,6 +55,14 @@ class CompletionResult:
     output_tokens: int
     model: str
     cost_usd: float | None = None
+    #: The model stopped because it hit ``max_tokens``, so ``text`` is a fragment --
+    #: or, for a reasoning model, EMPTY. Measured on MiniMax-M2.7 over one 12.9k-token
+    #: log chunk: 13,015 output tokens, of which 99% was the thinking block and 286
+    #: characters were the answer. At the old 4096 cap the budget ran out mid-thought,
+    #: no text block was ever emitted, and the sub-query returned a blank answer under
+    #: a cheerful header with a token receipt attached. A paid call that produced
+    #: nothing must not look like one that had nothing to say.
+    truncated: bool = False
 
 
 class CliCompletionError(RuntimeError):
@@ -289,6 +297,11 @@ def _total_input(usage) -> int:
 
 
 def _result_from_sdk_response(resp, model: str) -> CompletionResult:
+    # Only `text` blocks. A reasoning model also returns `thinking` blocks, which are
+    # its scratchpad and not an answer -- but they are billed as output and they are
+    # emitted FIRST, so a cap that runs out during them yields no text block at all.
+    # Hence stop_reason: without it, that case is indistinguishable from a model that
+    # chose to say nothing.
     text = "".join(
         getattr(b, "text", "") for b in resp.content
         if getattr(b, "type", None) == "text"
@@ -299,6 +312,7 @@ def _result_from_sdk_response(resp, model: str) -> CompletionResult:
         input_tokens=_total_input(usage),
         output_tokens=usage.output_tokens,
         model=model,
+        truncated=getattr(resp, "stop_reason", None) == "max_tokens",
     )
 
 

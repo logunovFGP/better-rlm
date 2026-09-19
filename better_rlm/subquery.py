@@ -33,31 +33,52 @@ class SubResult:
     #: configured id to its closest subscription-supported sibling, so the only
     #: way to know what ran is to read it back.
     model: str = ""
+    #: The call hit ``max_tokens``. ``answer`` is then a fragment, or empty when a
+    #: reasoning model spent the whole budget thinking. Carried separately from
+    #: ``error`` because the call SUCCEEDED and was billed -- the caller has to be
+    #: able to tell "produced nothing" from "failed".
+    truncated: bool = False
+
+
+#: Output budget for one sub-model call.
+#:
+#: Was 4096, chosen when every sub-model was a Claude that answers directly. A
+#: reasoning model emits its thinking FIRST and bills it as output: measured on
+#: MiniMax-M2.7 over one 12.9k-token log chunk, 13,015 output tokens, of which the
+#: thinking block was ~99% and the answer was 286 characters. Every sub-query over a
+#: real chunk therefore hit the cap mid-thought and returned EMPTY.
+#:
+#: 16384 clears that measurement with headroom rather than matching it exactly, since
+#: a denser chunk thinks for longer. It is not a cost increase -- output is billed as
+#: generated, and a model that answers in 200 tokens still costs 200. It does raise
+#: what budget.expected_output reserves per call on the SDK path, which is the honest
+#: direction: the old 4096 reservation was under-counting real MiniMax calls 3x.
+SUB_MAX_TOKENS = 16384
 
 
 @retry_and_queue_retries
 def _call(cfg: Config, model: str, prompt: str, max_tokens: int,
-          system: str | None) -> tuple[str, int, int, str]:
+          system: str | None) -> tuple[str, int, int, str, bool]:
     transport = get_transport(resolve_auth_mode(cfg), cfg)
     res = transport.complete(
         [{"role": "user", "content": prompt}], system, model, max_tokens)
-    return res.text, res.input_tokens, res.output_tokens, res.model
+    return res.text, res.input_tokens, res.output_tokens, res.model, res.truncated
 
 
-def sub_query(cfg: Config, prompt: str, model: str, *, max_tokens: int = 4096,
+def sub_query(cfg: Config, prompt: str, model: str, *, max_tokens: int = SUB_MAX_TOKENS,
               system: str | None = None) -> SubResult:
     try:
-        text, itok, otok, used = _call(cfg, model, prompt, max_tokens, system)
+        text, itok, otok, used, cut = _call(cfg, model, prompt, max_tokens, system)
         # No budget.record here: transport._LedgeredTransport records EVERY completion,
         # including the engine's, so recording again would double-count this one.
-        return SubResult(0, text, itok, otok, model=used)
+        return SubResult(0, text, itok, otok, model=used, truncated=cut)
     except Exception as exc:  # surfaced to caller, not swallowed
         return SubResult(0, "", 0, 0, error=str(exc))
 
 
 def sub_query_batch(cfg: Config, prompts: Sequence[str | Callable[[], str]], model: str, *,
                     concurrency: int,
-                    max_tokens: int = 2048, system: str | None = None,
+                    max_tokens: int = SUB_MAX_TOKENS, system: str | None = None,
                     indices: Sequence[int] | None = None,
                     gate: "budget.Gate | None" = None,
                     on_result: Callable[[SubResult], None] | None = None) -> list[SubResult]:
@@ -112,8 +133,9 @@ def sub_query_batch(cfg: Config, prompts: Sequence[str | Callable[[], str]], mod
             return SubResult(idx, "", 0, 0, error="deferred — session budget reached")
         with bind_rid(parent_rid):
             try:
-                text, itok, otok, used = _call(cfg, model, prompt, max_tokens, system)
-                res = SubResult(idx, text, itok, otok, model=used)   # ledgered in transport
+                text, itok, otok, used, cut = _call(cfg, model, prompt, max_tokens, system)
+                res = SubResult(idx, text, itok, otok, model=used,   # ledgered in transport
+                                truncated=cut)
                 if on_result is not None:
                     try:
                         on_result(res)

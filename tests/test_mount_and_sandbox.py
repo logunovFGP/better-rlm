@@ -33,13 +33,34 @@ def test_a_wheel_registers_its_own_interpreter_not_the_bare_name(monkeypatch):
     -m` cannot be repointed by anything on PATH."""
     monkeypatch.setattr(mcpreg, "IS_CHECKOUT", False)
     cmd = mcpreg.server_command()
-    assert cmd[1:] == ["-m", "better_rlm.cli", "server"]
+    assert cmd[1:] == ["-P", "-m", "better_rlm.cli", "server"]
     # The property is "argv[0] is an interpreter", asserted on the BASENAME. A
     # substring check for "better-rlm" over the whole path passed locally and failed
     # on CI, where the repo itself lives in .../better-rlm/better-rlm/.venv/bin/python
     # -- the project name was in the directory, not in the executable.
     exe = Path(cmd[0]).name.lower()
     assert exe.startswith(("python", "pypy")), cmd[0]
+
+
+def test_a_wheel_registration_cannot_be_shadowed_by_the_servers_working_directory(monkeypatch):
+    """-P, and it is load-bearing.
+
+    `-m` puts the CURRENT DIRECTORY first on sys.path, and Claude Code starts an MCP
+    server with cwd set to the project directory. Working inside a checkout of this
+    repo, that directory holds `better_rlm/` -- so the wheel's own interpreter imported
+    the CHECKOUT and served the checkout's config.yaml: Claude model ids against a
+    MiniMax endpoint, with a registration that named the right interpreter the whole
+    time. Measured from the repo root: `where` said `mode: checkout` without -P and
+    `installed (pip)` with it.
+
+    Not -I: that also drops user site-packages, and `pip install --user better-rlm`
+    puts the package exactly there.
+    """
+    monkeypatch.setattr(mcpreg, "IS_CHECKOUT", False)
+    cmd = mcpreg.server_command()
+    assert "-P" in cmd, "cwd can shadow the installed package again"
+    assert cmd.index("-P") < cmd.index("-m"), "-P must precede -m to apply"
+    assert "-I" not in cmd, "-I would hide a --user install"
 
 
 def test_a_checkout_registers_its_own_launcher(monkeypatch, tmp_path):

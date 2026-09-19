@@ -22,6 +22,6 @@ def test_sub_query_returns_the_model_the_transport_actually_used(monkeypatch, cf
     """On OAuth, models.select maps a configured id to its closest subscription sibling,
     so the only way to know what ran is to read it back off the response."""
     monkeypatch.setattr(sq, "_call",
-                        lambda cfg, model, prompt, max_tokens, system: ("hi", 3, 1, "haiku-actual"))
+                        lambda cfg, model, prompt, max_tokens, system: ("hi", 3, 1, "haiku-actual", False))
     res = sq.sub_query(cfg, "summarize", "requested-model")
     assert (res.answer, res.model, res.error) == ("hi", "haiku-actual", None)
