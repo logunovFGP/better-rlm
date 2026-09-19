@@ -181,6 +181,28 @@ def _a_credential_written_by_one_test_is_not_seen_by_the_next():
 
 
 @pytest.fixture(autouse=True)
+def _no_test_rewrites_the_operators_mcp_registration(monkeypatch):
+    """Running the suite must not repoint the operator's Claude Code servers.
+
+    Setup mounts itself as its last step, so every test that drives onboard.run()
+    end to end reached ``claude mcp remove`` + ``claude mcp add`` for real -- seven
+    of them in test_provider.py, none of which are about mounting. The suite was
+    silently repointing this machine's `rlm` server at the checkout on every run:
+    exactly the stale-registration failure the mounting feature exists to prevent.
+    It cost two rounds of "I fixed it" / "it is broken again" before the suite
+    itself turned out to be the thing undoing the fix.
+
+    Neutralised at the ONE gate every path passes: with no `claude` on PATH,
+    ensure_registered returns ("skipped", ...) and never spawns anything. Tests
+    genuinely about mounting patch claude_cli themselves, and a test-level
+    monkeypatch wins over an autouse one.
+    """
+    import better_rlm.mcpreg as mcpreg
+
+    monkeypatch.setattr(mcpreg, "claude_cli", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_test_writes_to_the_real_log_dir(monkeypatch):
     """Keep pytest out of the operator's ~/.rlm/logs.
 
