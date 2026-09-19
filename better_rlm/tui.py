@@ -685,7 +685,7 @@ def _save(
         )
         console.print(
             "[yellow]note[/yellow]: a running MCP server keeps the old config until reconnect; "
-            "restart it (or run [bold]claude mcp restart rlm[/bold]) to pick up the change."
+            "start a new Claude Code session to pick up the change."
         )
     else:
         console.print("[grey50]no change[/grey50]")

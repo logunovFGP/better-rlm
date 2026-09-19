@@ -75,8 +75,12 @@ hold unconditionally and are not up for trade:
 
   * diffs of `config.yaml` show every config change that ever shipped --
     there is no `~/.config/better-rlm/` store and must not be one;
-  * the explicit `claude mcp restart rlm` is the only restart surface --
-    no implicit "alias does the right thing" surprise.
+  * a **new Claude Code session** is the only restart surface -- no implicit
+    "alias does the right thing" surprise. This used to say `claude mcp restart
+    rlm`, which is not a subcommand the CLI has (add / add-json / get / list /
+    login / logout / remove / reset-project-choices / serve), so setup closed by
+    telling operators to run something that could not work.
+    `test_no_code_path_tells_the_operator_to_run_claude_mcp_restart` pins it.
 
 **This section used to ban a console-script entry point outright**, to protect a
 third property: that multiple checkouts coexist on one machine. Publishing to
@@ -242,6 +246,23 @@ leaving it. Outcomes are reported, not silent: `ok` / `added` / `repointed` /
     checkout TUI repoints to the checkout, and says so;
   * Claude Code only. cline is a separate target with its own config file and is
     deliberately not attempted.
+
+### Setup says which build it is, and what else is installed
+
+Two setup runs were completed against a stale install whose output was
+indistinguishable from a good one, so `_mount` now prints
+`ran: better-rlm <version> from <root>` before the mount line.
+
+`mcpreg.install_identity()` also finds OTHER copies of `better_rlm` on the
+machine and setup names them. Which copy Python loads is decided by sys.path
+order, not by which was installed last -- and `pip uninstall` removes the
+**newer** one first, silently downgrading the machine. That is the actual root
+cause of the stale runs, so the warning says `pip install --upgrade` and warns
+off `pip uninstall` explicitly.
+
+`ensure_registered` reads the registration back after writing it: `claude mcp
+add` exiting 0 is not proof the entry landed as asked, and a quoting slip once
+registered `C:Python314Scripts...` with a zero exit.
 
 ### A missing sandbox is a routing instruction, not an error
 

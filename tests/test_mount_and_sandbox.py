@@ -79,7 +79,11 @@ def test_a_registration_pointing_elsewhere_is_repointed_and_reported(monkeypatch
     calls: list[list[str]] = []
     stale = ["cmd", "/c", "G:" + chr(92) + "old" + chr(92) + "run_server.cmd"]
     monkeypatch.setattr(mcpreg, "claude_cli", lambda: "claude")
-    monkeypatch.setattr(mcpreg, "registered_command", lambda c: stale)
+    # Stale on the first read, correct on the read-back after the add -- the real
+    # sequence. A stub that returns stale forever now reports "failed", which is
+    # the read-back doing its job rather than a regression.
+    reads = iter([stale, mcpreg.server_command()])
+    monkeypatch.setattr(mcpreg, "registered_command", lambda c: next(reads))
     monkeypatch.setattr(mcpreg, "_run", lambda a: (calls.append(a), (0, ""))[1])
 
     outcome, msg = mcpreg.ensure_registered()
@@ -244,3 +248,97 @@ def test_rlm_query_also_degrades_instead_of_raising(monkeypatch, tmp_path):
     out = srv.rlm_query("ctx_x", "why?")
     assert "USE INSTEAD" in out and "rlm_sub_query_batch" in out
     assert not out.startswith("ERROR in"), out[:120]
+
+
+# --- setup must not lie about what it did ---------------------------------------
+
+
+def test_no_code_path_tells_the_operator_to_run_claude_mcp_restart():
+    """`claude mcp restart` DOES NOT EXIST.
+
+    The CLI has add / add-json / get / list / login / logout / remove /
+    reset-project-choices / serve -- and no restart. Setup, /mode, /provider and the
+    model pickers all closed by telling the operator to run it, so following the
+    instructions literally could not work and the server stayed stale. Verified
+    against `claude mcp --help`; this pins it so the phrase cannot drift back in.
+    """
+    root = Path(__file__).resolve().parent.parent
+    offenders = []
+    for py in (root / "better_rlm").glob("*.py"):
+        for n, line in enumerate(py.read_text(encoding="utf-8").splitlines(), 1):
+            if "mcp restart" in line and not line.lstrip().startswith("#"):
+                offenders.append(f"{py.name}:{n}")
+    assert not offenders, f"a non-existent command is printed at {offenders}"
+
+
+def test_setup_names_the_build_it_just_ran(tmp_path, monkeypatch):
+    """Setup was completed twice against a stale install with no mounting step, and
+    nothing on screen told the operator which build they were on. A version and an
+    install root make that visible in one line."""
+    import io
+
+    from rich.console import Console
+
+    from better_rlm import onboard, tui
+
+    monkeypatch.setattr(mcpreg, "ensure_registered", lambda **k: ("ok", "already mounted"))
+    monkeypatch.setattr(tui, "_save", lambda *a, **k: None)
+    monkeypatch.setattr(tui, "render_status", lambda st: "")
+
+    buf = io.StringIO()
+    onboard.commit(Console(file=buf, width=200), tmp_path / "config.yaml",
+                   onboard.Wizard(mode="api", models=(("root_model", "x"),)))
+    out = buf.getvalue()
+
+    version, active, _ = mcpreg.install_identity()
+    assert version in out, "setup did not say which version ran"
+    assert active.name in out, "setup did not say which install ran"
+
+
+def test_a_second_installed_copy_is_called_out(tmp_path, monkeypatch):
+    """Two site directories can each hold a better_rlm, and sys.path order decides
+    which one runs -- not which was installed last. That is exactly how two setup
+    runs landed on a stale build, and `pip uninstall` makes it worse by removing the
+    newer copy first."""
+    import io
+
+    from rich.console import Console
+
+    from better_rlm import onboard, tui
+
+    ghost = tmp_path / "other-site-packages"
+    monkeypatch.setattr(mcpreg, "install_identity",
+                        lambda: ("9.9.9", tmp_path / "active", [ghost]))
+    monkeypatch.setattr(mcpreg, "ensure_registered", lambda **k: ("ok", "already mounted"))
+    monkeypatch.setattr(tui, "_save", lambda *a, **k: None)
+    monkeypatch.setattr(tui, "render_status", lambda st: "")
+
+    buf = io.StringIO()
+    onboard.commit(Console(file=buf, width=200), tmp_path / "config.yaml",
+                   onboard.Wizard(mode="api", models=(("root_model", "x"),)))
+    out = buf.getvalue()
+
+    assert "other-site-packages" in out, "a shadowing copy was not mentioned"
+    assert "uninstall" in out, "the operator was not warned off the command that downgrades them"
+
+
+def test_install_identity_never_lists_the_active_root_as_a_duplicate():
+    """A one-install machine must produce no warning at all, or the warning becomes
+    noise everybody learns to skip."""
+    _version, active, others = mcpreg.install_identity()
+    assert active not in others
+
+
+def test_a_registration_that_reads_back_wrong_is_reported_as_failed(monkeypatch):
+    """`claude mcp add` exiting 0 is not proof the entry landed as asked. A quoting
+    slip once registered `C:Python314Scripts...` with a zero exit, and only reading
+    it back afterwards showed it."""
+    monkeypatch.setattr(mcpreg, "claude_cli", lambda: "claude")
+    monkeypatch.setattr(mcpreg, "_run", lambda a: (0, ""))
+    # Not registered before; afterwards it reads back as something else entirely.
+    reads = iter([None, ["cmd", "/c", "mangled"]])
+    monkeypatch.setattr(mcpreg, "registered_command", lambda c: next(reads))
+
+    outcome, msg = mcpreg.ensure_registered()
+    assert outcome == "failed", outcome
+    assert "reads back as" in msg

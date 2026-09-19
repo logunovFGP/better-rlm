@@ -265,7 +265,7 @@ better-rlm auth                    # long-lived token, for a server you leave ru
 ```
 
 `better-rlm` edits `config.yaml` only. The MCP server reads it at startup, so a change takes
-effect on the next `claude mcp restart rlm` — never mid-session.
+effect in the next Claude Code session — never mid-session.
 
 **6. No Docker? (optional)**
 
