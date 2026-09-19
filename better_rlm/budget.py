@@ -47,12 +47,12 @@ both callers add it.
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from . import fsutil
 from .config import Clock, Config, estimate_tokens
 
 #: Ledger lines older than the widest window we would ever ask about are dead weight.
@@ -121,14 +121,12 @@ def record(cfg: Config, model: str, itok: int, otok: int, *, est: int = 0,
 
 def _prune(cfg: Config, now: Clock) -> None:
     """Drop records older than _PRUNE_AFTER_H once the file grows past a few hundred KB.
-    Rewrite via tmp + os.replace so a crash cannot truncate the ledger."""
+    Rewritten through fsutil.atomic_write, so a crash cannot truncate the ledger."""
     try:
         if cfg.budget_ledger.stat().st_size < 512_000:
             return
         keep = _read_lines(cfg.budget_ledger, now() - _PRUNE_AFTER_H * 3600)
-        tmp = cfg.budget_ledger.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text("".join(json.dumps(r) + "\n" for r in keep), encoding="utf-8")
-        os.replace(tmp, cfg.budget_ledger)
+        fsutil.atomic_write(cfg.budget_ledger, "".join(json.dumps(r) + "\n" for r in keep))
     except OSError:
         pass
 
@@ -216,10 +214,7 @@ def note_limit_hit(cfg: Config, *, now: Clock = time.time) -> None:
             max(int(prev), s.tokens) if isinstance(prev, (int, float)) and prev > 0 else s.tokens
         )
         st["observed_at"] = now()
-        cfg.budget_state.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cfg.budget_state.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(st, indent=2), encoding="utf-8")
-        os.replace(tmp, cfg.budget_state)
+        fsutil.atomic_write(cfg.budget_state, json.dumps(st, indent=2))
     except OSError:
         pass
 

@@ -33,6 +33,7 @@ import time
 import uuid
 from pathlib import Path
 
+from . import fsutil
 from .config import Clock, Config, load_config
 from .output import bound_output
 
@@ -147,29 +148,23 @@ def _run_retention_sweep(cfg: Config, own_path: Path, *,
     """
     try:
         log_dir = cfg.log_dir
-        sentinel = log_dir / ".sweep"
         now = now_fn()
-        # Cooldown: skip if a recent sweep already ran (avoids redundant concurrent sweeps).
-        try:
-            if now - sentinel.stat().st_mtime < cfg.log_sweep_cooldown_s:
-                return
-        except FileNotFoundError:
-            pass
-        # Touch the sentinel atomically so concurrent starts see the cooldown.
-        tmp = log_dir / f".sweep.{os.getpid()}.tmp"
-        try:
-            tmp.write_text(str(now))
-            os.replace(tmp, sentinel)
-        except OSError:
-            # Don't orphan the tmp: the prune below globs rlm-mcp-*.log*, so nothing
-            # else ever collects one. (Found one stuck in ~/.rlm/logs for days.)
-            with contextlib.suppress(OSError):
-                tmp.unlink(missing_ok=True)
-        # That unlink covers a FAILED replace, but not a process KILLED between the
-        # write and the replace — no except block runs for SIGKILL, and the pool of
-        # pre-warmed spares is killed routinely. So collect strays here as well, which
-        # is also what retires the ones older builds already left behind. Age-gated so
-        # a tmp another process is mid-write on is never taken.
+        # The cooldown claim is fsutil.claim_sweep -- the same decision results.py makes
+        # about the cache and the store, which this module kept its own copy of. The CAPS
+        # below stay here: they are what the three sweepers genuinely disagree about.
+        #
+        # One behaviour change: a sentinel this process could not WRITE now skips the
+        # sweep, where the inline copy swept anyway. Both sweepers behave alike now, and
+        # a log_dir we cannot write a sentinel into is one we almost certainly cannot
+        # delete from either -- the next start tries again.
+        if not fsutil.claim_sweep(log_dir, cfg.log_sweep_cooldown_s, now):
+            return
+        # claim_sweep cleans up after a FAILED replace, but no except block runs for a
+        # process KILLED between the write and the replace — and the pool of pre-warmed
+        # spares is killed routinely. So collect strays here as well, which is also what
+        # retires the ones older builds left behind. Age-gated, so a tmp another process
+        # is mid-write on is never taken. This directory is the only one that does this;
+        # results.py's two sweeps have no equivalent, which is a gap and not a rule.
         for stray in log_dir.glob(".sweep.*.tmp"):
             with contextlib.suppress(OSError):
                 if now - stray.stat().st_mtime > _TMP_ORPHAN_AGE_S:
