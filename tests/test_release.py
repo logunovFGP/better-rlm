@@ -176,3 +176,97 @@ def test_publish_ships_the_artifacts_the_release_job_built():
     assert not any("uv build" in (s.get("run") or "") for s in steps), (
         "publish rebuilds instead of reusing the release job's dist/"
     )
+
+
+# --- the invariant, across every workflow ---------------------------------------
+
+
+def _all_workflows() -> dict[str, dict]:
+    d = ROOT / ".github" / "workflows"
+    return {p.name: yaml.safe_load(p.read_text(encoding="utf-8"))
+            for p in sorted(d.glob("*.yml")) + sorted(d.glob("*.yaml"))}
+
+
+def _publishes(wf: dict) -> list[str]:
+    """Job names that could release or publish.
+
+    Several independent signals, because any one alone is easy to reintroduce
+    without noticing the others. A job inherits the WORKFLOW-level permissions
+    block unless it sets its own -- reading only the job's own block let a
+    workflow-level `contents: write` through, which a mutation caught.
+    """
+    top = wf.get("permissions") or {}
+    out = []
+    for name, job in (wf.get("jobs") or {}).items():
+        perms = job.get("permissions", top) or {}
+        blob = yaml.safe_dump(job)
+        if (perms.get("id-token") == "write"
+                or perms.get("contents") == "write"
+                or "pypa/gh-action-pypi-publish" in blob
+                or "gh release create" in blob
+                or "twine upload" in blob):
+            out.append(name)
+    return out
+
+
+def test_no_branch_triggered_workflow_can_publish():
+    """The generalised form of test_a_merge_can_never_publish.
+
+    That test reads release.yml alone, so the moment a SECOND workflow exists the
+    invariant it defends -- a merge can never publish -- stops being enforced
+    repo-wide. verify.yml was added for a good reason (see below) and is exactly
+    the shape that would have slipped past. Any workflow reachable from a branch
+    push or a pull request must have no job that can release or upload.
+    """
+    for name, wf in _all_workflows().items():
+        triggers = _triggers(wf) or {}
+        push = triggers.get("push") or {}
+        branch_reachable = bool(push.get("branches")) or "pull_request" in triggers
+        if not branch_reachable:
+            continue
+        assert not _publishes(wf), (
+            f"{name} runs on a branch/PR and has publishing job(s) "
+            f"{_publishes(wf)} -- a merge could publish"
+        )
+
+
+def test_the_suite_runs_before_a_tag_is_ever_pushed():
+    """Three of the last six releases failed their FIRST tag and were re-cut, every
+    time on a defect only a runner could see (a Windows cp1252 console, ambient
+    machine state, the runner's own checkout path). With verify running only at tag
+    time, the release WAS the first CI run -- the most expensive place to find out,
+    and it burns a version number each time.
+    """
+    branch_verified = [
+        name for name, wf in _all_workflows().items()
+        if ((_triggers(wf) or {}).get("push") or {}).get("branches")
+    ]
+    assert branch_verified, (
+        "no workflow runs on a branch push, so a change's first CI execution is its "
+        "release. Keep verify.yml."
+    )
+
+
+def test_the_branch_gate_tests_as_much_as_the_release_gate():
+    """A cheaper matrix on the branch gate is the same hole in a smaller shape: the
+    Windows-only failures it exists to catch would sail through a ubuntu-only run."""
+    rel = _workflow()["jobs"]["verify"]["strategy"]["matrix"]
+    for name, wf in _all_workflows().items():
+        if name == WORKFLOW.name:
+            continue
+        if not ((_triggers(wf) or {}).get("push") or {}).get("branches"):
+            continue
+        got = wf["jobs"]["verify"]["strategy"]["matrix"]
+        assert set(got["os"]) >= set(rel["os"]), f"{name} skips {set(rel['os']) - set(got['os'])}"
+        assert set(map(str, got["python"])) >= set(map(str, rel["python"])), name
+
+
+def test_every_workflow_runs_the_one_verify_command():
+    """One command, so a gate cannot pass while the documented command fails."""
+    want = json.loads(
+        (ROOT / "trunk-based.json").read_text(encoding="utf-8"))["verify_command"]
+    for name, wf in _all_workflows().items():
+        runs = [s.get("run", "") for job in (wf.get("jobs") or {}).values()
+                for s in (job.get("steps") or [])]
+        if any("pytest" in r for r in runs):
+            assert want in runs, f"{name} does not run {want!r} verbatim; got {runs}"
