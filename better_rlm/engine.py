@@ -13,6 +13,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -294,6 +296,86 @@ def run_query(cfg: Config, context_text: str, question: str,
     }
 
 
+class SandboxUnavailable(RuntimeError):
+    """The code sandbox cannot start. Carries operator- AND agent-facing guidance.
+
+    Raised instead of letting the raw docker error escape, because the raw error
+    ("failed to connect to the docker API at npipe:...") tells an agent nothing
+    about what to do next, and the honest answer is that most of this server still
+    works: only rlm_exec and rlm_query need the sandbox.
+    """
+
+
+#: Tools that do NOT need the sandbox, named in the failure so an agent can route
+#: around it instead of giving up or retrying the same call.
+_NO_SANDBOX_ALTERNATIVES = (
+    "rlm_grep(ctx_id, pattern)        search and count -- free, no model call",
+    "rlm_sub_query(ctx_id, prompt)    one semantic question over the context",
+    "rlm_sub_query_batch(ctx_id, ...) classify or aggregate every chunk",
+    "rlm_estimate(ctx_id, prompt)     forecast a batch -- free",
+)
+
+
+def sandbox_diagnosis(cfg: Config) -> str | None:
+    """Why the Docker sandbox will not start, or None when it should.
+
+    Three distinct causes with three different fixes, so they are told apart rather
+    than collapsed into "docker unavailable": not installed, installed but the
+    daemon is down, and daemon up but the image was never built (the normal state
+    of a pip install, which ships no image).
+    """
+    if not cfg.use_docker:
+        return None
+    if shutil.which("docker") is None:
+        return "Docker is not installed on this machine."
+    try:
+        p = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"Could not ask Docker whether it is running ({type(exc).__name__})."
+    if p.returncode != 0:
+        return "Docker is installed but its daemon is not running."
+    try:
+        q = subprocess.run(["docker", "image", "inspect", cfg.sandbox_image],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None                      # daemon answered; let the real call decide
+    if q.returncode != 0:
+        return (f"The sandbox image {cfg.sandbox_image!r} has not been built "
+                "(a pip install ships no image).")
+    return None
+
+
+def sandbox_guidance(cfg: Config, reason: str) -> str:
+    """The message an agent reads when the sandbox is gone. Names the substitutes.
+
+    Deliberately does NOT fall back to `sandbox: local` on its own. Local means the
+    generated code runs ON THE HOST with no isolation; quietly dropping the
+    isolation because a daemon happens to be down would turn an outage into a
+    privilege escalation. It stays an explicit, deliberate opt-in.
+    """
+    alts = "\n".join(f"  - {a}" for a in _NO_SANDBOX_ALTERNATIVES)
+    return (
+        f"Sandbox unavailable: {reason}\n"
+        "The user has not enabled the Docker sandbox, so rlm_exec and rlm_query "
+        "cannot run. "
+        "Every other tool still works -- do not retry this call.\n\n"
+        f"USE INSTEAD:\n{alts}\n\n"
+        "TO ENABLE: start Docker Desktop (or install it), then retry. "
+        "Host execution with NO isolation is available by setting "
+        f"`sandbox: local` in {cfg_path_hint()} -- an explicit choice, "
+        "not a fallback."
+    )
+
+
+def cfg_path_hint() -> str:
+    from .config import config_file
+    try:
+        return str(config_file())
+    except Exception:                    # noqa: BLE001 - a hint must never raise
+        return "config.yaml"
+
+
 class ReplSession:
     """Persistent sandbox REPL for rlm_exec / variables.
 
@@ -314,7 +396,14 @@ class ReplSession:
             env_kwargs = ({"image": self.cfg.sandbox_image,
                            "timeout_s": self.cfg.sandbox_timeout_s}
                           if self.cfg.use_docker else {})
-            self._env = get_environment(self.cfg.sandbox, env_kwargs)
+            reason = sandbox_diagnosis(self.cfg)
+            if reason:
+                raise SandboxUnavailable(sandbox_guidance(self.cfg, reason))
+            try:
+                self._env = get_environment(self.cfg.sandbox, env_kwargs)
+            except Exception as exc:     # noqa: BLE001 - re-raised with guidance
+                raise SandboxUnavailable(
+                    sandbox_guidance(self.cfg, str(exc).strip()[:200])) from exc
             self._env.execute_code("answer = {'content': '', 'ready': False}")
         return self._env
 

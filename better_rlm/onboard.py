@@ -39,7 +39,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 
-from . import describe, envfile, picker, probe
+from . import describe, envfile, mcpreg, picker, probe
 from .describe import (
     MODE_CLI,
     PROVIDER_CUSTOM,
@@ -388,9 +388,35 @@ def commit(console: Console, config_path: Path, w: Wizard) -> bool:
         border_style="green" if ok else "yellow"))
     if w.probe_note:
         console.print(f"[yellow]The connection test did not pass: {w.probe_note}[/yellow]")
-    console.print("[grey50]A running server keeps its own copy: "
-                  "claude mcp restart rlm to pick this up.[/grey50]")
+    _mount(console)
     return ok
+
+
+#: How each mcpreg outcome is reported. Mounting is part of finishing setup, not a
+#: separate chore: an operator who sees "Ready" and is not actually mounted has been
+#: told something false, and a registration left pointing at a DIFFERENT install
+#: reads a different config.yaml entirely -- which is how a checkout kept serving
+#: stale models long after the wizard wrote good ones to ~/.rlm.
+_MOUNT_STYLE = {
+    "ok": ("green", "Mounted"),
+    "added": ("green", "Mounted"),
+    "repointed": ("yellow", "Re-mounted"),
+    "skipped": ("yellow", "Not mounted"),
+    "failed": ("red", "Not mounted"),
+}
+
+
+def _mount(console: Console) -> str:
+    """Register this install with Claude Code, and say plainly what happened."""
+    outcome, detail = mcpreg.ensure_registered()
+    colour, title = _MOUNT_STYLE.get(outcome, ("yellow", "Not mounted"))
+    console.print(f"[{colour}]{title}:[/{colour}] {detail}")
+    if outcome in ("added", "repointed"):
+        # The registration is on disk; a session already holding a connection keeps
+        # the old process until it reconnects.
+        console.print("[grey50]Start a new Claude Code session, or run "
+                      "claude mcp restart rlm, to pick this up.[/grey50]")
+    return outcome
 
 
 def run(console: Console, config_path: Path) -> bool:
