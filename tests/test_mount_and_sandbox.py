@@ -203,7 +203,7 @@ def test_the_guidance_names_the_tools_that_still_work():
     """The whole point: an agent handed a docker socket path retries the same call;
     one handed this reroutes to the tools that need no sandbox."""
     msg = engine.sandbox_guidance(_cfg(), "the daemon is not running")
-    for alt in ("rlm_grep", "rlm_sub_query", "rlm_sub_query_batch", "rlm_estimate"):
+    for alt in ("rlm_grep", "rlm_sub_query", "rlm_sub_query_batch", "rlm_read_chunk"):
         assert alt in msg, f"{alt} is not offered as an alternative"
     assert "do not retry" in msg.lower()
     assert "has not enabled" in msg

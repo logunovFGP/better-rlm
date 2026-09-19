@@ -497,9 +497,9 @@ def test_a_brand_new_install_runs_setup_even_when_the_claude_cli_is_logged_in(tm
 
 def test_a_hand_typed_model_id_says_what_is_not_known_about_it(quiet_console) -> None:
     """A custom id is accepted without checking it against a list -- the endpoint is
-    the authority. But accepting it silently hid two consequences: the engine has no
+    the authority. But accepting it silently hid a consequence: the engine has no
     window for it, so it assumes the 128k default and chunks far earlier than a 1M
-    model needs, and it has no rate, so every cost line reads unpriced.
+    model needs.
 
     Found by typing MiniMax-Text-01 into the wizard and getting no indication that it
     would be treated as an eighth the size of the MiniMax-M3 beside it in the list.
@@ -515,7 +515,7 @@ def test_a_hand_typed_model_id_says_what_is_not_known_about_it(quiet_console) ->
     out = buf.getvalue()
     assert "MiniMax-Text-01" in out
     assert "128,000" in out, out
-    assert "unpriced" in out, out
+    assert "$" not in out and "price" not in out, "no rate is quoted anywhere now"
 
 
 def test_a_catalogued_model_draws_no_warning(quiet_console) -> None:

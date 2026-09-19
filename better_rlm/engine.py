@@ -47,7 +47,7 @@ if not hasattr(_dr_probe, "RLM_RESULT_SENTINEL"):
 
 from .auth import patch_engine
 from .sandbox_reap import reap_stale_sandboxes
-from .config import COST_PER_MTOK, Config, cost_usd
+from .config import Config
 from .logsetup import log_event
 from rlm.utils.prompts import RLM_SYSTEM_PROMPT
 
@@ -128,26 +128,19 @@ def build_rlm(cfg: Config, root_model: str, sub_model: str) -> RLM:
     )
 
 
-def usage_breakdown(usage_summary, report_cost: bool = False) -> tuple[list[dict], float | None]:
-    """Per-model token rows from the engine's UsageSummary (keyed by model). Cost is
-    included only when ``report_cost`` — otherwise every cost is None, never 0.0."""
-    rows: list[dict] = []
-    total = 0.0
+def usage_breakdown(usage_summary) -> list[dict]:
+    """Per-model token rows from the engine's UsageSummary (keyed by model).
+
+    Tokens only. These come back FROM the API, so they are counted; a money figure
+    beside them would be quoted from a rate table this process cannot verify.
+    """
     summaries = getattr(usage_summary, "model_usage_summaries", {}) or {}
-    for model, s in summaries.items():
-        # None (not 0.0) when reporting is off: a zero would read as "this was free".
-        # Also None for a model with no published rate -- same reason.
-        priced = report_cost and model in COST_PER_MTOK
-        c = cost_usd(model, s.total_input_tokens, s.total_output_tokens) if priced else None
-        total += c or 0.0
-        rows.append({
-            "model": model,
-            "calls": s.total_calls,
-            "input_tokens": s.total_input_tokens,
-            "output_tokens": s.total_output_tokens,
-            "cost_usd": round(c, 6) if c is not None else None,
-        })
-    return rows, (round(total, 6) if report_cost else None)
+    return [{
+        "model": model,
+        "calls": s.total_calls,
+        "input_tokens": s.total_input_tokens,
+        "output_tokens": s.total_output_tokens,
+    } for model, s in summaries.items()]
 
 
 def _log_iteration(depth: int, iteration: int, duration: float) -> None:
@@ -265,14 +258,13 @@ def run_query(cfg: Config, context_text: str, question: str,
             "root_model": root_model,
             "sub_model": sub_model,
             "usage": [],
-            "cost_usd": None,
             "resumable": saved,
             "next_iteration": int(getattr(exc, "next_iteration", 0)) if saved else None,
             "resumed_from": resumed_from,
         }
     if checkpoint is not None:
         _clear_checkpoint(checkpoint)   # done: nothing left to resume
-    rows, total = usage_breakdown(result.usage_summary, cfg.report_cost)
+    rows = usage_breakdown(result.usage_summary)
     answer = result.response or ""
     # turns ~= number of root-model calls (one per orchestrator iteration).
     turns = next((r["calls"] for r in rows if r["model"] == root_model), 0)
@@ -281,8 +273,6 @@ def run_query(cfg: Config, context_text: str, question: str,
               exec_time=round(result.execution_time, 2),
               in_tok=sum(r["input_tokens"] for r in rows),
               out_tok=sum(r["output_tokens"] for r in rows),
-              # None is dropped by log_event, so a disabled cost logs no field at all.
-              cost=round(total, 4) if total is not None else None,
               answer_bytes=len(answer),
               truncated=(len(answer) > cfg.answer_cap_bytes))
     return {
@@ -291,7 +281,6 @@ def run_query(cfg: Config, context_text: str, question: str,
         "root_model": root_model,
         "sub_model": sub_model,
         "usage": rows,
-        "cost_usd": total,
         "resumed_from": resumed_from,
     }
 
@@ -312,7 +301,7 @@ _NO_SANDBOX_ALTERNATIVES = (
     "rlm_grep(ctx_id, pattern)        search and count -- free, no model call",
     "rlm_sub_query(ctx_id, prompt)    one semantic question over the context",
     "rlm_sub_query_batch(ctx_id, ...) classify or aggregate every chunk",
-    "rlm_estimate(ctx_id, prompt)     forecast a batch -- free",
+    "rlm_read_chunk(ctx_id, index)    read one chunk verbatim -- free",
 )
 
 

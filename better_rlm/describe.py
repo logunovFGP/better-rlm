@@ -381,78 +381,53 @@ def vendor_of(provider: str) -> str:
 
 @dataclass(frozen=True)
 class ModelDescription:
-    """One row of a model picker, and the single source of that model's price.
+    """One row of a model picker: what it is, and what it can hold.
 
-    `price_in`/`price_out` are USD per million tokens, or None when the vendor has
-    published no rate. None is not zero: `config.COST_PER_MTOK` is derived from
-    this table, and a missing entry makes `cost_usd` return 0.0, so a row priced
-    None renders as "unpriced" rather than as a free call.
+    No price columns. A rate is a published claim about a vendor's billing that
+    this table cannot verify and cannot keep current, and every row that lacked
+    one still had to render as something -- so the picker quoted numbers it had
+    no way to check against the invoice.
     """
 
     id: str
     label: str
     context: int                 # input window, tokens
     max_tokens: int              # ceiling on output per call
-    price_in: float | None       # USD per Mtok in
-    price_out: float | None      # USD per Mtok out
     note: str = ""
 
     def detail(self) -> str:
-        """The picker's right-hand column: window, price, and what it is for."""
+        """The picker's right-hand column: window, output ceiling, what it is for."""
         window = (f"{self.context // 1_000_000}M ctx" if self.context >= 1_000_000
                   else f"{self.context // 1000}K ctx")
-        rate = ("no published rate" if self.price_in is None
-                else f"{self.price_in:g}/{self.price_out:g} per Mtok")
-        return " - ".join(p for p in (window, rate, self.note) if p)
+        out = f"{self.max_tokens // 1000}K out"
+        return " - ".join(p for p in (window, out, self.note) if p)
 
-
-# Rates follow the convention config.py already set for Sonnet 5 ("rates cloned
-# from Sonnet 4.6 pending published pricing"): by family, because Anthropic has
-# priced every generation of a family identically so far. claude-fable-5 gets
-# None -- no published rate and no family precedent to clone from. It stays in the
-# list because models.py already remaps it to claude-opus-4-8 on the OAuth path;
-# it is a remapped row, not a dead one.
-_OPUS = (5.0, 25.0)
-_SONNET = (3.0, 15.0)
-_HAIKU = (1.0, 5.0)
 
 MODELS: dict[str, tuple[ModelDescription, ...]] = {
     VENDOR_CLAUDE: (
-        ModelDescription("claude-opus-5", "Claude Opus 5", 1_000_000, 128_000,
-                         *_OPUS, note="deepest reasoning"),
-        ModelDescription("claude-sonnet-5", "Claude Sonnet 5", 1_000_000, 128_000,
-                         *_SONNET, note="best all-round; the default root"),
+        ModelDescription("claude-opus-5", "Claude Opus 5", 1_000_000, 128_000, note="deepest reasoning"),
+        ModelDescription("claude-sonnet-5", "Claude Sonnet 5", 1_000_000, 128_000, note="best all-round; the default root"),
         ModelDescription("claude-fable-5", "Claude Fable 5", 1_000_000, 128_000,
-                         None, None, note="remapped to Opus 4.8 on the CLI path"),
-        ModelDescription("claude-opus-4-8", "Claude Opus 4.8", 1_000_000, 128_000,
-                         *_OPUS, note="the default hardest-task override"),
-        ModelDescription("claude-opus-4-7", "Claude Opus 4.7", 1_000_000, 128_000, *_OPUS),
-        ModelDescription("claude-sonnet-4-6", "Claude Sonnet 4.6", 1_000_000, 128_000,
-                         *_SONNET, note="prior root, still selectable"),
-        ModelDescription("claude-opus-4-6", "Claude Opus 4.6", 1_000_000, 128_000, *_OPUS),
-        ModelDescription("claude-opus-4-5", "Claude Opus 4.5 (latest)", 200_000, 64_000, *_OPUS),
-        ModelDescription("claude-opus-4-5-20251101", "Claude Opus 4.5", 200_000, 64_000,
-                         *_OPUS, note="pinned build"),
-        ModelDescription("claude-haiku-4-5", "Claude Haiku 4.5 (latest)", 200_000, 64_000,
-                         *_HAIKU, note="cheapest; the default sub-model"),
-        ModelDescription("claude-haiku-4-5-20251001", "Claude Haiku 4.5", 200_000, 64_000,
-                         *_HAIKU, note="pinned build"),
-        ModelDescription("claude-sonnet-4-5", "Claude Sonnet 4.5 (latest)", 1_000_000, 64_000, *_SONNET),
-        ModelDescription("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5", 1_000_000, 64_000,
-                         *_SONNET, note="pinned build"),
+                         note="remapped to Opus 4.8 on the CLI path"),
+        ModelDescription("claude-opus-4-8", "Claude Opus 4.8", 1_000_000, 128_000, note="the default hardest-task override"),
+        ModelDescription("claude-opus-4-7", "Claude Opus 4.7", 1_000_000, 128_000),
+        ModelDescription("claude-sonnet-4-6", "Claude Sonnet 4.6", 1_000_000, 128_000, note="prior root, still selectable"),
+        ModelDescription("claude-opus-4-6", "Claude Opus 4.6", 1_000_000, 128_000),
+        ModelDescription("claude-opus-4-5", "Claude Opus 4.5 (latest)", 200_000, 64_000),
+        ModelDescription("claude-opus-4-5-20251101", "Claude Opus 4.5", 200_000, 64_000, note="pinned build"),
+        ModelDescription("claude-haiku-4-5", "Claude Haiku 4.5 (latest)", 200_000, 64_000, note="fastest; the default sub-model"),
+        ModelDescription("claude-haiku-4-5-20251001", "Claude Haiku 4.5", 200_000, 64_000, note="pinned build"),
+        ModelDescription("claude-sonnet-4-5", "Claude Sonnet 4.5 (latest)", 1_000_000, 64_000),
+        ModelDescription("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5", 1_000_000, 64_000, note="pinned build"),
     ),
     VENDOR_MINIMAX: (
-        ModelDescription("MiniMax-M3", "MiniMax M3", 1_048_576, 512_000,
-                         0.3, 1.2, note="1M window; the default root"),
-        ModelDescription("MiniMax-M2.7", "MiniMax M2.7", 204_800, 131_072,
-                         0.3, 1.2, note="the default sub-model"),
-        ModelDescription("MiniMax-M2.7-highspeed", "MiniMax M2.7 highspeed", 204_800, 131_072,
-                         0.6, 2.4, note="same model, 2x the price for lower latency"),
-        ModelDescription("MiniMax-M2.5", "MiniMax M2.5", 204_800, 131_072, 0.3, 1.2),
-        ModelDescription("MiniMax-M2.5-highspeed", "MiniMax M2.5 highspeed", 204_800, 131_072,
-                         0.6, 2.4, note="same model, 2x the price for lower latency"),
-        ModelDescription("MiniMax-M2.1", "MiniMax M2.1", 204_800, 131_072, 0.3, 1.2),
-        ModelDescription("MiniMax-M2", "MiniMax M2", 204_800, 131_072, 0.3, 1.2),
+        ModelDescription("MiniMax-M3", "MiniMax M3", 1_048_576, 512_000, note="1M window; the default root"),
+        ModelDescription("MiniMax-M2.7", "MiniMax M2.7", 204_800, 131_072, note="the default sub-model"),
+        ModelDescription("MiniMax-M2.7-highspeed", "MiniMax M2.7 highspeed", 204_800, 131_072, note="same model, lower latency"),
+        ModelDescription("MiniMax-M2.5", "MiniMax M2.5", 204_800, 131_072),
+        ModelDescription("MiniMax-M2.5-highspeed", "MiniMax M2.5 highspeed", 204_800, 131_072, note="same model, lower latency"),
+        ModelDescription("MiniMax-M2.1", "MiniMax M2.1", 204_800, 131_072),
+        ModelDescription("MiniMax-M2", "MiniMax M2", 204_800, 131_072),
     ),
 }
 
@@ -460,8 +435,8 @@ MODELS: dict[str, tuple[ModelDescription, ...]] = {
 #: The operator still picks -- these only decide what Enter-alone selects.
 #: Claude's row is identical to config._DEFAULTS, so an existing install that
 #: re-runs setup and presses Enter three times keeps exactly what it had.
-#: MiniMax has no cheaper tier (six of seven models are the same 0.3/1.2), so
-#: override = root is the honest answer rather than a fake upgrade.
+#: MiniMax has no stronger tier than M3, so override = root is the honest answer
+#: rather than a fake upgrade.
 ROLE_DEFAULTS: dict[str, tuple[str, str, str]] = {
     VENDOR_CLAUDE: ("claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5"),
     VENDOR_MINIMAX: ("MiniMax-M3", "MiniMax-M3", "MiniMax-M2.7"),

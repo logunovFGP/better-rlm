@@ -24,7 +24,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import results
-from .config import COST_PER_MTOK, Clock, Config, cost_usd, load_config
+from .config import Clock, Config, load_config
 from .context_store import ContextStore
 from .logsetup import LOGGER_NAME, configure_logging
 from .output import bound_output
@@ -88,13 +88,3 @@ class Deps:
         is bounded generously rather than at the raw-content cap."""
         return bound_output(text, self.cfg.answer_cap_bytes)
 
-    def cost_note(self, model: str, itok: int, otok: int) -> str:
-        """``  |  cost: $x.xxxx`` when report_cost is on, else nothing. Off by default:
-        the rate table is Anthropic-only and the CLI path under-counts input tokens, so a
-        printed figure would be confidently wrong."""
-        if not self.cfg.report_cost:
-            return ""
-        if model not in COST_PER_MTOK:
-            # No published rate. $0.0000 would read as "this call was free".
-            return f"  |  cost: unpriced ({model})"
-        return f"  |  cost: ${cost_usd(model, itok, otok):.4f}"

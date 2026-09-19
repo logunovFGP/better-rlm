@@ -162,48 +162,6 @@ def _scan_cache(d: Deps, ctx_id: str, sel: list[int], prompt: str, model: str, *
 # --------------------------------------------------------------------------- #
 # Estimate & budget (no model call)
 # --------------------------------------------------------------------------- #
-def estimate(d: Deps, ctx_id: str, prompt: str = "", max_chunks: int = 0,
-             reduce: bool = True) -> str:
-    """Forecast what ``run`` over this context would cost, and judge it against the
-    headroom left in the session window. Makes no model call."""
-    meta = d.store.get(ctx_id)
-    chunks = meta.chunks
-    strategy = meta.chunk_strategy or default_strategy(d, meta)
-    chunked = bool(chunks)
-    if not chunked:
-        # Chunk boundaries only — no store mutation, because an estimate must not change
-        # the thing it is estimating. A later batch may legitimately chunk differently.
-        text = d.store.read_text(ctx_id)
-        chunks = [c.as_dict() for c in chunk_text(
-            text, strategy, chunk_lines=d.cfg.chunk_lines,
-            chunk_chars=d.cfg.chunk_chars, overlap=d.cfg.chunk_overlap)]
-        del text
-    n = len(chunks)
-    sel = list(range(n if max_chunks <= 0 else min(max_chunks, n)))
-    sub_model = models.select(d.cfg, models.Role.SUB)
-    # The cache scan needs the exact chunk text, which only a chunked context can serve;
-    # an unchunked one reports zero hits and says so rather than guess.
-    cached = (_scan_cache(d, ctx_id, sel, prompt, sub_model, system=MAP_SYSTEM)[1]
-              if chunked else {})
-    done_pos = {pos for pos, i in enumerate(sel) if i in cached}
-    est = budget.estimate_batch(
-        d.cfg, [int(chunks[i].get("est_tokens", 0)) for i in sel], prompt=prompt,
-        max_output_tokens=BATCH_MAX_TOKENS, reduce=reduce,
-        reduce_output_tokens=REDUCE_MAX_TOKENS, done=done_pos, system=MAP_SYSTEM,
-        now=d.clock)
-    cap, _src = budget.ceiling(d.cfg)
-    body = budget.render(budget.judge(d.cfg, est, now=d.clock),
-                         what=f"batch over {ctx_id} ({strategy}, {n} chunks)")
-    if not chunked:
-        body += ("\n\n_Not chunked yet: cached answers can only be counted once "
-                 "rlm_chunk_context has run; the count above assumes none._")
-    return d.answer(
-        body
-        + f"\n\n_Sub-model: {sub_model}. Estimate only — no model call was made._\n\n"
-        + budget.render_query_ceiling(budget.query_ceiling(d.cfg, now=d.clock), cap)
-    )
-
-
 def budget_report(d: Deps) -> str:
     """Spend inside the rolling window, the ceiling being gated against, and when
     headroom next grows."""
@@ -477,7 +435,7 @@ def _render(d: Deps, ctx_id: str, prompt: str, res_list: list[SubResult], sub_mo
     def _raw(extra: str = "") -> str:
         head = (f"## Batch sub-query — map over {len(res_list)} chunks ({used_label}"
                 f" · auth: {transport.auth_label(d.cfg)})\n"
-                f"tokens: {itok:,} in / {otok:,} out{d.cost_note(sub_model, itok, otok)}"
+                f"tokens: {itok:,} in / {otok:,} out"
                 f"{note}{extra}\n\n")
         # Silently truncating here discards findings the caller ALREADY PAID FOR — and
         # with reduce=False they asked for every piece by name. Every answer is already on
@@ -563,6 +521,6 @@ def _reduce(d: Deps, findings: str, prompt: str, sub_model: str, *, ctx_id: str,
     return d.answer(
         f"## Batch sub-query — map+reduce over {n_prompts} chunks ({used_label}"
         f" · auth: {transport.auth_label(d.cfg)})\n"
-        f"tokens: {itok:,} in / {otok:,} out{d.cost_note(sub_model, itok, otok)}{note}\n\n"
+        f"tokens: {itok:,} in / {otok:,} out{note}\n\n"
         f"{red.answer.strip()}"
     )

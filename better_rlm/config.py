@@ -73,19 +73,12 @@ MODEL_SONNET = "claude-sonnet-4-6"  # 1M ctx — prior root (still selectable)
 MODEL_OPUS = "claude-opus-4-8"      # 1M ctx — root override for the hardest tasks
 MODEL_HAIKU = "claude-haiku-4-5"    # 200K ctx — cheap sub-LLM for chunk work
 
-# Derived from the picker's own catalogue rather than hand-maintained beside it.
-# Two tables meant a model could be offered with no rate, and cost_usd returns 0.0
-# for an unknown id -- so every MiniMax call priced at zero in the cost line, in a
-# fork whose stated reason to exist is the budget ledger. Same rows, one source.
-# Rows with no published rate (describe.ModelDescription.price_in is None) are
-# absent here on purpose; the display says "unpriced" instead of claiming $0.0000.
-# Cost is informational only on the OAuth/CLI path (it draws on the subscription).
-COST_PER_MTOK: dict[str, tuple[float, float]] = {
-    m.id: (m.price_in, m.price_out)
-    for _rows in describe.MODELS.values()
-    for m in _rows
-    if m.price_in is not None and m.price_out is not None
-}
+# There is no price table here, and there must not be one again. A rate is a
+# published fact about a vendor's billing, not something this process can observe:
+# it goes stale silently, it was wrong for all seven MiniMax models at once (an id
+# the table did not know priced at $0.0000, which reads as free), and a money figure
+# printed beside a token count looks measured when it is only quoted. The TOKEN
+# ledger stays -- those numbers come back from the API, counted rather than quoted.
 
 HAIKU_CONTEXT_TOKENS = 200_000
 
@@ -158,11 +151,6 @@ _DEFAULTS: dict[str, Any] = {
     # API key. Overridable per-launch with the RLM_MODE env var (e.g. in the
     # `claude mcp add -e RLM_MODE=claude-cli` registration).
     "mode": "auto",
-    # Cost reporting is OFF by default: the rate table below only covers Anthropic
-    # models, and on the claude-CLI path the reported input-token count under-counts
-    # the piped prompt — so a printed "$" figure would be confidently wrong. Turn it on
-    # only when the configured models are in COST_PER_MTOK and you trust the counts.
-    "report_cost": False,
     # Context ceiling of the SUB model, used to refuse an oversized single sub-query and
     # to skip a too-large reduce pass. 200K is Haiku's; other providers differ wildly
     # (Gemini is 1M+), so it MUST track the configured sub_model, not a vendor constant.
@@ -300,7 +288,6 @@ class Config:
     throttle_min_interval_s: float
     oauth_retry_waits: tuple[float, ...]
     apikey_retry_waits: tuple[float, ...]
-    report_cost: bool
     sub_context_tokens: int
     mode: str
     provider: str
@@ -369,7 +356,6 @@ def load_config() -> Config:
         oauth_retry_waits=tuple(float(x) for x in m["oauth_retry_waits"]),
         apikey_retry_waits=tuple(float(x) for x in m["apikey_retry_waits"]),
         # RLM_MODE env wins over config.yaml so the mode can be set at registration.
-        report_cost=bool(m["report_cost"]),
         sub_context_tokens=_sub_ctx(m),
         query_timeout_s=int(m["query_timeout_s"]),
         query_max_errors=int(m["query_max_errors"]),
@@ -429,9 +415,3 @@ def estimate_tokens(text_or_len: str | int) -> int:
     return max(1, n // 4)
 
 
-def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
-    """USD cost for a model call from token counts and known rates."""
-    rate = COST_PER_MTOK.get(model)
-    if not rate:
-        return 0.0
-    return (input_tokens / 1_000_000) * rate[0] + (output_tokens / 1_000_000) * rate[1]
