@@ -194,7 +194,7 @@ def auth_label(cfg) -> str:
     global _AUTH_LABEL
     if _AUTH_LABEL is not None:
         return _AUTH_LABEL
-    from .auth import resolve_auth_mode          # lazy: auth imports this module
+    from .auth import resolve_auth_mode  # lazy: auth imports this module
     try:
         mode = resolve_auth_mode(cfg)
     except Exception as exc:                     # noqa: BLE001 - report, never raise
@@ -227,11 +227,11 @@ def cli_auth_status(cfg) -> dict | None:
     try:
         proc = subprocess.run(
             [claude, "auth", "status", "--json"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=30, check=False,
             cwd=None, env=CliTransport._subprocess_env(),
         )
         return json.loads(proc.stdout)
-    except Exception:      # absent, timeout, or a shape we do not recognise
+    except Exception:      # absent, timeout, or a shape we do not recognise  # noqa: BLE001
         return None
 
 
@@ -477,7 +477,7 @@ class CliTransport(CompletionTransport):
             proc = subprocess.run(
                 argv, input=prompt, capture_output=True, text=True,
                 cwd=self._neutral_cwd(), env=self._subprocess_env(),
-                timeout=self.cfg.cli_timeout_s,
+                timeout=self.cfg.cli_timeout_s, check=False,
             )
         except subprocess.TimeoutExpired as exc:
             raise self._timeout(model, start, exc) from exc
@@ -498,7 +498,7 @@ class CliTransport(CompletionTransport):
         try:
             out, err = await asyncio.wait_for(
                 proc.communicate(prompt.encode()), timeout=self.cfg.cli_timeout_s)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             proc.kill()
             raise self._timeout(model, start, exc) from exc
         return self._finish(model, start, proc.returncode,
@@ -704,7 +704,7 @@ def get_transport(auth_mode: str, cfg: Config) -> CompletionTransport:
     clients and the neutral cwd are reused across calls. Every transport is wrapped so its
     spend reaches the ledger — which is why a provider with no transport of ours is
     refused here rather than silently routed around the budget (see auth.require_anthropic)."""
-    from .auth import require_anthropic          # lazy: auth imports this module
+    from .auth import require_anthropic  # lazy: auth imports this module
 
     require_anthropic(cfg)
     ckey = f"anthropic:{auth_mode}"

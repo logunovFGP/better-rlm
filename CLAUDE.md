@@ -391,6 +391,12 @@ on the host with no isolation; dropping isolation because a daemon happens to be
 down turns an outage into a privilege escalation. It is offered in the message as
 an explicit, labelled opt-in and is never taken automatically.
 
+The message now also distinguishes the "CLI not on this process's PATH" case
+(Windows GUI child of Claude Code inheriting a stripped PATH that omits Docker
+Desktop's bin directory) from the genuine "Docker not installed" case. Both
+fall under "deliberately not a fallback to local" — only a deliberate opt-in
+to `sandbox: local` should run model-written Python on the host.
+
 ### The model catalogue, and why it carries no prices
 
 `describe.MODELS` is cline's bundled per-provider model table (its generated

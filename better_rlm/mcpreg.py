@@ -27,7 +27,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .config import IS_CHECKOUT, PKG_ROOT
+from .config import IS_CHECKOUT
 
 #: The name the agent addresses. Matches both installers and the docs.
 SERVER_NAME = "rlm"
@@ -100,7 +100,8 @@ def stale_metadata() -> list[Path]:
     active = Path(__file__).resolve().parent.parent
     try:
         found = sorted(active.glob("better_rlm-*.dist-info"))
-    except OSError:                            # noqa: BLE001 - a probe must not raise
+    except OSError:
+        # A probe must not raise; return what we have.
         return []
     return [d for d in found if d.name != f"better_rlm-{__version__}.dist-info"]
 
@@ -140,7 +141,7 @@ def claude_cli() -> str | None:
 
 def _run(args: list[str]) -> tuple[int, str]:
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=_TIMEOUT_S)
+        p = subprocess.run(args, capture_output=True, text=True, timeout=_TIMEOUT_S, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         return 1, f"{type(exc).__name__}: {exc}"
     return p.returncode, (p.stdout or "") + (p.stderr or "")

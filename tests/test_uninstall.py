@@ -154,7 +154,7 @@ def test_installer_stores_the_token_without_leaking_it(tmp_path):
     setup-token credential is valid for a year.
     """
     m = re.search(r"^rlm_write_token\(\) \{.*?^\}", (ROOT / "install.sh").read_text(),
-                  re.S | re.M)
+                  re.DOTALL | re.MULTILINE)
     assert m, "rlm_write_token() is gone from install.sh"
 
     venv = tmp_path / ".venv_sh" / "bin"
@@ -168,7 +168,7 @@ def test_installer_stores_the_token_without_leaking_it(tmp_path):
 
     secret = "SEKRIT-TOKEN-abcdef0123456789"
     r = subprocess.run(["bash", "fn.sh", secret], cwd=tmp_path,
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, check=False)
     assert r.returncode == 0, r.stderr
     assert secret not in r.stdout + r.stderr, "the installer printed the token"
     assert f"{len(secret)} bytes" in r.stdout, "should report the length instead"
@@ -207,7 +207,7 @@ def test_powershell_writer_avoids_the_bom_trap():
     writer = writer[:writer.index("\n}")]
     # Drop the <# .. #> doc block first: it names Set-Content precisely to say
     # "not this", and a naive negative match reads that as the defect.
-    code = re.sub(r"<#.*?#>", "", writer, flags=re.S)
+    code = re.sub(r"<#.*?#>", "", writer, flags=re.DOTALL)
     assert "Set-Content" not in code, "BOM risk: use WriteAllText + UTF8Encoding($false)"
     assert "WriteAllText" in code and "UTF8Encoding" in code
     assert "$tok.Length" in code, "must report the length, not the token"

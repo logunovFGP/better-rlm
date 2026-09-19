@@ -94,6 +94,13 @@ Everything else — grep, chunking, loading, inspection — works without it. If
 [the documented risk](#security) of running model-written Python on your host, set
 `RLM_SANDBOX=local` in the plugin's MCP server env instead of building the image.
 
+**When the daemon is up but `rlm_exec` still says "Docker is not installed".** Claude Code is a
+GUI app, so on Windows the MCP child inherits a PATH that omits Docker Desktop's bin directory;
+the daemon (reachable via the named pipe) answers fine from a shell but the MCP subprocess sees
+no `docker` on PATH. The probe now consults the daemon directly before trusting the CLI-on-PATH
+check, so this case resolves cleanly without rebuilding. `rlm_status` reports the actual truth:
+`- docker: ok`, `no PATH entry`, `daemon stopped`, `not installed`, or `unknown (...)`.
+
 **Configuring it.** The [operator TUI](#operator-tui--configure-mode-and-models-from-the-cli) ships
 with the plugin and works there — run it from the plugin directory (`/plugin` shows the path):
 

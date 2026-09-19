@@ -143,7 +143,12 @@ def test_the_sub_model_budget_clears_a_measured_reasoning_call():
 def test_rlm_status_does_not_shadow_the_transport_module(monkeypatch):
     """rlm_status had a LOCAL named `transport`, which shadowed the imported module
     and made transport.auth_label() raise 'str has no attribute auth_label' at
-    runtime -- invisible to every unit test that did not call the tool."""
+    runtime -- invisible to every unit test that did not call the tool.
+
+    After the docker-reachability refactor, rlm_status delegates to
+    engine._daemon_reachability for the daemon probe. Stub it so the test
+    stays daemon-free (conftest policy) and exercises only the render path."""
+    monkeypatch.setattr(srv, "_daemon_reachability", lambda: "ok")
     monkeypatch.setattr(tp, "_AUTH_LABEL", "test-label")
     monkeypatch.setattr(srv, "_container_status", lambda: "test-container")
     out = srv.rlm_status()

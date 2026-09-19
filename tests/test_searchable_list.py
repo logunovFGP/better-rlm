@@ -198,7 +198,7 @@ def test_mask_shows_first_and_last_two(value, expected):
 def test_mask_never_reveals_more_than_four_characters():
     from better_rlm.picker import mask_secret
 
-    for n in range(0, 60):
+    for n in range(60):
         secret = "x" * n
         assert len(mask_secret(secret).replace("•", "")) <= 4, n
 
@@ -445,7 +445,7 @@ def test_every_name_the_windows_map_returns_is_a_registered_key_name():
     Runs on every platform: the maps are module-level data, so Linux CI guards the
     Windows branch here even though it cannot execute it.
     """
-    from better_rlm.picker import _ARROWS, KEY_NAMES, _WIN_ARROWS, _WIN_NAMED
+    from better_rlm.picker import _ARROWS, _WIN_ARROWS, _WIN_NAMED, KEY_NAMES
 
     assert set(_WIN_ARROWS.values()) <= KEY_NAMES, "unregistered arrow name"
     assert set(_WIN_NAMED.values()) <= KEY_NAMES, "unregistered key name"
@@ -487,8 +487,6 @@ def _throwaway_console():
 def test_no_picker_swallows_ctrl_c(monkeypatch, call):
     """It must reach the caller. A picker that answers CANCEL cannot be told apart
     from Esc, and the caller's loop then redraws instead of exiting."""
-    from rich.console import Console
-
     from better_rlm import picker
 
     monkeypatch.setattr(picker, "interactive", lambda: True)
@@ -504,8 +502,6 @@ def test_no_picker_swallows_ctrl_c(monkeypatch, call):
 def test_eof_is_still_a_cancel(monkeypatch, fn):
     """The other half of the split. Headless stdin closing is not an interrupt --
     CI and --one-shot feed a pipe, and that path must keep answering CANCEL."""
-    from rich.console import Console
-
     from better_rlm import picker
 
     monkeypatch.setattr(picker, "interactive", lambda: True)

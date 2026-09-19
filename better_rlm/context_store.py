@@ -20,9 +20,8 @@ import threading
 import uuid
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from .config import Config, estimate_tokens
 
@@ -77,7 +76,7 @@ class ContextMeta:
     #: 3,000 entries / 128 KB of meta.json for a context holding one 20-byte file --
     #: and list_metas() parses every meta.json. `files` caps at 100 for the same reason.
     skipped: list[str] = field(default_factory=list)
-    chunk_strategy: Optional[str] = None
+    chunk_strategy: str | None = None
     chunks: list[dict] = field(default_factory=list)
 
 
@@ -193,7 +192,7 @@ class ContextStore:
         for cid in self.list_ids():
             try:
                 metas.append(self.get(cid))
-            except Exception:
+            except Exception:  # noqa: BLE001, S112 - meta loads are best-effort; a corrupt meta for one ctx_id must not hide the others
                 continue
         metas.sort(key=lambda m: m.created, reverse=True)  # created is ISO8601 -> lexical sort
         return metas
@@ -230,7 +229,7 @@ class ContextStore:
         meta = ContextMeta(
             ctx_id=ctx_id, source=source, source_type="text", data_type="text",
             content_path=str(content_path), bytes=0, lines=0, est_tokens=0, sha256="",
-            file_count=1, files=[source], created=datetime.now(timezone.utc).isoformat(),
+            file_count=1, files=[source], created=datetime.now(UTC).isoformat(),
         )
         return self._finalize(meta)
 
@@ -252,7 +251,7 @@ class ContextStore:
         meta = ContextMeta(
             ctx_id=ctx_id, source=str(src), source_type="file", data_type=data_type,
             content_path=str(cp), bytes=0, lines=0, est_tokens=0, sha256="",
-            file_count=1, files=[src.name], created=datetime.now(timezone.utc).isoformat(),
+            file_count=1, files=[src.name], created=datetime.now(UTC).isoformat(),
         )
         return self._finalize(meta)
 
@@ -306,7 +305,7 @@ class ContextStore:
             ctx_id=ctx_id, source=str(root), source_type="dir", data_type="dir",
             content_path=str(content_path), bytes=0, lines=0, est_tokens=0, sha256="",
             file_count=len(files), files=files[:100],
-            created=datetime.now(timezone.utc).isoformat(),
+            created=datetime.now(UTC).isoformat(),
             skipped_counts=_count_reasons(skipped),
             # surprising reasons first: those are the ones that cost an answer
             skipped=sorted(skipped, key=lambda e: e.split(":", 1)[0] in _EXPECTED_SKIPS)[:50],
@@ -314,7 +313,7 @@ class ContextStore:
         return self._finalize(meta)
 
     def load_command(self, argv: list[str], *, source: str, timeout_s: int,
-                     max_bytes: int, merge_stderr: bool = False) -> "CommandRun":
+                     max_bytes: int, merge_stderr: bool = False) -> CommandRun:
         """Run ``argv`` (never through a shell) and stream its stdout into a new context.
 
         Streaming, not capturing: the whole point is inputs bigger than memory, so stdout
@@ -381,7 +380,7 @@ class ContextStore:
         meta = ContextMeta(
             ctx_id=ctx_id, source=source, source_type="command", data_type="text",
             content_path=str(content_path), bytes=0, lines=0, est_tokens=0, sha256="",
-            file_count=1, files=[source], created=datetime.now(timezone.utc).isoformat(),
+            file_count=1, files=[source], created=datetime.now(UTC).isoformat(),
         )
         return CommandRun(self._finalize(meta), rc, stderr_tail, truncated,
                           timed_out.is_set())

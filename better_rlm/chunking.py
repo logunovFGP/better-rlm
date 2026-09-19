@@ -10,16 +10,17 @@ from __future__ import annotations
 import bisect
 import re
 from dataclasses import asdict, dataclass
+from itertools import pairwise
 
 from .config import estimate_tokens
 
 STRATEGIES = ("lines", "paragraphs", "functions", "headings", "semantic", "files")
 
-_FILE_MARK = re.compile(r"^===== FILE: (.*?) \(\d+ bytes\) =====$", re.M)
-_HEADING = re.compile(r"^#{1,6}[ \t]+\S.*$", re.M)
+_FILE_MARK = re.compile(r"^===== FILE: (.*?) \(\d+ bytes\) =====$", re.MULTILINE)
+_HEADING = re.compile(r"^#{1,6}[ \t]+\S.*$", re.MULTILINE)
 _FUNC = re.compile(
     r"^[ \t]*(?:async def |def |class |func |function |fn |public |private |protected )\S",
-    re.M,
+    re.MULTILINE,
 )
 
 
@@ -109,8 +110,8 @@ def _cap_spans(spans: list[tuple[int, int, str]], max_chars: int) -> list[tuple[
 
 def _split_points_to_spans(text: str, points: list[int], max_chars: int) -> list[tuple[int, int, str]]:
     """Given sorted split offsets, build spans, splitting any span exceeding max_chars."""
-    points = sorted(set([0, *points, len(text)]))
-    return _cap_spans([(s, e, "") for s, e in zip(points, points[1:])], max_chars)
+    points = sorted({0, *points, len(text)})
+    return _cap_spans([(s, e, "") for s, e in pairwise(points)], max_chars)
 
 
 def looks_like_file_bundle(head: str) -> bool:
@@ -163,7 +164,7 @@ def chunk_text(text: str, strategy: str, *, chunk_lines: int, chunk_chars: int, 
     if strategy in ("paragraphs", "semantic"):
         target = chunk_chars if strategy == "semantic" else min(chunk_chars, 40_000)
         paras = [m.start() for m in re.finditer(r"\n[ \t]*\n", text)]
-        bounds = sorted(set([0, *[p + 1 for p in paras], len(text)]))
+        bounds = sorted({0, *[p + 1 for p in paras], len(text)})
         spans, cur_start = [], 0
         for b in bounds[1:]:
             if b - cur_start >= target:

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -455,13 +454,13 @@ def _status(**over):
     cli_logged_in came back None and mode `claude-cli` then reported
     "not configured".
     """
-    base = dict(
-        mode=tui.MODE_AUTO, provider="anthropic", root_model="claude-sonnet-5",
-        root_model_override="claude-opus-4-8", sub_model="claude-haiku-4-5",
-        cli_path="claude", cli_available=True, cli_logged_in=True,
-        env_mode=None, env_provider=None, has_api_key=False,
-        base_url="", key_env="", config_written=True,
-    )
+    base = {
+        "mode": tui.MODE_AUTO, "provider": "anthropic", "root_model": "claude-sonnet-5",
+        "root_model_override": "claude-opus-4-8", "sub_model": "claude-haiku-4-5",
+        "cli_path": "claude", "cli_available": True, "cli_logged_in": True,
+        "env_mode": None, "env_provider": None, "has_api_key": False,
+        "base_url": "", "key_env": "", "config_written": True,
+    }
     base.update(over)
     return tui.Status(**base)
 

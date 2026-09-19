@@ -77,7 +77,7 @@ def key_env_for(cfg: Config) -> str:
     settings entry per provider id. One shared variable meant configuring a second
     provider overwrote the first one's key.
     """
-    from .describe import describe_provider, provider_for_config   # data-only, no cycle
+    from .describe import describe_provider, provider_for_config  # data-only, no cycle
 
     pid = provider_for_config(cfg.base_url, cfg.mode)
     return describe_provider(pid).key_env or "ANTHROPIC_API_KEY"
@@ -110,7 +110,7 @@ def auth_status() -> str:
 
     NOTE: claude-cli mode needs NEITHER — the CLI uses its own keychain login.
     """
-    from .describe import PROVIDERS   # data-only, no cycle
+    from .describe import PROVIDERS  # data-only, no cycle
 
     if _clean_secret(os.getenv("CLAUDE_CODE_OAUTH_TOKEN")):
         return "oauth"

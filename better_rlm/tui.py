@@ -32,11 +32,11 @@ What it deliberately does NOT do:
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import shutil
 import subprocess
 import sys
-import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -46,18 +46,16 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 
-from . import config_writer
+from . import config_writer, envfile, picker
 from .config import (
+    MODEL_HAIKU,
     MODEL_OPUS,
     MODEL_SONNET_5,
-    MODEL_HAIKU,
     PKG_ROOT,
     config_file,
     env_file,
     load_config,
 )
-from . import envfile, picker
-from .searchable_list import SearchableItem
 from .describe import (
     AUTH_CLI,
     MODE_API,
@@ -74,6 +72,7 @@ from .describe import (
     provider_for_config,
     providers_for_mode,
 )
+from .searchable_list import SearchableItem
 
 # Sentinels that mean "the user wants to back out / re-enter the picker".
 # The cline-2 picker uses the same idiom (``CHANGE_PROVIDER_ACTION``,
@@ -153,7 +152,7 @@ def load_status(config_path: Path | None = None) -> Status:
     # reports NOT LOGGED IN for a CLI that is signed in.
     cli_logged_in: bool | None = None
     if cli_available:
-        from .transport import cli_auth_status   # lazy: pulls the anthropic SDK
+        from .transport import cli_auth_status  # lazy: pulls the anthropic SDK
         raw = cli_auth_status(SimpleNamespace(cli_path=cli_path))
         flag = raw.get("loggedIn") if raw is not None else None
         # Only a real bool is an answer. bool() on a missing key would render a
@@ -988,11 +987,11 @@ MODE_CARDS: dict[str, tuple[str, str, str]] = {
     # cline's host/proxy terminology, so the same words appear on this screen and
     # in /mode-help rather than two descriptions of one thing.
     MODE_CLI: ("✦", "OAuth — proxy mode",
-               "Reuse your `claude` CLI login. No API key, no per-token cost, "
-               "subject to subscription limits."),
+               ("Reuse your `claude` CLI login. No API key, no per-token cost, "
+                "subject to subscription limits."),
     MODE_API: ("⚙", "API key — host mode",
-               "Talk to the endpoint directly. Higher limits, per-token cost, "
-               "needs a key in .env."),
+               ("Talk to the endpoint directly. Higher limits, per-token cost, "
+                "needs a key in .env."),
 }
 
 

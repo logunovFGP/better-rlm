@@ -89,3 +89,20 @@ markers = [
     "docker: needs a running Docker daemon; excluded from the daemon-free guarantee",
     "live: makes a real model call; excluded from the no-spend guarantee",
 ]
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# Rules we don't want to enable, with reasons:
+# BLE001 - broad-catch is intentional in best-effort housekeeping paths
+#   (log sweep, cache sweep, image probe). Sites carry # noqa: BLE001.
+# S110 - same paths also bare-pass on the cleanup-failure branch.
+# PLR0402 - the test suite uses `import X as X` aliases consistently.
+#   Converting one test to `from X import X` and leaving the rest is worse
+#   than leaving them all alone.
+ignore = ["BLE001", "S110", "PLR0402"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["I001"]
+

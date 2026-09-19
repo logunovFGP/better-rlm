@@ -17,7 +17,7 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
-from . import describe  # data-only: no package imports, no cycle
+from . import describe  # data-only: no package imports, no cycle  # noqa: F401
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 
@@ -102,7 +102,7 @@ def _sub_ctx(m: dict) -> int:
     try:
         from rlm.utils.token_utils import get_context_limit
         limit = int(get_context_limit(str(m.get("sub_model") or "")))
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort fallback to a known-safe default
         return HAIKU_CONTEXT_TOKENS
     # A model's window is a CEILING, not a target. This server scans oversized input;
     # it does not stuff it into the prompt. A near-window single sub-query measurably

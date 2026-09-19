@@ -83,7 +83,7 @@ def _retry_after_seconds(exc: BaseException) -> float:
     try:
         ra = exc.response.headers.get("retry-after")  # type: ignore[attr-defined]
         return float(ra) if ra else 0.0
-    except Exception:
+    except Exception:  # noqa: BLE001 - SDK response objects vary; missing `headers` is the expected variant we want to translate to 0.0s
         return 0.0
 
 

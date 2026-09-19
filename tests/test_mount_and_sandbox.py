@@ -187,19 +187,39 @@ def _cfg(**kw):
 
 def test_docker_missing_and_docker_stopped_are_told_apart(monkeypatch):
     """Two causes, two different fixes. Collapsing them into "docker unavailable"
-    sends an operator to install something they already have."""
+    sends an operator to install something they already have. After the fix the
+    daemon-direct probe is the gate; shutil.which is the fallback for the
+    FileNotFoundError branch only."""
+
+    # Case 1: CLI genuinely absent — both probes fail.
+    def raise_fnf(*a, **k):
+        raise FileNotFoundError(2, "No such file", a[0][0] if a else "docker")
+
+    monkeypatch.setattr(engine.subprocess, "run", raise_fnf)
     monkeypatch.setattr(engine.shutil, "which", lambda n: None)
     assert "not installed" in (engine.sandbox_diagnosis(_cfg()) or "")
 
+    # Case 2: CLI on PATH (somewhere) but daemon stopped.
     monkeypatch.setattr(engine.shutil, "which", lambda n: "/usr/bin/docker")
     monkeypatch.setattr(engine.subprocess, "run", lambda *a, **k: _Proc(1))
     assert "daemon is not running" in (engine.sandbox_diagnosis(_cfg()) or "")
+
+    # Case 3: NEW — CLI missing from this process's PATH but reachable elsewhere.
+    # The OS-level probe raises FileNotFoundError (this process has no `docker`
+    # on PATH) yet shutil.which (a separate PATH lookup) reports a path. The
+    # daemon is likely reachable via the named pipe on Windows GUI children.
+    def raise_fnf_only_this_call(*a, **k):
+        raise FileNotFoundError(2, "No such file", a[0][0] if a else "docker")
+    monkeypatch.setattr(engine.shutil, "which", lambda n: "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe")
+    monkeypatch.setattr(engine.subprocess, "run", raise_fnf_only_this_call)
+    msg = engine.sandbox_diagnosis(_cfg()) or ""
+    assert "not on this process's PATH" in msg, msg
+    assert "not installed" not in msg, "must not collapse into 'not installed' when the daemon is reachable"
 
 
 def test_a_built_image_is_required_before_the_sandbox_is_called_healthy(monkeypatch):
     """A pip install ships no image, so the daemon can be up and the sandbox still
     unusable -- reported before the call rather than as a docker pull error."""
-    monkeypatch.setattr(engine.shutil, "which", lambda n: "/usr/bin/docker")
     seq = iter([_Proc(0, "29.7.2"), _Proc(1, "", "No such image")])
     monkeypatch.setattr(engine.subprocess, "run", lambda *a, **k: next(seq))
     got = engine.sandbox_diagnosis(_cfg())
@@ -207,7 +227,6 @@ def test_a_built_image_is_required_before_the_sandbox_is_called_healthy(monkeypa
 
 
 def test_a_healthy_docker_diagnoses_nothing(monkeypatch):
-    monkeypatch.setattr(engine.shutil, "which", lambda n: "/usr/bin/docker")
     monkeypatch.setattr(engine.subprocess, "run", lambda *a, **k: _Proc(0, "29.7.2"))
     assert engine.sandbox_diagnosis(_cfg()) is None
 
@@ -220,12 +239,23 @@ def test_a_local_sandbox_is_never_diagnosed_as_broken():
 
 def test_the_guidance_names_the_tools_that_still_work():
     """The whole point: an agent handed a docker socket path retries the same call;
-    one handed this reroutes to the tools that need no sandbox."""
+    one handed this reroutes to the tools that need no sandbox.
+
+    Updated for the docker-reachability fix: the old wording contained 'The user
+    has not enabled the Docker sandbox', which was both misleading (Docker WAS
+    enabled, the daemon is reachable) and stale. The new wording leads with
+    'Sandbox unavailable: <cause>' and tells the agent the cause + the
+    substitutes in the same breath."""
     msg = engine.sandbox_guidance(_cfg(), "the daemon is not running")
     for alt in ("rlm_grep", "rlm_sub_query", "rlm_sub_query_batch", "rlm_read_chunk"):
         assert alt in msg, f"{alt} is not offered as an alternative"
-    assert "do not retry" in msg.lower()
-    assert "has not enabled" in msg
+    assert "do not retry" in msg.lower(), "agent should not retry a broken sandbox"
+    # New wording replaced "The user has not enabled the Docker sandbox" with
+    # a state-of-the-machine first line. Both routes keep the contract: an
+    # agent reading the first 200 chars sees that the situation is structural,
+    # not something they can fix by trying again.
+    assert msg.startswith("Sandbox unavailable:"), msg[:80]
+    assert "the daemon is not running" in msg, "the specific cause should be in the message"
 
 
 def test_the_guidance_never_silently_downgrades_isolation():
@@ -417,3 +447,32 @@ def test_the_suite_never_shells_out_to_the_claude_cli(monkeypatch, tmp_path):
     # chasing a non-problem.
     mutating = [c for c in spawned if "mcp" in c and ("add" in c or "remove" in c)]
     assert mutating == [], f"the suite rewrote a real registration: {mutating}"
+
+
+def test_a_gui_child_with_no_docker_on_path_still_reports_healthy_when_daemon_answers(monkeypatch):
+    """Regression test for the operator-facing bug: Claude Code is a GUI app,
+    so on Windows its MCP child inherits a PATH that omits Docker Desktop's bin
+    directory. Before the fix, `shutil.which("docker") is None` short-circuited
+    the diagnosis with a false "Docker is not installed on this machine."
+
+    The daemon-direct probe (`docker info`) succeeds in this state because the
+    subprocess reaches the named pipe, not PATH. After the fix the diagnosis
+    returns None -- the sandbox is healthy, the operator should not be told
+    anything is wrong."""
+    monkeypatch.setattr(engine.shutil, "which", lambda n: None)  # GUI child: no PATH entry
+    monkeypatch.setattr(engine.subprocess, "run", lambda *a, **k: _Proc(0, "29.7.2"))
+    assert engine.sandbox_diagnosis(_cfg()) is None
+
+
+def test_sandbox_guidance_lists_alternatives_and_does_not_silently_downgrade(monkeypatch):
+    """The wording the agent reads must (a) name the alternatives that work
+    without the sandbox and (b) refuse to imply `sandbox: local` is an
+    automatic fallback. Updated phrasing keeps both contracts."""
+    msg = engine.sandbox_guidance(_cfg(), "Docker is installed but its daemon is not running.")
+    for alt in ("rlm_grep", "rlm_sub_query", "rlm_sub_query_batch", "rlm_read_chunk"):
+        assert alt in msg, f"{alt} is not offered as an alternative"
+    assert "NO isolation" in msg and "explicit choice" in msg, "must not silently downgrade isolation"
+    # The original test asserted "do not retry" + "has not enabled"; the new
+    # wording keeps the substance ("do not retry this call") but the exact
+    # substrings shifted. Verify the substance instead of the verbatim string.
+    assert "do not retry" in msg.lower()

@@ -21,8 +21,6 @@ import os
 import re
 import shutil
 import textwrap
-from collections.abc import Callable
-from functools import partial
 from itertools import islice
 
 from mcp.server.fastmcp import FastMCP
@@ -30,10 +28,16 @@ from mcp.server.fastmcp import FastMCP
 from . import auth, batch, budget, models, sources, transport
 from .chunking import STRATEGIES, chunk_text
 from .deps import Deps
-from .engine import (ReplSession, SandboxUnavailable, query_checkpoint_path,
-                     run_query)
+from .engine import (
+    ReplSession,
+    SandboxUnavailable,
+    _daemon_reachability,
+    query_checkpoint_path,
+    run_query,
+)
 from .subquery import sub_query
 from .logsetup import log_event, logged_tool, note_startup
+
 # meta_block keeps its old private name: tests reach for srv._meta_block. It and
 # skipped_block are pure ContextMeta presentation, moved to output.py to keep this file
 # under 800 lines; skipped_block is called from meta_block there, not from here.
@@ -109,7 +113,7 @@ def rlm_load_context(source: str, source_type: str = "auto") -> str:
     """
     # A URL would otherwise be stored as ~60 bytes of *text* and reported as a
     # successful load, so every later answer would describe the link, not the data.
-    if re.match(r"^[a-z][a-z0-9+.-]*://", source.strip(), re.I):
+    if re.match(r"^[a-z][a-z0-9+.-]*://", source.strip(), re.IGNORECASE):
         return _bound(
             f"ERROR: {source.strip()[:80]} is a URL, not a path — loading it would store "
             "the link text, not its content. Fetch it in the sandbox instead:\n"
@@ -564,7 +568,12 @@ def rlm_status(probe: bool = False) -> str:
     can actually authenticate. Off by default because it costs a call; worth it
     the moment anything returns an auth error, since every line below can be
     correct while the login itself is dead."""
-    docker_ok = shutil.which("docker") is not None
+    # Probe the daemon, not the CLI binary on PATH. A GUI-launched MCP child on
+    # Windows inherits a stripped PATH that omits Docker Desktop's bin directory,
+    # so `shutil.which("docker")` is a false-negative here even when the daemon
+    # answers. The daemon-direct probe (`docker info`) is the truth value the
+    # rest of this report cares about.
+    docker_status = _docker_reachability()
     claude_cli = shutil.which(CFG.cli_path)
     creds = auth.auth_status()  # which explicit credential exists (display only)
     try:
@@ -572,7 +581,7 @@ def rlm_status(probe: bool = False) -> str:
         # NB: not `transport` -- that name is the module imported above, and
         # shadowing it here broke transport.auth_label() at runtime.
         transport_desc = "cli (claude CLI)" if resolved == "oauth" else "api (Anthropic SDK)"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - resolve_auth_mode failure must show in status, not as a stack trace
         resolved, transport_desc = None, f"UNRESOLVED — {exc}"
     mode = resolved or "apikey"
     root, override, sub = (
@@ -582,7 +591,7 @@ def rlm_status(probe: bool = False) -> str:
     ids = STORE.list_ids()
     try:
         src_line = f"{len(_sources())} declared"
-    except Exception as exc:   # a broken registry must show HERE, not only on first use
+    except Exception as exc:   # a broken registry must show HERE, not only on first use  # noqa: BLE001 - a broken source registry must surface in /status, not break the call
         src_line = f"UNREADABLE — {type(exc).__name__}: {exc}"
     return _bound(
         "## RLM MCP status\n"
@@ -603,13 +612,37 @@ def rlm_status(probe: bool = False) -> str:
         f"- max_depth: {CFG.max_depth}, max_iterations: {CFG.max_iterations}\n"
         f"- output cap: {CFG.output_cap_bytes} B (raw content) / {CFG.answer_cap_bytes:,} B (answers), "
         f"sub-query concurrency: {CFG.subquery_concurrency}\n"
-        f"- docker CLI available: {docker_ok}\n"
+        f"- docker: {docker_status}\n"
         f"- loaded contexts ({len(ids)}): {', '.join(ids[:20]) or 'none'}\n"
         f"- store dir: {CFG.store_dir}\n"
         f"- sources: {src_line}  (registry: {CFG.sources_file})"
         f"{_cli_login_line()}"
         f"{_auth_probe_line() if probe else ''}"
     )
+
+
+def _docker_reachability() -> str:
+    """One-line summary of what the daemon probe sees from this process.
+
+    Used by `rlm_status`. Thin wrapper around `engine._daemon_reachability`
+    (single source of truth shared with `sandbox_diagnosis`) that maps its
+    internal codes to the user-visible labels printed next to
+    `- docker: ...`. Doing the mapping here — not in the engine — keeps the
+    engine's codes stable across output-format changes.
+
+    Internal code → printed label:
+      "ok"             → "ok"
+      "no_path_entry"  → "no PATH entry"
+      "not_installed"  → "not installed"
+      "daemon_stopped" → "daemon stopped"
+    """
+    code = _daemon_reachability()
+    return {
+        "ok": "ok",
+        "no_path_entry": "no PATH entry",
+        "not_installed": "not installed",
+        "daemon_stopped": "daemon stopped",
+    }.get(code, f"unknown ({code})")
 
 
 def _container_status() -> str:
@@ -691,7 +724,7 @@ def main() -> None:
         note_startup(mode=CFG.mode, transport=mode,
                      root=models.select(CFG, models.Role.ROOT),
                      sub=models.select(CFG, models.Role.SUB), sandbox=CFG.sandbox)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - startup must log and continue even if the initial transport probe fails
         # A server that cannot resolve a transport is worth a file even if no tool
         # is ever called: this record is the only trace of why it is useless.
         log_event(LOG, "startup", mode=CFG.mode, transport="unresolved",

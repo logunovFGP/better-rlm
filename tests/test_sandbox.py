@@ -21,6 +21,8 @@ import sys
 import time
 
 import pytest
+
+import better_rlm.sandbox_reap as reap
 from rlm.environments import docker_repl as dr
 from rlm.environments.docker_repl import (
     LOCALS_REPR_CAP,
@@ -29,8 +31,6 @@ from rlm.environments.docker_repl import (
     _build_exec_script,
 )
 from rlm.utils.exceptions import aborts_batch
-
-import better_rlm.sandbox_reap as reap
 
 
 def _run(code: str, state_path, tmp_path) -> dict:
@@ -41,7 +41,7 @@ def _run(code: str, state_path, tmp_path) -> dict:
     path = tmp_path / "harness.py"
     path.write_text(script, encoding="utf-8", newline="\n")
     proc = subprocess.run(
-        [sys.executable, str(path)], capture_output=True, text=True, timeout=120
+        [sys.executable, str(path)], capture_output=True, text=True, timeout=120, check=False
     )
     assert proc.returncode == 0, proc.stderr
     marked = [ln for ln in proc.stdout.splitlines() if ln.startswith(RLM_RESULT_SENTINEL)]

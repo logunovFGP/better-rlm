@@ -54,7 +54,7 @@ def harden(path: Path) -> None:
         raise OSError(f"cannot restrict {path}: no USERNAME in the environment")
     proc = subprocess.run(
         ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=30, check=False,
     )
     if proc.returncode != 0:
         raise OSError(

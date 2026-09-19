@@ -197,7 +197,7 @@ def _no_test_rewrites_the_operators_mcp_registration(monkeypatch):
     genuinely about mounting patch claude_cli themselves, and a test-level
     monkeypatch wins over an autouse one.
     """
-    import better_rlm.mcpreg as mcpreg
+    from better_rlm import mcpreg
 
     monkeypatch.setattr(mcpreg, "claude_cli", lambda: None)
 

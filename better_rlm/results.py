@@ -191,7 +191,7 @@ def sweep(cfg: Config, *, now: Clock = time.time) -> None:
         t = now()
         if fsutil.claim_sweep(cfg.cache_dir, cfg.cache_sweep_cooldown_s, t):
             _prune(cfg.cache_dir, "*/*.json", t=t, max_bytes=cfg.cache_max_bytes)
-    except Exception:  # noqa: BLE001 - a cache sweep must never take down the server
+    except Exception:  # noqa: BLE001, S110 - a cache sweep must never take down the server
         pass
 
 
@@ -219,7 +219,7 @@ def sweep_store(cfg: Config, *, now: Clock = time.time) -> None:
         _prune(cfg.store_dir, "*/results/*.jsonl", "*/query/*",
                t=t, max_bytes=cfg.results_max_bytes,
                max_age_s=cfg.results_retention_days * 86400)
-    except Exception:  # noqa: BLE001 - housekeeping must never take down the server
+    except Exception:  # noqa: BLE001, S110 - housekeeping must never take down the server
         pass
 
 

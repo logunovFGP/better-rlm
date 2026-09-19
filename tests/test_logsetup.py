@@ -6,8 +6,8 @@ import os
 import sys
 from pathlib import Path
 
-from better_rlm.config import load_config
 import better_rlm.logsetup as ls
+from better_rlm.config import load_config
 
 
 def _cfg(tmp_path, **over):

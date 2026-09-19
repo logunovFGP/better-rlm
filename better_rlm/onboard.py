@@ -308,7 +308,13 @@ def models_screen(console: Console, config_path: Path, w: Wizard) -> Wizard:
     The list is the provider's own -- describe.models_for -- which is the whole
     point of the catalogue: a MiniMax endpoint is never offered a Claude id again.
     """
-    from .tui import ACTION_CANCEL, PICKER_CUSTOM, PICKER_KEEP, _select, warn_unknown_model
+    from .tui import (
+    ACTION_CANCEL,
+    PICKER_CUSTOM,
+    PICKER_KEEP,
+    _select,
+    warn_unknown_model,
+)
 
     key, title, purpose = ROLES[w.role_index]
     rows = [(m.id, m.detail()) for m in describe.models_for(w.provider)]

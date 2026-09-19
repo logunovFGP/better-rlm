@@ -195,7 +195,7 @@ def test_read_chunk_matches_read_text_slice_via_seek_path(cfg, tmp_path):
     ascii_meta = store.load_text("line one\nline two\nline three\n")
     multibyte_meta = store.load_text("café\n字字字\nplain\n")
     p = tmp_path / "crlf.txt"
-    p.write_bytes("héllo\r\n字字\r\nplain\r\n".encode("utf-8"))
+    p.write_bytes("héllo\r\n字字\r\nplain\r\n".encode())
     crlf_meta = store.load_file(str(p))
 
     for meta in (ascii_meta, multibyte_meta, crlf_meta):
@@ -244,7 +244,7 @@ def test_read_chunk_ignores_stale_byte_offsets_after_the_file_changes(cfg, tmp_p
     store.set_chunks(meta.ctx_id, "lines", [c.as_dict() for c in chunks], text=text)
     assert all(c["byte_start"] != -1 for c in store.get(meta.ctx_id).chunks)
 
-    p.write_bytes("字".encode("utf-8") + b"alpha\nbravo\ncharlie\ndelta\n")  # +1 char, +3 bytes
+    p.write_bytes("字".encode() + b"alpha\nbravo\ncharlie\ndelta\n")  # +1 char, +3 bytes
     now = store.read_text(meta.ctx_id)
     for i, c in enumerate(chunks):
         assert store.read_chunk(meta.ctx_id, i) == now[c.start:c.end]
@@ -279,7 +279,7 @@ def test_paragraph_chunking_still_works_on_a_crlf_context(cfg, tmp_path):
     text = store.read_text(meta.ctx_id)
     chunks = chunk_text(text, "paragraphs", chunk_lines=2000, chunk_chars=12, overlap=0)
     # Boundaries land on the blank lines, not on arbitrary 12-char cuts.
-    assert [text[c.start:c.end] for c in chunks][0].startswith("para one")
+    assert next(text[c.start:c.end] for c in chunks).startswith("para one")
     assert any(c.end < len(text) and text[c.end - 1] == "\n" for c in chunks)
 
 

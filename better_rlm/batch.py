@@ -176,10 +176,10 @@ def budget_report(d: Deps) -> str:
         lines += [
             "- ceiling: **unknown**",
             "",
-            "No `session_budget_tokens` is set and no usage limit has been hit yet, so runs "
-            "are measured but not gated. Set `session_budget_tokens` in config.yaml to gate "
-            "from the first run; otherwise the ceiling is learned the first time a usage "
-            "limit is hit.",
+            ("No `session_budget_tokens` is set and no usage limit has been hit yet, so runs "
+             "are measured but not gated. Set `session_budget_tokens` in config.yaml to gate "
+             "from the first run; otherwise the ceiling is learned the first time a usage "
+             "limit is hit."),
         ]
     else:
         usable = int(cap * d.cfg.budget_stop_fraction)

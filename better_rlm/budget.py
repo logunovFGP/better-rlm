@@ -624,22 +624,22 @@ def render_query_ceiling(q: QueryCeiling, cap: int | None) -> str:
     lines = [
         "## rlm_query on this context -- a ceiling, not an estimate",
         "",
-        "The root model decides at run time how many sub-calls to make, so the count cannot "
-        "be forecast. What config permits, and what the timeout allows in practice:",
+        ("The root model decides at run time how many sub-calls to make, so the count cannot "
+         "be forecast. What config permits, and what the timeout allows in practice:"),
         "",
         f"- permitted: up to **{q.root_calls_max}** root turns x **{per_turn}** sub-calls = "
         f"**{q.sub_calls_max}** sub-calls; worst case **~{q.worst_tokens:,} tokens**"
         + (f" ({q.worst_tokens / cap:.1f}x the whole window)" if cap else ""),
-        f"- in practice: `query_timeout_s={q.timeout_s}` at ~{q.per_call_s:.0f}s/call allows "
-        f"**~{q.timeout_calls} calls, ~{q.timeout_tokens:,} tokens** before the engine is stopped",
+        (f"- in practice: `query_timeout_s={q.timeout_s}` at ~{q.per_call_s:.0f}s/call allows "
+         f"**~{q.timeout_calls} calls, ~{q.timeout_tokens:,} tokens** before the engine is stopped"),
         "",
-        "_rlm_query cannot be forecast, but it is bounded on both sides: every model call "
-        "passes the session-budget floor, so it stops itself before the wall, and any stop "
-        "(budget, timeout, error threshold) checkpoints the transcript and REPL state -- "
-        "call it again with the same ctx_id and question to resume. Spend is ledgered, so "
-        "the next estimate sees it. Prefer rlm_exec / rlm_grep (free) and "
-        "rlm_sub_query_batch (estimable) unless the question truly needs multi-hop "
-        "reasoning._",
+        ("_rlm_query cannot be forecast, but it is bounded on both sides: every model call "
+         "passes the session-budget floor, so it stops itself before the wall, and any stop "
+         "(budget, timeout, error threshold) checkpoints the transcript and REPL state -- "
+         "call it again with the same ctx_id and question to resume. Spend is ledgered, so "
+         "the next estimate sees it. Prefer rlm_exec / rlm_grep (free) and "
+         "rlm_sub_query_batch (estimable) unless the question truly needs multi-hop "
+         "reasoning._"),
     ]
     return "\n".join(lines)
 
@@ -672,28 +672,28 @@ def render(v: Verdict, *, what: str) -> str:
     ]
     if v.ceiling_tokens is None:
         lines += [
-            "**Window budget: unknown.** No `session_budget_tokens` is configured, so this "
-            "run cannot be gated against a ceiling — only measured. Set "
-            "`session_budget_tokens` in config.yaml to gate it.",
+            ("**Window budget: unknown.** No `session_budget_tokens` is configured, so this "
+             "run cannot be gated against a ceiling — only measured. Set "
+             "`session_budget_tokens` in config.yaml to gate it."),
             "",
-            f"Spent in the last {v.spend.window_h:g}h by this server: "
-            f"~{v.spend.tokens:,} tokens over {v.spend.calls} calls.",
+            (f"Spent in the last {v.spend.window_h:g}h by this server: "
+             f"~{v.spend.tokens:,} tokens over {v.spend.calls} calls."),
         ]
         if v.observed_wall_tokens:
             lines += [
                 "",
-                f"_This server has hit a usage limit with ~{v.observed_wall_tokens:,} "
-                "tokens of its own spend inside the window. The account's real ceiling is "
-                "at least that (other Claude sessions spend against it too and are "
-                "invisible here), so that is the floor to start from when you set "
-                "`session_budget_tokens`._",
+                (f"_This server has hit a usage limit with ~{v.observed_wall_tokens:,} "
+                 "tokens of its own spend inside the window. The account's real ceiling is "
+                 "at least that (other Claude sessions spend against it too and are "
+                 "invisible here), so that is the floor to start from when you set "
+                 "`session_budget_tokens`._"),
             ]
         return "\n".join(lines)
 
     pct = 100.0 * e.total_tokens / max(1, v.headroom_tokens or 1)
     lines += [
-        f"**Window budget** ({v.ceiling_source}): ~{v.ceiling_tokens:,} tokens per "
-        f"{v.spend.window_h:g}h.",
+        (f"**Window budget** ({v.ceiling_source}): ~{v.ceiling_tokens:,} tokens per "
+         f"{v.spend.window_h:g}h."),
         f"- spent so far this window: ~{v.spend.tokens:,} ({v.spend.calls} calls)",
         f"- headroom to the {v.stop_pct}% stop line: ~{v.headroom_tokens:,}",
         "",
@@ -701,24 +701,24 @@ def render(v: Verdict, *, what: str) -> str:
     if not v.possible:
         usable = int(v.ceiling_tokens * (v.stop_pct / 100))
         lines += [
-            f"**Impossible in ANY window.** The largest single chunk needs "
-            f"~{e.max_call_tokens:,} tokens in one call, and the {v.stop_pct}% stop line is "
-            f"~{usable:,}. Waiting does not help: no window is ever that large.",
+            (f"**Impossible in ANY window.** The largest single chunk needs "
+             f"~{e.max_call_tokens:,} tokens in one call, and the {v.stop_pct}% stop line is "
+             f"~{usable:,}. Waiting does not help: no window is ever that large."),
             "",
-            "Re-chunk smaller (`rlm_chunk_context(ctx_id, strategy='lines', size=<fewer "
-            "lines>)`), or raise `session_budget_tokens` if the ceiling is set too low.",
+            ("Re-chunk smaller (`rlm_chunk_context(ctx_id, strategy='lines', size=<fewer "
+             "lines>)`), or raise `session_budget_tokens` if the ceiling is set too low."),
         ]
         return "\n".join(lines)
     if v.fits:
         lines.append(f"**Fits** — this run needs ~{pct:.0f}% of the remaining headroom.")
     else:
         lines += [
-            f"**Does not fit this window** — needs ~{v.windows_needed:.1f} full windows "
-            f"({v.spend.window_h:g}h each).",
+            (f"**Does not fit this window** — needs ~{v.windows_needed:.1f} full windows "
+             f"({v.spend.window_h:g}h each)."),
             "",
-            "This is not a refusal: per-chunk results are durable, so run it, let it stop "
-            "at the budget line, and call the same tool again next window — it resumes at "
-            "the first unanswered chunk and never re-pays for a chunk it already has.",
+            ("This is not a refusal: per-chunk results are durable, so run it, let it stop "
+             "at the budget line, and call the same tool again next window — it resumes at "
+             "the first unanswered chunk and never re-pays for a chunk it already has."),
         ]
     if v.spend.oldest_expires_in_s:
         lines.append(f"\n_Headroom next grows in ~{fmt_dur(v.spend.oldest_expires_in_s)} "

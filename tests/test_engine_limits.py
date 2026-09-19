@@ -9,15 +9,15 @@ a limit surfaced as a raw traceback with the partial work thrown away.
 import pathlib
 
 import pytest
+
+import better_rlm.engine as eng
+from better_rlm.config import _sub_ctx, load_config
 from rlm.utils.exceptions import (
     CancellationError,
     ErrorThresholdExceededError,
     TimeoutExceededError,
 )
 from rlm.utils.token_utils import DEFAULT_CONTEXT_LIMIT, get_context_limit
-
-import better_rlm.engine as eng
-from better_rlm.config import _sub_ctx, load_config
 
 
 # --- the engine's model table has to know the models we actually run -----------
@@ -246,6 +246,7 @@ def _engine_with_fakes(monkeypatch, tmp_path, turn, *, state=b"S"):
     """A real RLM whose environment, prompt setup and completion turn are fakes: enough
     to run the genuine loop body, its except blocks and _attach_checkpoint."""
     import contextlib
+
     from rlm.core.rlm import RLM
 
     (tmp_path / "state.dill").write_bytes(state)
@@ -270,8 +271,8 @@ def test_the_loop_converts_a_backend_budget_stop_into_a_resumable_limit(monkeypa
     """_check_iteration_limits counts REPL stderr, not LM exceptions -- so before this
     the transport's stop escaped completion() as a raw traceback, and the partial answer
     and the whole transcript went with it."""
-    from rlm.utils.exceptions import SessionBudgetError
     from better_rlm.budget import BudgetStopError
+    from rlm.utils.exceptions import SessionBudgetError
 
     seen_prompts = []
 
@@ -313,8 +314,8 @@ def test_a_timeout_also_carries_a_checkpoint(monkeypatch, tmp_path):
 
 
 def test_resume_replays_the_transcript_restarts_at_the_iteration_and_restores_repl_state(monkeypatch, tmp_path):
-    from rlm.utils.exceptions import SessionBudgetError
     from better_rlm.budget import BudgetStopError
+    from rlm.utils.exceptions import SessionBudgetError
 
     prior = [{"role": "system", "content": "s"}, {"role": "user", "content": "u0"},
              {"role": "assistant", "content": "a0"}]
@@ -351,8 +352,8 @@ def test_a_stop_in_the_closing_synthesis_is_resumable_like_any_other(monkeypatch
     the most expensive moment there is -- raised past every handler: no conversion, no
     checkpoint, no partial answer. The cursor points one past the last turn, so a resume
     replays only the synthesis."""
-    from rlm.utils.exceptions import SessionBudgetError
     from better_rlm.budget import BudgetStopError
+    from rlm.utils.exceptions import SessionBudgetError
 
     import rlm.core.rlm as core
 

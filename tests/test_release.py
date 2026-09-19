@@ -8,7 +8,6 @@ found merging #2/#4/#5 was Windows-only and green on Linux.
 """
 import json
 import re
-import tomllib
 from pathlib import Path
 
 import yaml

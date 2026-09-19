@@ -16,9 +16,10 @@ import logging
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 from rlm.core.rlm import RLM
+from rlm.environments import docker_repl as _dr_probe
+from rlm.environments import get_environment
 from rlm.utils.exceptions import (
     BudgetExceededError,
     CancellationError,
@@ -27,8 +28,6 @@ from rlm.utils.exceptions import (
     TimeoutExceededError,
     TokenLimitExceededError,
 )
-from rlm.environments import docker_repl as _dr_probe
-from rlm.environments import get_environment
 
 # The engine is vendored source (./rlm, see rlm/UPSTREAM.md). A leftover `rlms`
 # install from before the vendoring shadows it whenever the process starts outside
@@ -50,6 +49,7 @@ from .auth import patch_engine
 from .config import Config
 from .logsetup import log_event
 from .sandbox_reap import reap_stale_sandboxes
+
 from rlm.utils.prompts import RLM_SYSTEM_PROMPT
 
 _LOG = logging.getLogger("rlm-mcp")
@@ -307,28 +307,81 @@ _NO_SANDBOX_ALTERNATIVES = (
 )
 
 
+def _daemon_reachability() -> str:
+    """Whether the Docker daemon answers from this process, in one word.
+
+    Single source of truth for "is Docker reachable?" — used by
+    `sandbox_diagnosis` (to pick which long-form failure message to return)
+    and by `better_rlm.server._docker_reachability` (to render the one-line
+    summary in `rlm_status`). Putting the probe in one place means a
+    future change to the daemon-detection contract changes both surfaces.
+
+    Returns one of:
+      "ok"             — daemon answered
+      "no_path_entry"  — CLI missing from this process's PATH, but a
+                         Docker install exists somewhere on the OS
+                         (named pipe / alt path). The daemon may be
+                         reachable directly even though the CLI isn't.
+      "not_installed"  — no CLI anywhere we can find
+      "daemon_stopped" — CLI present but `docker info` returned non-zero
+
+    Never raises. Exceptions during the probe degrade to a recognisable
+    string so the caller can render them without try/except.
+    """
+    try:
+        p = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"],
+                           capture_output=True, text=True, timeout=10, check=False)
+    except FileNotFoundError:
+        # CLI not on this process's PATH. Distinguish "Docker isn't installed"
+        # (shutil.which is also None) from "Docker is installed, but the
+        # GUI child doesn't have its bin directory on PATH" (shutil.which
+        # returns a path). The latter is the common Windows GUI-child case.
+        if shutil.which("docker") is None:
+            return "not_installed"
+        return "no_path_entry"
+    except (OSError, subprocess.SubprocessError):
+        return "not_installed"
+    if p.returncode != 0:
+        return "daemon_stopped"
+    return "ok"
+
+
 def sandbox_diagnosis(cfg: Config) -> str | None:
     """Why the Docker sandbox will not start, or None when it should.
 
-    Three distinct causes with three different fixes, so they are told apart rather
-    than collapsed into "docker unavailable": not installed, installed but the
-    daemon is down, and daemon up but the image was never built (the normal state
-    of a pip install, which ships no image).
+    Four distinct causes with four different fixes, told apart rather than
+    collapsed into "docker unavailable":
+
+    1. CLI genuinely absent (no PATH entry anywhere on this host).
+    2. CLI not on this PROCESS's PATH (common on Windows: Claude Code is a GUI
+       app, its MCP child inherits a stripped PATH that omits Docker Desktop's
+       bin directory, but the daemon is reachable via the named pipe and works
+       fine — measured directly: the host shell prints
+       `docker info --format '{{.ServerVersion}}'` -> `29.7.2` while the MCP
+       child sees no `docker` on PATH).
+    3. Daemon installed but stopped.
+    4. Daemon up but the image was never built (the normal state of a pip
+       install, which ships no image).
+
+    Probing order: daemon first. shutil.which is a fallback for case 1 only,
+    because the daemon-direct probe via `docker info` succeeds in case 2 and we
+    do not want to mislabel a reachable daemon as "not installed".
     """
     if not cfg.use_docker:
         return None
-    if shutil.which("docker") is None:
+    reach = _daemon_reachability()
+    if reach == "not_installed":
         return "Docker is not installed on this machine."
-    try:
-        p = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"],
-                           capture_output=True, text=True, timeout=20)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return f"Could not ask Docker whether it is running ({type(exc).__name__})."
-    if p.returncode != 0:
+    if reach == "no_path_entry":
+        return ("The 'docker' CLI is not on this process's PATH, but Docker "
+                "Desktop appears reachable. Add Docker's bin directory to PATH "
+                "(or launch Claude Code from a shell that has it), then retry.")
+    if reach == "daemon_stopped":
         return "Docker is installed but its daemon is not running."
+    # reach == "ok": daemon answered; check the image.
     try:
         q = subprocess.run(["docker", "image", "inspect", cfg.sandbox_image],
-                           capture_output=True, text=True, timeout=20)
+                           capture_output=True, text=True, timeout=20, check=False)
     except (OSError, subprocess.SubprocessError):
         return None                      # daemon answered; let the real call decide
     if q.returncode != 0:
@@ -340,22 +393,28 @@ def sandbox_diagnosis(cfg: Config) -> str | None:
 def sandbox_guidance(cfg: Config, reason: str) -> str:
     """The message an agent reads when the sandbox is gone. Names the substitutes.
 
-    Deliberately does NOT fall back to `sandbox: local` on its own. Local means the
-    generated code runs ON THE HOST with no isolation; quietly dropping the
-    isolation because a daemon happens to be down would turn an outage into a
-    privilege escalation. It stays an explicit, deliberate opt-in.
+    Three things this message must do, all of which the old version mishandled:
+
+    1. Tell an agent the SUBSTITUTES — every tool that does NOT need the sandbox
+       is listed by name so it can route around the outage instead of retrying.
+    2. Distinguish the four causes the diagnosis distinguishes; each has its
+       own operator action and collapsing them sends people on the wrong fix.
+    3. Never fall back to `sandbox: local` on its own. Local means the generated
+       code runs ON THE HOST with no isolation; quietly dropping the isolation
+       because a daemon happens to be down would turn an outage into a
+       privilege escalation. It stays an explicit, deliberate opt-in.
     """
     alts = "\n".join(f"  - {a}" for a in _NO_SANDBOX_ALTERNATIVES)
     return (
         f"Sandbox unavailable: {reason}\n"
-        "The user has not enabled the Docker sandbox, so rlm_exec and rlm_query "
-        "cannot run. "
+        "rlm_exec and rlm_query cannot run in this state. "
         "Every other tool still works -- do not retry this call.\n\n"
         f"USE INSTEAD:\n{alts}\n\n"
-        "TO ENABLE: start Docker Desktop (or install it), then retry. "
-        "Host execution with NO isolation is available by setting "
-        f"`sandbox: local` in {cfg_path_hint()} -- an explicit choice, "
-        "not a fallback."
+        "TO ENABLE: fix the cause named in the first line (start Docker Desktop, "
+        "add its bin directory to PATH, or run the install script to build the "
+        f"image), then retry. Host execution with NO isolation is available by "
+        f"setting `sandbox: local` in {cfg_path_hint()} -- an explicit choice, "
+        f"not a fallback."
     )
 
 
@@ -379,7 +438,7 @@ class ReplSession:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self._env = None
-        self.loaded_ctx: Optional[str] = None
+        self.loaded_ctx: str | None = None
 
     def _ensure(self):
         if self._env is None:
@@ -392,13 +451,18 @@ class ReplSession:
                 raise SandboxUnavailable(sandbox_guidance(self.cfg, reason))
             try:
                 self._env = get_environment(self.cfg.sandbox, env_kwargs)
-            except Exception as exc:     # noqa: BLE001 - re-raised with guidance
+            except Exception as exc:
+                # Broad catch is the right shape here: the engine raises a dozen
+                # different exception types (DockerUnresponsiveError, ContainerError,
+                # transport errors, our timeout, ...) and we surface them all as a
+                # single SandboxUnavailable with the agent-facing guidance. Narrowing
+                # to a tuple would lose real failures without gaining correctness.
                 raise SandboxUnavailable(
                     sandbox_guidance(self.cfg, str(exc).strip()[:200])) from exc
             self._env.execute_code("answer = {'content': '', 'ready': False}")
         return self._env
 
-    def load_context(self, text: str, ctx_id: Optional[str] = None) -> None:
+    def load_context(self, text: str, ctx_id: str | None = None) -> None:
         self._ensure().add_context(text, 0)  # exposes REPL var `context`
         self.loaded_ctx = ctx_id
 
@@ -406,7 +470,7 @@ class ReplSession:
         r = self._ensure().execute_code(code)
         return (r.stdout or ""), (r.stderr or "")
 
-    def container_id(self) -> Optional[str]:
+    def container_id(self) -> str | None:
         """Id of the live sandbox container, or None if none has been created.
         Deliberately does NOT create one: rlm_status must stay cheap."""
         return getattr(self._env, "container_id", None) if self._env else None

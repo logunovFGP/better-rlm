@@ -14,7 +14,7 @@ import logging
 import os
 import signal
 import time
-from typing import Callable
+from collections.abc import Callable
 
 from .logsetup import log_event, startup_pending
 
@@ -26,7 +26,7 @@ def _signame(signum) -> str:
         return "atexit"
     try:
         return signal.Signals(signum).name
-    except Exception:
+    except ValueError:
         return str(signum)
 
 
@@ -45,7 +45,7 @@ def install_shutdown_hooks(logger: logging.Logger,
         err = None
         try:
             close_repl()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - close_repl is best-effort; the server must still exit cleanly even if the container is gone
             err = f"{type(exc).__name__}: {str(exc)[:200]}"
         # An idle spare that logged nothing stays silent: a lone shutdown record
         # would create a file and evict one that has real work in it. Teardown
