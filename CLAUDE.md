@@ -260,6 +260,12 @@ order, not by which was installed last -- and `pip uninstall` removes the
 cause of the stale runs, so the warning says `pip install --upgrade` and warns
 off `pip uninstall` explicitly.
 
+**`better-rlm --version` and `better-rlm where` report the same two facts**, and
+must keep doing so: those are what an operator types to check whether an upgrade
+landed, and re-running setup to find out is not an answer. `--version` did not
+exist at all -- it fell past every subcommand into the TUI's flag parser and came
+back `unknown flag: --version`, exit 2.
+
 `ensure_registered` reads the registration back after writing it: `claude mcp
 add` exiting 0 is not proof the entry landed as asked, and a quoting slip once
 registered `C:Python314Scripts...` with a zero exit.

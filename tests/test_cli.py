@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from better_rlm import cli
+from better_rlm import cli, version
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -120,6 +120,9 @@ def test_where_reports_the_checkout_shape(checkout, capsys):
     out = capsys.readouterr().out
     assert "checkout" in out
     assert "config:" in out and "env:" in out
+    # Which build is running is the first thing `where` is asked, and it used to be
+    # the one thing it did not say.
+    assert version.__version__ in out
 
 
 def test_where_reports_the_installed_shape(installed, capsys):
@@ -169,11 +172,45 @@ def test_non_subcommand_argv_falls_through_to_the_tui(argv, forwarded):
     assert tui_main.call_args.args[0] == forwarded
 
 
+@pytest.mark.parametrize("flag", ["-V", "--version", "version"])
+def test_version_prints_the_running_build(flag, capsys):
+    """`better-rlm --version` answered `unknown flag: --version` and exited 2: the
+    flag fell past every subcommand into the TUI's parser. Reported by an operator
+    running two installs, for whom this number is the only way to tell which one an
+    upgrade landed on."""
+    with patch("better_rlm.tui.main") as tui_main:
+        assert cli.main([flag]) == 0
+    tui_main.assert_not_called()
+    assert version.__version__ in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argv", [["--version"], ["where"]])
+def test_a_second_copy_is_named_by_the_commands_that_report_identity(argv, capsys):
+    """sys.path order decides which copy runs, so a bare version number can be a
+    lie. Both identity commands have to say so -- and neither may suggest
+    `pip uninstall`, which removes the NEWER copy first."""
+    identity = ("9.9.9", Path("/active"), [Path("/other/site-packages")])
+    with patch("better_rlm.mcpreg.install_identity", return_value=identity):
+        assert cli.main(argv) == 0
+    err = capsys.readouterr().err.replace("\\", "/")
+    assert "/other/site-packages" in err
+    assert "do NOT run `pip uninstall`" in err
+
+
+def test_one_copy_warns_about_nothing(capsys):
+    """The warning must not fire on an ordinary single install, or it becomes noise
+    nobody reads on the day it matters."""
+    with patch("better_rlm.mcpreg.install_identity",
+               return_value=("9.9.9", Path("/active"), [])):
+        assert cli.main(["--version"]) == 0
+    assert capsys.readouterr().err == ""
+
+
 @pytest.mark.parametrize("flag", ["-h", "--help", "help"])
 def test_help_prints_usage_without_importing_the_tui(flag, capsys):
     with patch("better_rlm.tui.main") as tui_main:
         assert cli.main([flag]) == 0
     tui_main.assert_not_called()
     out = capsys.readouterr().out
-    for cmd in ("auth", "config", "install", "server", "where"):
+    for cmd in ("auth", "config", "install", "server", "where", "--version"):
         assert cmd in out

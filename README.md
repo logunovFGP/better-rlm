@@ -127,6 +127,7 @@ MCP server in-process, so there is no script path to point at and no checkout to
 keep around.
 
 ```bash
+better-rlm --version # which build is running, and whether a second copy is installed
 better-rlm where     # which config/env files are in use, and which mode you're in
 better-rlm auth      # prints the `claude setup-token` flow
 better-rlm           # the config TUI
