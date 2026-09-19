@@ -138,6 +138,65 @@ def test_a_flag_is_believed_before_the_sdk_is_consulted(monkeypatch):
     assert failures.classify(CliAuthError("expired")) == failures.CODE_KEY_REJECTED
 
 
+# --- observability parity ----------------------------------------------------
+def _drive(cfg, monkeypatch, result=None, exc=None):
+    """Run one call through the ledger wrapper and return the log records it emitted."""
+    import better_rlm.transport as tp
+
+    records: list[tuple] = []
+    monkeypatch.setattr(tp, "log_event",
+                        lambda log, evt, **f: records.append((evt, f)))
+    monkeypatch.setattr(tp.budget, "check_or_raise", lambda *a, **k: None)
+    monkeypatch.setattr(tp.budget, "record", lambda *a, **k: None)
+    monkeypatch.setattr(tp.budget, "note_limit_hit", lambda c: None)
+
+    class _Inner:
+        def complete(self, *a):
+            if exc is not None:
+                raise exc
+            return result
+
+    w = tp._LedgeredTransport(_Inner(), cfg)
+    try:
+        w.complete([{"role": "user", "content": "q"}], None, "m", 16)
+    except Exception:
+        pass
+    return records
+
+
+def test_every_model_call_is_recorded_whichever_transport_made_it(cfg, monkeypatch):
+    """Every log_event in transport.py used to sit inside CliTransport, so the SDK path
+    produced no transport-level record at all -- no call, no duration, no outcome. That
+    is why a truncation billing 4,096 output tokens for an empty answer could only be
+    found by driving the tool by hand."""
+    from better_rlm.transport import CompletionResult
+
+    res = CompletionResult(text="hi", input_tokens=7, output_tokens=3, model="m")
+    records = _drive(cfg, monkeypatch, result=res)
+
+    assert [evt for evt, _ in records] == ["model_call"]
+    fields = records[0][1]
+    assert fields["model"] == "m"
+    assert fields["in_tok"] == 7 and fields["out_tok"] == 3
+    assert "dur_ms" in fields
+
+
+def test_a_failed_call_is_recorded_with_what_kind_of_failure_it_was(cfg, monkeypatch):
+    """A silent failure is the one that costs an afternoon. The outcome is the shared
+    classifier's code, so the log says the same word the wizard would."""
+    records = _drive(cfg, monkeypatch, exc=_sdk(anthropic.AuthenticationError, 401))
+    assert [evt for evt, _ in records] == ["model_call"]
+    assert records[0][1]["outcome"] == failures.CODE_KEY_REJECTED
+
+
+def test_a_truncated_call_says_so_in_the_record(cfg, monkeypatch):
+    from better_rlm.transport import CompletionResult
+
+    res = CompletionResult(text="", input_tokens=7, output_tokens=4096, model="m",
+                           truncated=True)
+    assert _drive(cfg, monkeypatch, result=res)[0][1]["truncated"] is True
+
+
 # --- the two fixes that are about reaching BOTH fan-outs ---------------------
 def test_a_dead_api_key_aborts_the_engines_fan_out_too(monkeypatch):
     """The engine's aborts_batch is duck-typed on is_fatal_subcall alone -- correct, it

@@ -41,6 +41,7 @@ from .logsetup import log_event
 
 _LOG = logging.getLogger("rlm-mcp")
 
+
 @dataclass(frozen=True)
 class CompletionResult:
     """What every transport returns — text plus the token usage we record."""
@@ -334,20 +335,27 @@ class ApiTransport(CompletionTransport):
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self._client = None
-        self._aclient = None
+        self._clients: dict[bool, object | None] = {False: None, True: None}
 
-    def _sync_client(self):
-        if self._client is None:
+    def _client(self, async_: bool):
+        """The SDK client for one of the two shapes, built on first use.
+
+        Lazily, so constructing this transport never requires a credential -- and once,
+        because an Anthropic client owns a connection pool worth reusing.
+        """
+        if self._clients.get(async_) is None:
             from .auth import make_client
-            self._client = make_client(async_=False, base_url=self.cfg.base_url, cfg=self.cfg)
-        return self._client
+            self._clients[async_] = make_client(
+                async_=async_, base_url=self.cfg.base_url, cfg=self.cfg)
+        return self._clients[async_]
+
+    # Kept as named methods: tests and the two call sites read better for it, and both
+    # are one line over the dict above rather than a second copy of the lazy init.
+    def _sync_client(self):
+        return self._client(False)
 
     def _async_client(self):
-        if self._aclient is None:
-            from .auth import make_client
-            self._aclient = make_client(async_=True, base_url=self.cfg.base_url, cfg=self.cfg)
-        return self._aclient
+        return self._client(True)
 
     @staticmethod
     def _kwargs(messages, system, model, max_tokens) -> dict:
@@ -444,30 +452,44 @@ class CliTransport(CompletionTransport):
         system_text = _content_to_text(system) if system else None
         return self._argv(model, system_text), flatten_messages(messages)
 
+    def _timeout(self, model: str, start: float, exc: BaseException) -> CliCompletionError:
+        """Both halves time out the same way; only the exception they catch differs."""
+        log_event(_LOG, "cli_spawn", model=model,
+                  dur_ms=round((time.monotonic() - start) * 1000),
+                  outcome="timeout", limit_s=self.cfg.cli_timeout_s)
+        return CliCompletionError(
+            f"claude CLI timed out after {self.cfg.cli_timeout_s}s")
+
+    def _finish(self, model: str, start: float, rc: int, out: str,
+                err: str) -> CompletionResult:
+        """Record the spawn and parse it. Identical on both halves, so it lives once."""
+        log_event(_LOG, "cli_spawn", model=model,
+                  dur_ms=round((time.monotonic() - start) * 1000), exit=rc,
+                  err=_spawn_err(err, out) if rc != 0 else None)
+        return _parse_cli_output(rc, out, err, model)
+
     def complete(self, messages, system, model, max_tokens) -> CompletionResult:
         argv, prompt = self._prepare(messages, system, model)
         start = time.monotonic()
         try:
+            # subprocess.run bundles spawn, stdin, wait, timeout and decode into one
+            # call, and kills+reaps the child itself on timeout.
             proc = subprocess.run(
                 argv, input=prompt, capture_output=True, text=True,
                 cwd=self._neutral_cwd(), env=self._subprocess_env(),
                 timeout=self.cfg.cli_timeout_s,
             )
         except subprocess.TimeoutExpired as exc:
-            log_event(_LOG, "cli_spawn", model=model,
-                      dur_ms=round((time.monotonic() - start) * 1000),
-                      outcome="timeout", limit_s=self.cfg.cli_timeout_s)
-            raise CliCompletionError(
-                f"claude CLI timed out after {self.cfg.cli_timeout_s}s") from exc
-        rc = proc.returncode
-        log_event(_LOG, "cli_spawn", model=model,
-                  dur_ms=round((time.monotonic() - start) * 1000), exit=rc,
-                  err=_spawn_err(proc.stderr, proc.stdout) if rc != 0 else None)
-        return _parse_cli_output(rc, proc.stdout, proc.stderr, model)
+            raise self._timeout(model, start, exc) from exc
+        return self._finish(model, start, proc.returncode, proc.stdout, proc.stderr)
 
     async def acomplete(self, messages, system, model, max_tokens) -> CompletionResult:
         argv, prompt = self._prepare(messages, system, model)
         start = time.monotonic()
+        # Four things genuinely differ from the sync half: the pipes must be named
+        # (asyncio inherits them otherwise), the wait is separate from the spawn, the
+        # child survives a cancelled wait so it needs killing, and there is no text=
+        # so the streams are decoded by hand.
         proc = await asyncio.create_subprocess_exec(
             *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, cwd=self._neutral_cwd(),
@@ -478,18 +500,9 @@ class CliTransport(CompletionTransport):
                 proc.communicate(prompt.encode()), timeout=self.cfg.cli_timeout_s)
         except asyncio.TimeoutError as exc:
             proc.kill()
-            log_event(_LOG, "cli_spawn", model=model,
-                      dur_ms=round((time.monotonic() - start) * 1000),
-                      outcome="timeout", limit_s=self.cfg.cli_timeout_s)
-            raise CliCompletionError(
-                f"claude CLI timed out after {self.cfg.cli_timeout_s}s") from exc
-        rc = proc.returncode
-        out_s = out.decode(errors="replace")
-        err_s = err.decode(errors="replace")
-        log_event(_LOG, "cli_spawn", model=model,
-                  dur_ms=round((time.monotonic() - start) * 1000), exit=rc,
-                  err=_spawn_err(err_s, out_s) if rc != 0 else None)
-        return _parse_cli_output(rc, out_s, err_s, model)
+            raise self._timeout(model, start, exc) from exc
+        return self._finish(model, start, proc.returncode,
+                            out.decode(errors="replace"), err.decode(errors="replace"))
 
 
 def _raise_cli_failure(msg: str, fallback: str, *, reported: str = "") -> None:
@@ -611,40 +624,59 @@ class _LedgeredTransport(CompletionTransport):
                 + budget.input_overhead(self._cfg)
                 + budget.expected_output(self._cfg, max_tokens))
 
-    def complete(self, messages, system, model, max_tokens) -> CompletionResult:
-        est_in = self._est_in(messages, system)
-        # The hard floor, for EVERY caller. The batch's Gate stops politely one layer
-        # up; this is what stops rlm_query's recursive fan-out, which had nothing. It
-        # raises BEFORE the call, so a refused call costs zero tokens.
+    def _before(self, messages, system, max_tokens) -> tuple[int, float]:
+        """The floor, for EVERY caller. Raises BEFORE the call, so a refused one costs
+        nothing. The batch's Gate stops politely one layer up; this is what stops
+        rlm_query's recursive fan-out, which had nothing."""
         budget.check_or_raise(self._cfg, self._reserve(messages, system, max_tokens))
+        return self._est_in(messages, system), time.monotonic()
+
+    def _after(self, res, model, est_in, start, mode) -> CompletionResult:
+        """Ledger the spend, then record the call. Both transports, one shape.
+
+        The transport's own input total when it has one (cache included -- see
+        _total_input), the estimate otherwise. max() needs no knowledge of which
+        transport is in play and can only move the recorded figure UP, toward the truth;
+        est_in rides along so input_overhead can learn the gap between them.
+
+        THE LOG RECORD IS THE POINT OF PUTTING THIS HERE. Every log_event in this module
+        used to sit inside CliTransport, so the SDK path produced no transport-level
+        record at all -- no call, no duration, no outcome. That is why a MiniMax
+        truncation that billed 4,096 output tokens for an empty answer could only be
+        found by driving the tool by hand. Emitted from the wrapper both transports pass
+        through, it is written once and cannot drift between them.
+        """
+        budget.record(self._cfg, res.model or model,
+                      max(est_in, res.input_tokens), res.output_tokens, est=est_in)
+        log_event(_LOG, "model_call", model=res.model or model, mode=mode,
+                  dur_ms=round((time.monotonic() - start) * 1000),
+                  in_tok=res.input_tokens, out_tok=res.output_tokens,
+                  truncated=res.truncated or None)
+        return res
+
+    def _failed(self, exc, model, start, mode) -> None:
+        self._note_if_limit(exc)
+        log_event(_LOG, "model_call", model=model, mode=mode,
+                  dur_ms=round((time.monotonic() - start) * 1000),
+                  outcome=failures.classify(exc))
+
+    def complete(self, messages, system, model, max_tokens) -> CompletionResult:
+        est_in, start = self._before(messages, system, max_tokens)
         try:
             res = self._inner.complete(messages, system, model, max_tokens)
         except Exception as exc:
-            self._note_if_limit(exc)
+            self._failed(exc, model, start, "sync")
             raise
-        # The transport's total when it has one (cache included -- see _total_input),
-        # the estimate otherwise. max() needs no knowledge of which transport is in
-        # play and can only ever move the recorded figure UP, toward the truth; est_in
-        # rides along so input_overhead can learn the gap between them.
-        budget.record(self._cfg, res.model or model,
-                      max(est_in, res.input_tokens), res.output_tokens, est=est_in)
-        return res
+        return self._after(res, model, est_in, start, "sync")
 
     async def acomplete(self, messages, system, model, max_tokens) -> CompletionResult:
-        est_in = self._est_in(messages, system)
-        budget.check_or_raise(self._cfg, self._reserve(messages, system, max_tokens))
+        est_in, start = self._before(messages, system, max_tokens)
         try:
             res = await self._inner.acomplete(messages, system, model, max_tokens)
         except Exception as exc:
-            self._note_if_limit(exc)
+            self._failed(exc, model, start, "async")
             raise
-        # The transport's total when it has one (cache included -- see _total_input),
-        # the estimate otherwise. max() needs no knowledge of which transport is in
-        # play and can only ever move the recorded figure UP, toward the truth; est_in
-        # rides along so input_overhead can learn the gap between them.
-        budget.record(self._cfg, res.model or model,
-                      max(est_in, res.input_tokens), res.output_tokens, est=est_in)
-        return res
+        return self._after(res, model, est_in, start, "async")
 
     def _note_if_limit(self, exc: BaseException) -> None:
         """Record a rate/usage limit as EVIDENCE about the account's real ceiling.
