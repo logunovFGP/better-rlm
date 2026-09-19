@@ -407,15 +407,32 @@ _MOUNT_STYLE = {
 
 
 def _mount(console: Console) -> str:
-    """Register this install with Claude Code, and say plainly what happened."""
+    """Register this install with Claude Code, and say plainly what happened.
+
+    Also names WHICH build just ran. Setup was twice completed against a stale
+    install that had no mounting step at all, and nothing on screen distinguished
+    that run from a good one -- the operator followed the flow to a green Ready
+    panel and had a broken server both times. A version and a path cost one line
+    and make that impossible to miss.
+    """
+    version, active, others = mcpreg.install_identity()
+    console.print(f"[grey50]ran: better-rlm {version} from {active}[/grey50]")
+
+    if others:
+        # Which copy Python loads is decided by sys.path order, not by which was
+        # installed last -- and `pip uninstall` removes the newer one first.
+        console.print(
+            f"[yellow]Another copy of better_rlm is installed at "
+            f"{others[0]}.[/yellow]\n"
+            "[grey50]Whichever one Python finds first wins, so an upgrade can "
+            "switch builds silently. Use `pip install --upgrade better-rlm`; do "
+            "NOT run `pip uninstall`, which removes the newer copy first.[/grey50]")
+
     outcome, detail = mcpreg.ensure_registered()
     colour, title = _MOUNT_STYLE.get(outcome, ("yellow", "Not mounted"))
     console.print(f"[{colour}]{title}:[/{colour}] {detail}")
     if outcome in ("added", "repointed"):
-        # The registration is on disk; a session already holding a connection keeps
-        # the old process until it reconnects.
-        console.print("[grey50]Start a new Claude Code session, or run "
-                      "claude mcp restart rlm, to pick this up.[/grey50]")
+        console.print(f"[grey50]{mcpreg.RESTART_HINT}[/grey50]")
     return outcome
 
 

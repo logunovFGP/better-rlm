@@ -25,6 +25,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 from .config import IS_CHECKOUT, PKG_ROOT
 
@@ -32,6 +33,51 @@ from .config import IS_CHECKOUT, PKG_ROOT
 SERVER_NAME = "rlm"
 
 _TIMEOUT_S = 30
+
+
+#: What to tell an operator whose server is already running. `claude mcp restart`
+#: DOES NOT EXIST -- the CLI has add / add-json / get / list / login / logout /
+#: remove / reset-project-choices / serve, and no restart -- so setup spent several
+#: releases closing with an instruction that could not be followed. A running stdio
+#: server holds the config it started with; only a new session launches a new one.
+RESTART_HINT = ("Start a new Claude Code session to pick this up -- a running "
+                "server keeps the config it started with.")
+
+
+def install_identity() -> tuple[str, Path, list[Path]]:
+    """(version, the active install root, any OTHER copies on this machine).
+
+    The duplicate list is the important half. Two site directories can each hold a
+    better_rlm, and which one wins is decided by sys.path order, not by which was
+    installed last. That is how setup was completed twice against a stale build with
+    nothing on screen saying so -- and why `pip uninstall` makes it worse, removing
+    the newer copy first and silently downgrading the machine.
+    """
+    import site
+
+    from .version import __version__
+
+    active = Path(__file__).resolve().parent.parent
+    candidates = list(sys.path)
+    for name in ("getusersitepackages", "getsitepackages"):
+        try:
+            got = getattr(site, name, lambda: None)()
+        except Exception:                      # noqa: BLE001 - a probe must not raise
+            got = None
+        if isinstance(got, str):
+            candidates.append(got)
+        elif isinstance(got, (list, tuple)):
+            candidates.extend(got)
+
+    roots: set[Path] = set()
+    for d in candidates:
+        try:
+            root = Path(d).resolve()
+        except (OSError, ValueError):
+            continue
+        if root != active and (root / "better_rlm" / "version.py").is_file():
+            roots.add(root)
+    return __version__, active, sorted(roots)
 
 
 def server_command() -> list[str]:
@@ -119,6 +165,14 @@ def ensure_registered(*, force: bool = False) -> tuple[str, str]:
     rc, out = _run([claude, "mcp", "add", "-s", "user", SERVER_NAME, "--", *want])
     if rc != 0:
         return "failed", f"`claude mcp add` failed: {out.strip()[:200]}"
+
+    # Read it back. `claude mcp add` exiting 0 is not proof the entry landed the way
+    # we asked -- a quoting slip once registered `C:Python314Scripts...` with a zero
+    # exit, and only a read-back revealed it.
+    landed = registered_command(claude)
+    if landed != want:
+        return "failed", (f"registered, but it reads back as "
+                          f"`{' '.join(landed or [])}` instead of `{' '.join(want)}`")
 
     if have:
         return "repointed", (f"was pointing at `{' '.join(have)}`, which reads a "
