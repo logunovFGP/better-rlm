@@ -1,0 +1,52 @@
+name: Verify
+
+# The suite, on every push and PR -- the same matrix release.yml runs, and nothing
+# else. It exists because three of the last six releases failed their FIRST tag and
+# had to be re-cut, every time on a defect only a runner could see:
+#
+#   v0.5.1  UnicodeEncodeError -- a Windows runner's cp1252 console vs a triangle glyph
+#   v0.6.0  needs_onboarding read the runner's ambient machine state
+#   v0.8.0  an assertion matched the runner's own checkout path
+#
+# All three passed on a developer box. With verify running only at tag time, the
+# first Linux/CI execution of a change was the release itself: the most expensive
+# possible place to learn it, and it burns a version number each time, because a
+# tag that fails verify still cannot be reused once PyPI has seen the number.
+#
+# This workflow can NEVER publish. It has no build, no release and no publish job,
+# and `permissions: contents: read` denies it the write scope those would need.
+# release.yml keeps its tag-only trigger; the split is the point.
+# tests/test_release.py::test_no_branch_triggered_workflow_can_publish holds both.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# A branch pushed twice in a row only needs its newest commit verified. A release
+# never gets cancelled -- release.yml's own group sets the opposite on purpose.
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Identical to release.yml's matrix on purpose: a gate that tests less than
+        # the release gate would let exactly the failures above through again.
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.12", "3.14"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      # UV_PYTHON rather than a --python flag, matching release.yml: the command has
+      # to stay trunk-based.json's verify command verbatim.
+      - run: uv run --extra dev pytest -q
+        env:
+          UV_PYTHON: ${{ matrix.python }}
