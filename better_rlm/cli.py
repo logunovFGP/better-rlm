@@ -133,6 +133,26 @@ def _other_copies_warning(others: list[Path]) -> str:
             "         removes the newer copy first.")
 
 
+def _stale_metadata_warning() -> str:
+    """Name a leftover .dist-info, or "" when there is none.
+
+    Different failure from a second COPY, and it is the quieter one: the code is
+    fine, the metadata beside it is not, and every tool that asks
+    importlib.metadata -- pip included -- reports the leftover's version instead.
+    An operator then reads a correct upgrade as a failed one. Deleting the directory
+    is the whole fix; nothing installs from it and no code is inside it.
+    """
+    from .mcpreg import stale_metadata
+
+    stale = stale_metadata()
+    if not stale:
+        return ""
+    return ("warning: leftover metadata from an older install is next to this one:\n"
+            + "".join(f"           {d}\n" for d in stale)
+            + "         pip reports ITS version, not the one that runs -- delete the\n"
+              "         directory (not the package) to stop that.")
+
+
 def _version() -> int:
     """``better-rlm --version``.
 
@@ -145,8 +165,9 @@ def _version() -> int:
     version, active, others = install_identity()
     print(f"better-rlm {version}")
     print(f"root: {active}")
-    if warning := _other_copies_warning(others):
-        print(warning, file=sys.stderr)
+    for warning in (_other_copies_warning(others), _stale_metadata_warning()):
+        if warning:
+            print(warning, file=sys.stderr)
     return 0
 
 
@@ -162,8 +183,9 @@ def _where() -> int:
     print(f"config:  {cfg}{'' if cfg.is_file() else '   (absent -- baked-in defaults apply)'}")
     env = env_file()
     print(f"env:     {env}{'' if env.is_file() else '   (absent)'}")
-    if warning := _other_copies_warning(others):
-        print(warning, file=sys.stderr)
+    for warning in (_other_copies_warning(others), _stale_metadata_warning()):
+        if warning:
+            print(warning, file=sys.stderr)
     return 0
 
 
