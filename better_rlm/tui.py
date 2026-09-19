@@ -988,10 +988,10 @@ MODE_CARDS: dict[str, tuple[str, str, str]] = {
     # in /mode-help rather than two descriptions of one thing.
     MODE_CLI: ("✦", "OAuth — proxy mode",
                ("Reuse your `claude` CLI login. No API key, no per-token cost, "
-                "subject to subscription limits."),
+                "subject to subscription limits.")),
     MODE_API: ("⚙", "API key — host mode",
                ("Talk to the endpoint directly. Higher limits, per-token cost, "
-                "needs a key in .env."),
+                "needs a key in .env.")),
 }
 
 

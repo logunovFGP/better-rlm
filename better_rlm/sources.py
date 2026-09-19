@@ -110,7 +110,7 @@ def _parse_one(name: str, raw: object) -> Source:
     if not _NAME_RE.match(name):
         raise ValueError(f"source name {name!r} must match {_NAME_RE.pattern}")
     if not isinstance(raw, dict):
-        raise TypeError(f"source {name!r} must be a mapping, got {type(raw).__name__}")
+        raise ValueError(f"source {name!r} must be a mapping, got {type(raw).__name__}")
     cmd = raw.get("command")
     if isinstance(cmd, str):
         # NOT shlex.split(): in posix mode it reads backslash as an escape and eats it, so
@@ -159,7 +159,7 @@ def load_sources(path: Path) -> dict[str, Source]:
     with open(path, encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
     if not isinstance(data, dict):
-        raise TypeError(f"{path}: expected a mapping of source-name -> definition")
+        raise ValueError(f"{path}: expected a mapping of source-name -> definition")
     return {name: _parse_one(name, raw) for name, raw in data.items()}
 
 

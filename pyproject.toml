@@ -101,7 +101,11 @@ target-version = "py312"
 # PLR0402 - the test suite uses `import X as X` aliases consistently.
 #   Converting one test to `from X import X` and leaving the rest is worse
 #   than leaving them all alone.
-ignore = ["BLE001", "S110", "PLR0402"]
+# TRY004 - the load_sources() contract raises ValueError on malformed
+#   registries, and tests/test_sources.py pins that contract with
+#   `pytest.raises(ValueError)`. Switching to TypeError would break a
+#   deliberate API promise, so the rule is suppressed repo-wide.
+ignore = ["BLE001", "S110", "PLR0402", "TRY004"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["I001"]
