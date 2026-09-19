@@ -8,6 +8,7 @@ reaches an agent as a docker socket path it can do nothing with.
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
 
 from better_rlm import engine, mcpreg
 from better_rlm.config import load_config
@@ -33,7 +34,12 @@ def test_a_wheel_registers_its_own_interpreter_not_the_bare_name(monkeypatch):
     monkeypatch.setattr(mcpreg, "IS_CHECKOUT", False)
     cmd = mcpreg.server_command()
     assert cmd[1:] == ["-m", "better_rlm.cli", "server"]
-    assert "better-rlm" not in cmd[0], cmd[0]
+    # The property is "argv[0] is an interpreter", asserted on the BASENAME. A
+    # substring check for "better-rlm" over the whole path passed locally and failed
+    # on CI, where the repo itself lives in .../better-rlm/better-rlm/.venv/bin/python
+    # -- the project name was in the directory, not in the executable.
+    exe = Path(cmd[0]).name.lower()
+    assert exe.startswith(("python", "pypy")), cmd[0]
 
 
 def test_a_checkout_registers_its_own_launcher(monkeypatch, tmp_path):
