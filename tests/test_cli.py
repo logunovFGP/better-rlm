@@ -215,11 +215,22 @@ def test_leftover_metadata_is_named_by_the_identity_commands(capsys):
     assert "delete the" in err and "uninstall" not in err
 
 
-def test_a_checkout_is_never_accused_of_leftover_metadata(monkeypatch):
+def test_a_checkout_is_never_accused_of_leftover_metadata(tmp_path, monkeypatch):
     """An editable install's metadata legitimately lags VERSION -- version.py's own
-    docstring says so. Warning there would fire on every developer, every day."""
+    docstring says so. Warning there would fire on every developer, every day.
+
+    The stale directory has to EXIST for this to mean anything: asserting [] against
+    a tree with no .dist-info at all passes whether the exemption is there or not,
+    which is how the first version of this test survived deleting the guard.
+    """
     from better_rlm import mcpreg
 
+    (tmp_path / "better_rlm").mkdir()
+    (tmp_path / "better_rlm-0.7.0.dist-info").mkdir()
+    monkeypatch.setattr(mcpreg, "__file__", str(tmp_path / "better_rlm" / "mcpreg.py"))
+
+    monkeypatch.setattr(mcpreg, "IS_CHECKOUT", False)
+    assert mcpreg.stale_metadata(), "the fixture must be findable, or this proves nothing"
     monkeypatch.setattr(mcpreg, "IS_CHECKOUT", True)
     assert mcpreg.stale_metadata() == []
 
