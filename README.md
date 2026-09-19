@@ -1100,6 +1100,13 @@ MiniMax ids with their context windows and per-Mtok prices, never Claude ids.
 Nothing is written to `config.yaml` until the last step, so cancelling at any screen
 leaves it untouched.
 
+**It mounts itself when it finishes.** The last step registers this install as Claude
+Code's `rlm` MCP server (`-s user`), so finishing setup and being mounted are the same
+act. A registration already pointing here is left alone; one pointing at a *different*
+install is replaced and the change is reported, because that install reads a different
+`config.yaml`. Claude Code only for now. If the `claude` CLI is not on PATH it says so
+and prints the command to run by hand.
+
 `/setup` re-runs it. The individual steps stay available as `/mode`, `/provider`,
 `/model`, so changing one thing does not mean walking the whole flow.
 

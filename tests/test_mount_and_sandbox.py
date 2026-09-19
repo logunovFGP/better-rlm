@@ -202,7 +202,39 @@ def test_a_missing_sandbox_reaches_the_agent_as_guidance_not_a_traceback(monkeyp
         execute = _boom
 
     monkeypatch.setattr(srv, "_get_repl", lambda: _Dead())
-    fn = getattr(srv.rlm_exec, "fn", srv.rlm_exec)
-    out = fn("print(1)")
+    out = srv.rlm_exec("print(1)")
+
     assert "USE INSTEAD" in out and "rlm_grep" in out
-    assert "Traceback" not in out
+    # The load-bearing half. logged_tool turns an escaping exception into
+    # "ERROR in rlm_exec: <same text>" and records outcome=error -- so asserting
+    # only on the guidance text passed even when the tool re-raised, which is how
+    # the first version of this test survived its own mutant. A machine without
+    # Docker is a fact about the machine, not a failed call.
+    assert not out.startswith("ERROR in"), out[:120]
+
+
+def test_rlm_query_also_degrades_instead_of_raising(monkeypatch, tmp_path):
+    """The recursive loop writes Python into the sandbox, so it needs one too.
+
+    Added because a mis-aimed mutation revealed this path was uncovered: the
+    suite stayed green with rlm_query re-raising, which is the docker-npipe
+    traceback all over again on the more expensive tool.
+    """
+    import better_rlm.server as srv
+
+    def boom(*a, **k):
+        raise engine.SandboxUnavailable(
+            "Sandbox unavailable: test." + chr(10) + "USE INSTEAD:" + chr(10)
+            + "  - rlm_sub_query_batch(ctx_id, ...)")
+
+    # Everything before the sandbox has to be stubbed or the call dies at model
+    # resolution instead, which is a different failure and not the one under test.
+    monkeypatch.setattr(srv, "_resolve_root_model", lambda o: "m-root")
+    monkeypatch.setattr(srv.models, "select", lambda cfg, role: "m-sub")
+    monkeypatch.setattr(srv.DEPS.store, "read_text", lambda c: "body")
+    monkeypatch.setattr(srv, "query_checkpoint_path", lambda *a, **k: tmp_path / "ck")
+    monkeypatch.setattr(srv, "run_query", boom)
+
+    out = srv.rlm_query("ctx_x", "why?")
+    assert "USE INSTEAD" in out and "rlm_sub_query_batch" in out
+    assert not out.startswith("ERROR in"), out[:120]

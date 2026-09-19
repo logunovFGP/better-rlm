@@ -219,6 +219,47 @@ either, because a silent paste gives no way to tell a good clipboard from an emp
 one until the first model call fails. `mask_secret` never reveals more than four
 characters and preserves length, so a truncated paste is visible.
 
+### Setup mounts itself
+
+`better_rlm/mcpreg.py` registers this install as Claude Code's `rlm` server as the
+last step of `onboard.commit()`. Setup that writes a good config, prints Ready, and
+leaves the agent talking to a registration from months ago has told the operator
+something false -- and when that registration points at a DIFFERENT install it
+reads a different `config.yaml` entirely, which is how a checkout kept serving
+Claude model ids at a MiniMax endpoint long after the wizard had written correct
+ones to `~/.rlm`.
+
+It mirrors `install.sh` / `install.ps1` rather than inventing a second scheme:
+`-s user`, probe with `claude mcp get` first (because `claude mcp add` exits 1 on
+an existing name), and **replace** a registration whose command differs instead of
+leaving it. Outcomes are reported, not silent: `ok` / `added` / `repointed` /
+`skipped` / `failed`.
+
+  * **a wheel registers `sys.executable -m better_rlm.cli server`, never the bare
+    `better-rlm`.** install.ps1 writes a `better-rlm.cmd` shim that repoints that
+    word at a checkout, so a name-based registration can silently flip install;
+  * **whichever install you configured is the one that gets mounted.** Running the
+    checkout TUI repoints to the checkout, and says so;
+  * Claude Code only. cline is a separate target with its own config file and is
+    deliberately not attempted.
+
+### A missing sandbox is a routing instruction, not an error
+
+Only `rlm_exec` and `rlm_query` need the Docker REPL; the other thirteen tools do
+not. So when it cannot start, `engine.sandbox_diagnosis` separates the three causes
+that have three different fixes -- Docker absent, daemon down, image never built
+(the normal state of a pip install, which ships none) -- and both tools **return**
+`engine.sandbox_guidance` rather than raising it. The message names `rlm_grep`,
+`rlm_sub_query`, `rlm_sub_query_batch` and `rlm_estimate` as substitutes and says
+not to retry. Raising instead produced `ERROR in rlm_exec: failed to connect to the
+docker API at npipe:////./pipe/...` -- true, and useless: an agent reading it
+retries the same call.
+
+**It does not auto-fall back to `sandbox: local`.** That runs model-written Python
+on the host with no isolation; dropping isolation because a daemon happens to be
+down turns an outage into a privilege escalation. It is offered in the message as
+an explicit, labelled opt-in and is never taken automatically.
+
 ### The model catalogue, and why it is also the price table
 
 `describe.MODELS` is cline's bundled per-provider model table (its generated
