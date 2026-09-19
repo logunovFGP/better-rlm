@@ -83,13 +83,32 @@ def test_the_temp_name_is_unpredictable(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform == "win32",
-                    reason="POSIX mode bits; Windows is asserted by the ACL path")
-def test_a_secret_is_owner_only_from_creation(tmp_path):
-    """Applied to the TEMP before the rename, so the content is never group-readable
-    even briefly."""
+                    reason="POSIX mode bits; the platform-independent test is below")
+def test_a_secret_is_owner_only_on_posix(tmp_path):
     target = tmp_path / ".env"
-    fsutil.atomic_write(target, "MINIMAX_API_KEY=shh\n", secret=True)
+    fsutil.atomic_write(target, "MINIMAX_API_KEY=shh", secret=True)
     assert target.stat().st_mode & 0o077 == 0
+
+
+def test_a_secret_is_hardened_before_the_rename(tmp_path, monkeypatch):
+    """Asserted on the CALL, not the resulting mode, for two reasons: mkstemp already
+    creates at 0600, so the POSIX check above passes even with the harden removed; and
+    on Windows chmod is close to no control at all -- the ACL work IS the protection,
+    and a mode check cannot see it. Order matters too: hardening the TEMP means the
+    content is never readable by anyone else, even briefly.
+    """
+    calls: list[str] = []
+    real_replace = fsutil.os.replace
+    monkeypatch.setattr(fsutil, "harden", lambda p: calls.append("harden" + p.suffix))
+    monkeypatch.setattr(fsutil.os, "replace",
+                        lambda a, b: (calls.append("replace"), real_replace(a, b))[1])
+
+    fsutil.atomic_write(tmp_path / ".env", "K=v", secret=True)
+    assert calls == ["harden.tmp", "replace"], calls
+
+    calls.clear()
+    fsutil.atomic_write(tmp_path / "config.yaml", "mode: api")
+    assert calls == ["replace"], "an ordinary file must not be forced private"
 
 
 def test_an_ordinary_write_is_not_forced_private(tmp_path):

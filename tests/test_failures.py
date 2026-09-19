@@ -229,12 +229,29 @@ def test_the_engine_path_reports_truncation_like_the_sub_query_path():
     MiniMax rlm_query got silently empty chunk answers for a release after sub_query
     stopped doing that. The note is shared so the two cannot word it differently --
     and calling it here is what catches a typo in the shim's import."""
-    from better_rlm.transport import truncation_note
+    import rlm.clients.anthropic as ant_mod
+    from better_rlm.auth import patch_engine
+    from better_rlm.transport import CompletionResult, truncation_note
 
     assert "TRUNCATED" in truncation_note("", 16384)
     assert "reasoning" in truncation_note("", 16384), "an empty answer needs the reason"
     assert "TRUNCATED" in truncation_note("a partial list", 16384)
     assert "16,384" in truncation_note("", 16384), "name the cap that was hit"
+
+    # And drive the SHIM, not just the helper. Asserting the helper alone let a mutant
+    # that deleted the call from auth.py survive -- the note existed and nobody used it.
+    patch_engine()
+    client = ant_mod.AnthropicClient.__new__(ant_mod.AnthropicClient)
+    client.max_tokens = 16384
+    for attr in ("model_call_counts", "model_input_tokens", "model_output_tokens",
+                 "model_total_tokens"):
+        setattr(client, attr, __import__("collections").defaultdict(int))
+
+    cut = CompletionResult(text="", input_tokens=9, output_tokens=16384, model="m",
+                           truncated=True)
+    assert "TRUNCATED" in client._text(cut), "the engine path dropped the signal again"
+    whole = CompletionResult(text="done", input_tokens=9, output_tokens=4, model="m")
+    assert client._text(whole) == "done", "an intact answer must not be decorated"
 
 
 def test_a_404_needs_the_model_name_to_mean_model_unknown():
