@@ -209,11 +209,10 @@ def _cut_note(res: SubResult) -> str:
     """
     if not res.truncated:
         return ""
-    empty = "" if res.answer.strip() else \
-        " (empty -- the model used the whole output budget on reasoning)"
-    return (f"\n\n**TRUNCATED at max_tokens**{empty} — the answer above is incomplete. "
-            f"Re-run over a smaller chunk, or raise subquery.SUB_MAX_TOKENS "
-            f"(currently {SUB_MAX_TOKENS:,}).")
+    # transport.truncation_note is the shared wording, so this surface and the engine's
+    # (auth.patch_engine's shim) cannot drift into saying different things about the
+    # same event -- which is how only one of them came to say anything at all.
+    return transport.truncation_note(res.answer, SUB_MAX_TOKENS)
 
 
 def one(d: Deps, ctx_id: str, prompt: str, chunk_index: int = -1) -> str:

@@ -30,8 +30,7 @@ import threading
 import time
 from contextlib import contextmanager
 
-import anthropic
-
+from . import failures
 from .config import load_config
 from .logsetup import log_event
 
@@ -54,25 +53,30 @@ _LOG = logging.getLogger("rlm-mcp")
 
 
 def _is_rate_limit(exc: BaseException) -> bool:
-    # Retryable when: the SDK raised RateLimitError / a 429, OR the CLI transport
-    # raised an error flagged is_rate_limit (transport.CliRateLimitError).
-    return (
-        isinstance(exc, anthropic.RateLimitError)
-        or getattr(exc, "status_code", None) == 429
-        or bool(getattr(exc, "is_rate_limit", False))
-    )
+    """Retryable, decided by the one classifier both transports share.
+
+    This was three inline tests (SDK type, status 429, the CLI's duck-typed flag) with no
+    5xx branch at all -- so a 529 "overloaded" was retried on the OAuth path, where
+    "overloaded" is one of the CLI's markers, and not on the API path. One condition, two
+    answers, because the fix landed on the route that reported it. See failures.py.
+    """
+    return failures.is_rate_limit(exc)
 
 
 def is_fatal_auth(exc: BaseException) -> bool:
     """Auth itself is dead — a property of the login, not of this one call.
 
-    Retrying cannot help and neither can the next chunk, so batch callers abort on
-    it rather than reproducing the identical failure N times.
+    Retrying cannot help and neither can the next chunk, so batch callers abort on it
+    rather than reproducing the identical failure N times.
+
+    Two changes came with the shared classifier. A 403 counts now: ``PermissionDeniedError``
+    is not an ``AuthenticationError`` subclass, so an org without access to the configured
+    endpoint used to fan out one doomed call per chunk on the API path while the OAuth
+    path aborted. And a budget stop no longer counts: it also carries
+    ``is_fatal_subcall``, so this returned True for scheduled work: ``subquery`` only
+    avoided conflating them by catching ``BudgetStopError`` in an earlier clause.
     """
-    return (
-        isinstance(exc, anthropic.AuthenticationError)
-        or bool(getattr(exc, "is_fatal_subcall", False))
-    )
+    return failures.is_auth_dead(exc)
 
 
 def _retry_after_seconds(exc: BaseException) -> float:
