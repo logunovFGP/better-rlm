@@ -38,7 +38,7 @@ VERSION_FILE = _ROOT / "VERSION"
 #: `better-rlm --version` reported a version whose code was long gone. pip's own
 #: "Successfully installed better-rlm-0.7.0" came from the same lookup, on the same run
 #: that had just unpacked the 0.9.2 wheel.
-_BAKED = "0.9.3"
+_BAKED = "0.9.4"
 
 
 def _read() -> str:
