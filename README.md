@@ -81,18 +81,23 @@ Restart Claude Code. You get the `rlm` MCP server and the `rlm-large-context` sk
 `/plugin` owns both, so **don't also run `install.sh`/`install.ps1`**; two copies of the same skill
 name and two `rlm` registrations only compete with each other.
 
-**One more step for the default sandbox.** The plugin does not build the Docker image, and
-`sandbox: docker` is the default — so `rlm_exec` and `rlm_query` fail until the image exists. Build
-it once from the plugin directory (`/plugin` shows the path; it is the `${CLAUDE_PLUGIN_ROOT}` the
-server is launched with):
+**Want the two sandbox tools?** `rlm_exec` and `rlm_query` are **not exposed by default** —
+Claude never sees them. They are the only two tools needing a Python REPL, and the Docker daemon
+is the least reliable dependency in the stack, so `allow` withholds them rather than advertising
+tools that fail. Everything else — loading, grep, chunking, inspection, `rlm_sub_query`,
+`rlm_sub_query_batch` — works untouched.
+
+To turn them on, build the image once from the plugin directory (`/plugin` shows the path; it is
+the `${CLAUDE_PLUGIN_ROOT}` the server is launched with) and allow the group:
 
 ```bash
 docker build -t rlm-sandbox -f docker/Dockerfile.sandbox docker/
 ```
 
-Everything else — grep, chunking, loading, inspection — works without it. If you accept
-[the documented risk](#security) of running model-written Python on your host, set
-`RLM_SANDBOX=local` in the plugin's MCP server env instead of building the image.
+Then set `allow: [no-sandbox, sandbox]` in `config.yaml`, or `RLM_ALLOW=no-sandbox,sandbox` in the
+plugin's MCP server env. If you accept [the documented risk](#security) of running model-written
+Python on your host, `RLM_SANDBOX=local` replaces the image build — but you still need `allow` for
+the tools to appear at all.
 
 **When the daemon is up but `rlm_exec` still says "Docker is not installed".** Claude Code is a
 GUI app, so on Windows the MCP child inherits a PATH that omits Docker Desktop's bin directory;
@@ -279,15 +284,19 @@ effect in the next Claude Code session — never mid-session.
 
 **6. No Docker? (optional)**
 
-Only `rlm_exec` and `rlm_query` need the sandbox; the other fifteen tools — including the free
-`rlm_grep` and `rlm_read_chunk` — never touch it. To run those two without Docker:
+Nothing to do — `rlm_exec` and `rlm_query` are the only two tools that need the sandbox, and
+`allow` withholds them by default, so they are never advertised. The other fourteen tools —
+including the free `rlm_grep` and `rlm_read_chunk` — never touch it.
+
+To expose those two *without* Docker, accepting [the documented risk](#security) of running
+model-written Python on your host:
 
 ```bash
 claude mcp remove -s user rlm
-claude mcp add -s user rlm -e RLM_SANDBOX=local -- bash "$(pwd)/run_server.sh"
+claude mcp add -s user rlm -e RLM_ALLOW=no-sandbox,sandbox -e RLM_SANDBOX=local -- bash "$(pwd)/run_server.sh"
 ```
 
-To go back once Docker is healthy, drop the env var — re-running `./install.sh` will tell you the
+To go back once Docker is healthy, drop the env vars — re-running `./install.sh` will tell you the
 registration no longer matches the sandbox and print exactly this:
 
 ```bash
@@ -361,15 +370,19 @@ and whether Docker was found. Then point it at something enormous.
 
 **5. No Docker? (optional)**
 
-Only `rlm_exec` and `rlm_query` need the sandbox; the other fifteen tools — including the free
-`rlm_grep` and `rlm_read_chunk` — never touch it. To run those two without Docker:
+Nothing to do — `rlm_exec` and `rlm_query` are the only two tools that need the sandbox, and
+`allow` withholds them by default, so they are never advertised. The other fourteen tools —
+including the free `rlm_grep` and `rlm_read_chunk` — never touch it.
+
+To expose those two *without* Docker, accepting [the documented risk](#security) of running
+model-written Python on your host:
 
 ```bash
 claude mcp remove -s user rlm
-claude mcp add -s user rlm -e RLM_SANDBOX=local -- bash "$(pwd)/run_server.sh"
+claude mcp add -s user rlm -e RLM_ALLOW=no-sandbox,sandbox -e RLM_SANDBOX=local -- bash "$(pwd)/run_server.sh"
 ```
 
-To go back once Docker is healthy, drop the env var — re-running `./install.sh` will tell you the
+To go back once Docker is healthy, drop the env vars — re-running `./install.sh` will tell you the
 registration no longer matches the sandbox and print exactly this:
 
 ```bash
@@ -477,12 +490,16 @@ and whether Docker was found. Then point it at something enormous.
 
 **5. No Docker? (optional)**
 
-Only `rlm_exec` and `rlm_query` need the sandbox; the other fifteen tools — including the free
-`rlm_grep` and `rlm_read_chunk` — never touch it. To run those two without Docker:
+Nothing to do — `rlm_exec` and `rlm_query` are the only two tools that need the sandbox, and
+`allow` withholds them by default, so they are never advertised. The other fourteen tools —
+including the free `rlm_grep` and `rlm_read_chunk` — never touch it.
+
+To expose those two *without* Docker, accepting [the documented risk](#security) of running
+model-written Python on your host:
 
 ```powershell
 claude mcp remove -s user rlm
-claude mcp add -s user rlm -e RLM_SANDBOX=local -- cmd /c "C:\path\to\better-rlm\run_server.cmd"
+claude mcp add -s user rlm -e RLM_ALLOW=no-sandbox,sandbox -e RLM_SANDBOX=local -- cmd /c "C:\path\to\better-rlm\run_server.cmd"
 ```
 
 To go back once Docker is healthy, just re-run `.\install.ps1` and choose **`[R]` Retry** at the
@@ -629,7 +646,9 @@ only findings come back.
 **Budget** — `rlm_budget` (what this server has spent inside the rolling session window, and the ceiling it gates against)
 
 Only `rlm_exec` and `rlm_query` execute *model-written* code, so only those two depend on the
-sandbox — the other fifteen behave identically whether it is Docker or `local`. Both tools state
+sandbox — and they are **withheld unless `allow` names the `sandbox` group**, so a default
+install advertises the other fourteen and nothing else. Those fourteen behave identically
+whether the sandbox is Docker or `local`. Both sandbox tools state
 which mode they are in, and `rlm_status` is authoritative: **`sandbox: local` means that code runs
 on your host, unisolated.** `rlm_load_source` also runs a process on the host, but never
 model-written and never through a shell: only a command an operator declared, with parameters

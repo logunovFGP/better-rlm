@@ -18,9 +18,10 @@ description: >-
 
 # RLM — reason over oversized contexts
 
-The `rlm` MCP server holds content in an external on-disk store plus a sandboxed Docker
-REPL and **returns only the findings** — a multi-GB log never enters this conversation.
-Reach for these tools instead of reading a huge file.
+The `rlm` MCP server holds content in an external on-disk store and **returns only the
+findings** — a multi-GB log never enters this conversation. Reach for these tools instead
+of reading a huge file. Some installs also expose a sandboxed Docker REPL; see the † note
+under the routing table for what changes when they do not.
 
 ## Route by the shape of the question, not the size of the file
 
@@ -29,14 +30,28 @@ Size decides *whether* to load. The question's complexity decides *which* tool.
 | Question shape | Tool | Calls |
 |---|---|---|
 | "Where is X / does X appear" — one lookup | `rlm_grep(ctx_id, pattern)` | free, no model call |
-| Exact counts, sums, buckets, parsing | `rlm_exec(code, ctx_id)` | free, no model call |
+| Exact counts, sums, buckets, parsing | `rlm_exec(code, ctx_id)` † | free, no model call |
 | "Label / classify / judge **every** entry"; aggregate over the whole input | `rlm_chunk_context` → `rlm_sub_query_batch` | one cheap call per chunk; re-runs over unchanged chunks are **free** |
 | One targeted semantic question, input under ~200K tokens | `rlm_sub_query(ctx_id, prompt)` | one cheap call |
-| Cross-referencing, contradicting pairs, multi-hop over a corpus | `rlm_query(ctx_id, question)` | recursive loop; not forecastable, but **gated at the budget line and resumable** |
-| Hardest reasoning | `rlm_query(..., model_override="opus")` | most expensive |
+| Cross-referencing, contradicting pairs, multi-hop over a corpus | `rlm_query(ctx_id, question)` † | recursive loop; not forecastable, but **gated at the budget line and resumable** |
+| Hardest reasoning | `rlm_query(..., model_override="opus")` † | most expensive |
 
-Start at the top. `rlm_grep` and `rlm_exec` answer more questions than expected and spend
-no tokens on the content.
+**† These two tools are opt-in and are NOT exposed by default.** They are the only ones
+needing the code REPL, and the server withholds them unless its `allow` config names the
+`sandbox` group — so on most installs they are absent from your tool list entirely. Check
+the list you were given rather than calling and finding out. When they are missing:
+
+| Instead of | Use |
+|---|---|
+| `rlm_exec` — counting, bucketing, parsing | `rlm_grep` (free, returns match counts) → `rlm_chunk_context` + `rlm_sub_query_batch` for anything grep cannot express |
+| `rlm_query` — cross-referencing, multi-hop | `rlm_chunk_context` + `rlm_sub_query_batch(reduce=True)`; the reduce pass is where the cross-chunk reasoning happens |
+
+Everything else in this skill works unchanged. An operator enables the pair with
+`allow: [no-sandbox, sandbox]` in the server's `config.yaml`, or `RLM_ALLOW=no-sandbox,sandbox`
+at registration; `rlm_status` reports which groups are live.
+
+Start at the top. `rlm_grep` answers more questions than expected and spends
+no tokens on the content — as does `rlm_exec` where it is available.
 
 **Anything below the free rows spends model calls.** They are gated at the budget line
 and resumable, so an oversized run stops itself and continues next window rather than
@@ -64,15 +79,28 @@ across four long-context tasks at comparable cost:
 stored as ~60 bytes of *text* and reported as a successful load, so every later answer
 would describe the link instead of the data. The tool now refuses URLs outright.
 
-The sandbox has DNS + HTTPS egress with `requests` installed, and its `/workspace` is
-bind-mounted to a host directory the store can read. So fetch inside the sandbox, then
-load the file it wrote — after that every operation above works normally:
+Fetch first, then load the file — after that every operation above works normally.
+
+**Without `rlm_exec` (the default install), fetch on the host.** `curl` carries auth
+headers and cookies the same way, and this is the shorter path regardless:
+
+```
+curl -sL "<url>" -o /tmp/data
+rlm_load_file("/tmp/data")                              # -> ctx_id, then chunk/grep/query
+```
+
+**With `rlm_exec` available**, the sandbox has DNS + HTTPS egress with `requests`
+installed, and its `/workspace` is bind-mounted to a host directory the store can read:
 
 ```
 1. rlm_exec("import requests; open('/workspace/data','wb').write(requests.get(URL).content)")
 2. rlm_exec("print(open('/workspace/owner').read())")   # 3rd line = host path of /workspace
 3. rlm_load_file("<that host path>/data")               # -> ctx_id, then chunk/grep/query
 ```
+
+The rows below are written for the `rlm_exec` route. Without it, run the same fetching and
+regex work with your own host tools (`curl`, `Bash`, `WebFetch`) and hand the finished file
+to `rlm_load_file` — the RLM side of each recipe is unchanged.
 
 | Source | How |
 |---|---|

@@ -374,9 +374,41 @@ budget across two globs in the store), and a parameter list expressing all three
 a worse abstraction than three loops. `budget._prune` is not a file sweeper at all and is
 left alone.
 
+### The sandbox tools are opt-in, and absence beats a good error message
+
+`allow` (config.yaml, or `RLM_ALLOW` at registration) names the tool GROUPS this server
+registers: `no-sandbox` is the fourteen tools needing only the store and a model call,
+`sandbox` is `rlm_exec` and `rlm_query`, the only two needing the code REPL. A group left
+out is **not registered** — it never appears in the agent's tool list. The default
+withholds `sandbox`, because the Docker daemon is the least reliable dependency here.
+
+This does not replace `sandbox_guidance` below; the two answer different questions and
+both are real:
+
+  * **`allow` — this deployment never offered a sandbox.** An agent that CAN see
+    `rlm_exec` will call it, and every such call on a daemon-less host is a round trip
+    that buys the same "use rlm_grep instead" message. Withholding it puts the agent on
+    the working tool the first time, at zero cost;
+  * **`sandbox_guidance` — the sandbox was supposed to be there and is not.** Still
+    needed under `allow: [no-sandbox, sandbox]` when the daemon dies mid-session.
+
+`server._tool(group)` is the one gate, and it returns the function unchanged either way
+(`mcp.tool()` returns `fn`), so the tests and `scripts/validate.py` call these as plain
+Python regardless. `_exposed_line()` makes `rlm_status` NAME the withheld tools: a
+withheld tool is invisible, so the only symptom of a wrong `allow` is an agent that never
+mentions `rlm_query`, and an operator needs the cause rather than the silence. For the
+same reason the URL-rejection message in `rlm_load_context` offers its `rlm_exec` recipe
+only when that tool is exposed — a message whose job is to stop dead ends must not be one.
+
+`tests/test_tool_allow.py` asserts both directions — a withheld group advertises nothing,
+an allowed group advertises everything. One-sided, it would pass on a server that
+registers no tools at all. `_allow` rejects an unknown group and an empty set for the
+same reason `_sandbox` rejects a typo: a silently-ignored one exposes a group the
+operator meant to withhold, with nothing in the logs saying so.
+
 ### A missing sandbox is a routing instruction, not an error
 
-Only `rlm_exec` and `rlm_query` need the Docker REPL; the other thirteen tools do
+Only `rlm_exec` and `rlm_query` need the Docker REPL; the other fourteen tools do
 not. So when it cannot start, `engine.sandbox_diagnosis` separates the three causes
 that have three different fixes -- Docker absent, daemon down, image never built
 (the normal state of a pip install, which ships none) -- and both tools **return**
