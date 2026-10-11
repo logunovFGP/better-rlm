@@ -7,7 +7,11 @@ Fork of eesb99/rlm-mcp, modernized for the current rlms engine:
     maps to the closest subscription-supported sibling.
   * Auth reuses Claude Code's OAuth (run `claude setup-token`) — NO API key needed;
     ANTHROPIC_API_KEY is an opt-in fallback only.
-  * Docker REPL sandbox by default (host exec only as a documented fallback).
+  * The two code-REPL tools (rlm_exec, rlm_query) are OPT-IN: `allow` decides which tool
+    groups are registered, and it withholds the "sandbox" group by default because the
+    Docker daemon is the least reliable dependency here. Everything else works without it.
+  * When the sandbox group IS exposed, it is a Docker REPL (host exec only as a
+    documented, explicit fallback via `sandbox: local`).
   * External on-disk context store so giant logs/dumps never enter the root context.
   * Bounded tool output — raw-content tools capped tight (~4 KB) so file content never
     floods the root context; synthesis answers (rlm_query/sub_query) bound generously.
@@ -32,6 +36,7 @@ from .engine import (
     ReplSession,
     SandboxUnavailable,
     _daemon_reachability,
+    cfg_path_hint,
     query_checkpoint_path,
     run_query,
 )
@@ -64,6 +69,29 @@ mcp = FastMCP("rlm")
 mcp._mcp_server.version = __version__
 
 _repl: ReplSession | None = None
+
+
+def _tool(group: str = "no-sandbox"):
+    """Register an MCP tool — unless `allow` withholds its group (see config.TOOL_GROUPS).
+
+    A withheld tool is not registered AT ALL: it never reaches the agent's tool list.
+    That is the whole point, and it is a different thing from the runtime degradation in
+    `engine.sandbox_guidance`. Guidance is for a sandbox that was SUPPOSED to be there
+    and is not; this is for a deployment that never offered one. An agent that can see
+    rlm_exec will call it, and on a host with no Docker daemon every one of those calls
+    is a round trip that buys the same "use rlm_grep instead" message. Withholding it
+    puts the agent on the working tool the first time.
+
+    Both paths stay, because both failures are real: `allow: [no-sandbox, sandbox]` on a
+    host whose daemon dies mid-session still needs the guidance message.
+
+    The decorated function is returned either way — `mcp.tool()` returns `fn` unchanged,
+    so nothing that calls these as plain Python (the tests, `scripts/validate.py`) can
+    tell the difference. Only the advertised tool list moves.
+    """
+    def deco(fn):
+        return mcp.tool()(fn) if group in CFG.allow else fn
+    return deco
 
 
 def _get_repl() -> ReplSession:
@@ -99,7 +127,7 @@ def _resolve_root_model(model_override: str) -> str:
 # ============================================================================
 # Loading & inspection
 # ============================================================================
-@mcp.tool()
+@_tool()
 @logged_tool
 def rlm_load_context(source: str, source_type: str = "auto") -> str:
     """Load context from inline text, a file path, or a directory into the
@@ -107,23 +135,29 @@ def rlm_load_context(source: str, source_type: str = "auto") -> str:
     k8s manifest sets) — PREFER it over reading a large file directly (Read/cat)
     when the input is > ~200 KB / ~5,000 lines or would be truncated. The content
     is kept on disk and never returned, so it never enters this conversation's
-    context. Returns a ctx_id; then call rlm_query / rlm_sub_query / rlm_exec.
+    context. Returns a ctx_id; then call rlm_grep / rlm_sub_query / rlm_sub_query_batch
+    (and rlm_query / rlm_exec if this server exposes them — see rlm_status).
 
     source_type: auto | text | file | dir (auto detects path vs inline text).
     """
     # A URL would otherwise be stored as ~60 bytes of *text* and reported as a
     # successful load, so every later answer would describe the link, not the data.
     if re.match(r"^[a-z][a-z0-9+.-]*://", source.strip(), re.IGNORECASE):
-        return _bound(
-            f"ERROR: {source.strip()[:80]} is a URL, not a path — loading it would store "
-            "the link text, not its content. Fetch it in the sandbox instead:\n"
+        # The sandbox recipe is offered only when the sandbox group is exposed.
+        # Telling an agent to call rlm_exec on a server that does not advertise it is
+        # a dead end, and this message exists precisely to stop dead ends.
+        sandbox_route = (
             "  1. rlm_exec(\"import requests; "
             "open('/workspace/data','wb').write(requests.get(URL).content)\")\n"
             "  2. rlm_exec(\"print(open('/workspace/owner').read())\") -> 3rd line is the "
             "host path of /workspace\n"
             "  3. rlm_load_file(\"<that path>/data\") -> full chunk / grep / query support\n"
-            "No Docker (or sandbox: local)? Fetch on the host — curl also carries auth "
-            "headers/cookies:\n"
+        ) if CFG.allows_sandbox else ""
+        return _bound(
+            f"ERROR: {source.strip()[:80]} is a URL, not a path — loading it would store "
+            "the link text, not its content. Fetch it first, then load the file:\n"
+            + sandbox_route +
+            "Fetch on the host — curl also carries auth headers/cookies:\n"
             "  curl -sL \"<url>\" -o /tmp/data && rlm_load_file(\"/tmp/data\")"
         )
     st = source_type
@@ -143,13 +177,14 @@ def rlm_load_context(source: str, source_type: str = "auto") -> str:
     return _bound("## Context loaded\n" + _meta_block(meta))
 
 
-@mcp.tool()
+@_tool()
 @logged_tool
 def rlm_load_file(path: str, data_type: str = "text") -> str:
     """Load a single file into the external store — use this INSTEAD of Read for any
     file too large to read directly (big logs, dumps, exports). data_type: text | log
     | pdf (pdf needs the optional pypdf extra). Large text/log files are referenced in
-    place (no copy). Returns a ctx_id; then call rlm_query / rlm_sub_query / rlm_exec."""
+    place (no copy). Returns a ctx_id; then call rlm_grep / rlm_sub_query /
+    rlm_sub_query_batch (and rlm_query / rlm_exec if exposed — see rlm_status)."""
     meta = STORE.load_file(path, data_type=data_type)
     return _bound("## File loaded\n" + _meta_block(meta))
 
@@ -160,7 +195,7 @@ def _sources() -> dict[str, sources.Source]:
     return sources.load_sources(CFG.sources_file)
 
 
-@mcp.tool()
+@_tool()
 @logged_tool
 def rlm_list_sources() -> str:
     """List the named external sources THIS deployment declares — live inputs (cluster
@@ -202,7 +237,7 @@ def rlm_list_sources() -> str:
     return _answer("\n".join(lines))
 
 
-@mcp.tool()
+@_tool()
 @logged_tool
 def rlm_load_source(name: str, params: dict[str, str] | None = None) -> str:
     """Run a declared external source (see rlm_list_sources) and load its output into the
@@ -278,7 +313,7 @@ def rlm_load_source(name: str, params: dict[str, str] | None = None) -> str:
     return _bound(body)
 
 
-@mcp.tool()
+@_tool()
 @logged_tool
 def rlm_inspect_context(ctx_id: str, preview_lines: int = 40) -> str:
     """Return metadata plus a small bounded preview (head lines) for a loaded
@@ -289,7 +324,7 @@ def rlm_inspect_context(ctx_id: str, preview_lines: int = 40) -> str:
     return _bound(f"## Context {ctx_id}\n{_meta_block(meta)}\n\n### Preview (first {preview_lines} lines)\n```\n{preview}\n```")
 
 
-@mcp.tool()
+@_tool()
 @logged_tool
 def rlm_chunk_context(ctx_id: str, strategy: str = "", size: int = 0, overlap: int = 0) -> str:
     """Split a loaded context into chunks and record the chunk index on the
@@ -331,7 +366,7 @@ def rlm_chunk_context(ctx_id: str, strategy: str = "", size: int = 0, overlap: i
 # ============================================================================
 # Deterministic retrieval (no model call, no cost)
 # ============================================================================
-@mcp.tool()
+@_tool()
 @logged_tool
 def rlm_grep(ctx_id: str, pattern: str, ignore_case: bool = False, max_matches: int = 50) -> str:
     """Search a loaded context for a regex and return matching lines with 1-based line
@@ -356,7 +391,7 @@ def rlm_grep(ctx_id: str, pattern: str, ignore_case: bool = False, max_matches: 
         return _bound(f"ERROR: invalid regex '{pattern}': {exc}")
 
 
-@mcp.tool()
+@_tool()
 @logged_tool
 def rlm_read_chunk(ctx_id: str, chunk_index: int) -> str:
     """Return the raw content of a single chunk (bounded), after rlm_chunk_context.
@@ -380,7 +415,7 @@ def rlm_read_chunk(ctx_id: str, chunk_index: int) -> str:
 # ============================================================================
 # Context lifecycle
 # ============================================================================
-@mcp.tool()
+@_tool()
 @logged_tool
 def rlm_list_contexts() -> str:
     """List all loaded contexts with size / token / chunk metadata (no content).
@@ -398,7 +433,7 @@ def rlm_list_contexts() -> str:
     return _bound("\n".join(lines))
 
 
-@mcp.tool()
+@_tool()
 @logged_tool
 def rlm_drop_context(ctx_id: str) -> str:
     """Evict a loaded context from the store, freeing its metadata and any materialized
@@ -412,7 +447,7 @@ def rlm_drop_context(ctx_id: str) -> str:
 # ============================================================================
 # Querying
 # ============================================================================
-@mcp.tool()
+@_tool()
 @logged_tool
 def rlm_budget() -> str:
     """Show the session-window token budget: what this server has spent inside the
@@ -421,7 +456,7 @@ def rlm_budget() -> str:
     return batch.budget_report(DEPS)
 
 
-@mcp.tool()
+@_tool("sandbox")
 @logged_tool
 def rlm_query(ctx_id: str, question: str, model_override: str = "", fresh: bool = False) -> str:
     """Answer a question over a loaded context using the FULL recursive RLM loop:
@@ -493,7 +528,7 @@ def rlm_query(ctx_id: str, question: str, model_override: str = "", fresh: bool 
     )
 
 
-@mcp.tool()
+@_tool()
 @logged_tool
 def rlm_sub_query(ctx_id: str, prompt: str, chunk_index: int = -1) -> str:
     """Run a single cheap sub-model query over a context (or one chunk of it).
@@ -503,7 +538,7 @@ def rlm_sub_query(ctx_id: str, prompt: str, chunk_index: int = -1) -> str:
     return batch.one(DEPS, ctx_id, prompt, chunk_index)
 
 
-@mcp.tool()
+@_tool()
 @logged_tool
 def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: bool = True,
                         fresh: bool = False) -> str:
@@ -532,7 +567,7 @@ def rlm_sub_query_batch(ctx_id: str, prompt: str, max_chunks: int = 0, reduce: b
 # ============================================================================
 # Sandbox REPL — exec & variables
 # ============================================================================
-@mcp.tool()
+@_tool("sandbox")
 @logged_tool
 def rlm_exec(code: str, ctx_id: str = "") -> str:
     """Execute Python in the configured sandbox. If ctx_id is given, that context is
@@ -558,7 +593,7 @@ def rlm_exec(code: str, ctx_id: str = "") -> str:
     return _bound(body)
 
 
-@mcp.tool()
+@_tool()
 @logged_tool
 def rlm_status(probe: bool = False) -> str:
     """Report configuration, the active auth + model-selection strategy with the
@@ -606,6 +641,7 @@ def rlm_status(probe: bool = False) -> str:
         f"- selection policy: {models.policy_name(mode)}\n"
         f"- resolved models → root: {root} | override: {override} | sub: {sub}\n"
         f"- configured models → root: {CFG.root_model} | override: {CFG.root_model_override} | sub: {CFG.sub_model}\n"
+        f"- exposed tools: {_exposed_line()}\n"
         f"- sandbox: {CFG.sandbox} (image: {CFG.sandbox_image})\n"
         f"- sandbox container: {_container_status()}\n"
         f"- auth (resolved): {transport.auth_label(CFG)}\n"
@@ -619,6 +655,20 @@ def rlm_status(probe: bool = False) -> str:
         f"{_cli_login_line()}"
         f"{_auth_probe_line() if probe else ''}"
     )
+
+
+def _exposed_line() -> str:
+    """Which tool groups are advertised, and — when one is withheld — which tools that
+    hides. Naming them matters: a withheld tool is INVISIBLE to the agent, so the only
+    symptom of a misconfigured `allow` is an agent that never mentions rlm_query. An
+    operator reading this line sees the cause instead of guessing at the silence.
+    """
+    line = ", ".join(CFG.allow)
+    if not CFG.allows_sandbox:
+        line += ("   (WITHHELD: rlm_exec, rlm_query — the two tools needing the code "
+                 "REPL. Enable with `allow: [no-sandbox, sandbox]` in "
+                 f"{cfg_path_hint()} or RLM_ALLOW=no-sandbox,sandbox)")
+    return line
 
 
 def _docker_reachability() -> str:

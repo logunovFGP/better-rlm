@@ -130,6 +130,17 @@ _DEFAULTS: dict[str, Any] = {
     # partial answer, instead of burning the remaining iterations. 0 = unlimited.
     "query_max_errors": 5,
     "max_output_tokens": 32768,
+    # Which TOOL GROUPS this server EXPOSES. "no-sandbox" is the fourteen tools that
+    # need nothing but the context store and a model call; "sandbox" is rlm_exec and
+    # rlm_query, the only two that need the code REPL. A group left out here is NOT
+    # REGISTERED — it never appears in the agent's tool list at all.
+    #
+    # The default omits "sandbox" because the Docker daemon is the least reliable
+    # dependency in this server, and a tool an agent CAN see is a tool it will call:
+    # every such call on a host with no daemon is a wasted round trip that ends in the
+    # same guidance message. Absence routes the agent to rlm_grep / rlm_sub_query on the
+    # first try. Opt back in with `allow: [no-sandbox, sandbox]` or RLM_ALLOW.
+    "allow": ["no-sandbox"],
     "sandbox": "docker",
     "sandbox_image": "rlm-sandbox",
     "sandbox_timeout_s": 300,
@@ -239,6 +250,39 @@ _DEFAULTS: dict[str, Any] = {
 }
 
 
+#: The tool groups `allow` may name. "sandbox" is exactly the two tools that need the
+#: code REPL (rlm_exec, rlm_query); "no-sandbox" is every other tool. Kept here rather
+#: than in server.py so the validator can reject a typo without importing the server.
+TOOL_GROUPS = ("no-sandbox", "sandbox")
+
+
+def _allow(value: Any) -> tuple[str, ...]:
+    """Validate the exposed tool groups, from a YAML list or a comma-separated env var.
+
+    Rejects rather than degrades, for the same reason ``_sandbox`` does: the failure
+    mode of a silently-ignored typo here is a server that exposes a group the operator
+    meant to withhold, or withholds one they meant to expose, with nothing in the logs
+    saying so. An empty set is rejected too — a server with no tools is a mistake, never
+    an intent.
+    """
+    # A scalar is coerced, never iterated. `list(5)` raises TypeError, which would report
+    # a config typo as "'int' object is not iterable" -- naming neither `allow` nor the
+    # valid groups. `_sandbox` coerces with str() for the same reason. A mapping is not a
+    # list of groups either, however conveniently it iterates its keys.
+    raw = (list(value) if isinstance(value, (list, tuple, set, frozenset))
+           else str("" if value is None else value).split(","))
+    # dict.fromkeys de-dupes while preserving order, so `allow` reads back as written.
+    groups = tuple(dict.fromkeys(str(g).strip().lower() for g in raw if str(g).strip()))
+    unknown = [g for g in groups if g not in TOOL_GROUPS]
+    if unknown or not groups:
+        raise ValueError(
+            f"allow must be a non-empty subset of {list(TOOL_GROUPS)}, got {value!r}"
+            + (f" — unknown group(s): {unknown}" if unknown else "")
+            + " (check config.yaml or the RLM_ALLOW env var)."
+        )
+    return groups
+
+
 def _sandbox(value: str) -> str:
     """Validate the sandbox backend. ``use_docker`` is ``sandbox == "docker"``, so an
     unrecognised value would silently mean *host execution of model-written Python*.
@@ -273,6 +317,7 @@ class Config:
     query_timeout_s: int
     query_max_errors: int
     max_output_tokens: int
+    allow: tuple[str, ...]
     sandbox: str
     sandbox_image: str
     sandbox_timeout_s: int
@@ -326,6 +371,11 @@ class Config:
     def use_docker(self) -> bool:
         return self.sandbox == "docker"
 
+    @property
+    def allows_sandbox(self) -> bool:
+        """Are rlm_exec / rlm_query exposed at all? Off by default — see `allow`."""
+        return "sandbox" in self.allow
+
 
 def load_config() -> Config:
     """Build the resolved Config from defaults overlaid with config.yaml."""
@@ -337,6 +387,10 @@ def load_config() -> Config:
         max_depth=int(m["max_depth"]),
         max_iterations=int(m["max_iterations"]),
         max_output_tokens=int(m["max_output_tokens"]),
+        # RLM_ALLOW env wins over config.yaml, same as mode/sandbox/provider, so the
+        # exposed tool set is settable at registration:
+        #   claude mcp add rlm -e RLM_ALLOW=no-sandbox,sandbox -- ...
+        allow=_allow(os.getenv("RLM_ALLOW") or m["allow"]),
         # RLM_SANDBOX env wins over config.yaml, same as mode/provider — so a host with
         # no Docker daemon selects `local` at registration instead of committing an
         # unsafe default. Validated: a typo must not silently become host exec.

@@ -23,6 +23,15 @@ query_timeout_s: 1800                  # wall-clock ceiling for ONE rlm_query. m
 query_max_errors: 5                    # consecutive failed iterations before the engine stops and
                                        # returns the best partial answer. 0 = unlimited.
 max_output_tokens: 32768
+allow: [no-sandbox]                    # which TOOL GROUPS this server exposes to the agent.
+                                       # no-sandbox = the 14 tools needing only the store and a
+                                       # model call. sandbox = rlm_exec + rlm_query, the only two
+                                       # needing the code REPL. A group left out is NOT REGISTERED
+                                       # — the agent never sees those tools, so it cannot waste a
+                                       # call discovering the Docker daemon is down. Docker is the
+                                       # least reliable dependency here, so it is opt-in:
+                                       #   allow: [no-sandbox, sandbox]
+                                       # Override per-launch with RLM_ALLOW=no-sandbox,sandbox.
 sandbox: docker                        # docker (default, sandboxed) | local (host exec — documented risk).
                                        # Override per-launch with RLM_SANDBOX=local (e.g. when no
                                        # Docker daemon is available) — that keeps the committed
