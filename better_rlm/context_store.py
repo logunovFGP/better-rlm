@@ -342,8 +342,12 @@ class ContextStore:
         truncated = False
         written = 0
         with tempfile.TemporaryFile() as errf:
+            # stdin=DEVNULL, never inherited: the MCP server's stdin is the protocol pipe,
+            # with a thread parked in a blocking read of it. On Windows a child touching
+            # that handle at startup -- any Python program does -- waits behind the read
+            # and dies at timeout_s with zero bytes.
             proc = subprocess.Popen(
-                argv, stdout=subprocess.PIPE,
+                argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT if merge_stderr else errf)
 
             def _on_timeout() -> None:

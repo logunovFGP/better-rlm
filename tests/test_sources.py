@@ -256,6 +256,31 @@ def test_load_command_truncates_at_max_bytes(cfg):
     assert run.meta.bytes == 5000
 
 
+def test_load_command_never_hands_the_child_the_servers_stdin(cfg, monkeypatch):
+    """An MCP stdio server keeps a thread parked in a blocking read of its stdin. On
+    Windows a child that inherits that handle and touches it at startup waits behind the
+    read -- every Python program does, so a source running `python -c "print(1)"` hung
+    until timeout_s with ZERO BYTES under the live server while the same command ran in
+    0.1s from a shell. gcloud, az and aws are Python too. docker, claude and icacls did
+    not hang, which is why this spawn -- the one running ARBITRARY operator commands --
+    is the one guarded. Reproducing it needs a live server on Windows, so this pins the
+    cause instead: a source command gets no stdin at all."""
+    import subprocess
+
+    seen: dict = {}
+    real = subprocess.Popen
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    run = ContextStore(cfg).load_command(
+        [PY, "-c", "print('ok')"], source="source:t", timeout_s=30, max_bytes=1 << 20)
+    assert run.ok
+    assert seen.get("stdin") is subprocess.DEVNULL
+
+
 def test_load_command_kills_a_command_that_overruns_its_timeout(cfg):
     store = ContextStore(cfg)
     run = store.load_command(
