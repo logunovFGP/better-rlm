@@ -21,9 +21,6 @@ on:
         description: 'Verify and build only: tag nothing, publish nothing'
         type: boolean
         default: false
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'   # v1.2.3 only — not v1.2, not v1.2.3-rc1
 
 # One release per version at a time. Without this, two dispatches seconds apart both
 # clear the "already released" gate before either has created the release, and both
